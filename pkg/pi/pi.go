@@ -66,6 +66,10 @@ type App struct {
 	startErr      error
 	stopDone      chan struct{}
 	stopErr       error
+	pureBuild     bool
+	resources     []managedResource
+	waitDone      chan struct{}
+	httpSetup     sync.Once
 }
 
 func (a *App) runOnStartHooks(ctx context.Context) error {
@@ -189,7 +193,12 @@ func (a *App) shutdown(ctx context.Context) error {
 	}
 	err = errors.Join(err, a.runOnStopHooks(ctx))
 
-	if a.container != nil {
+	if a.pureBuild {
+		err = errors.Join(err, a.stopResources(ctx))
+		for _, conn := range a.container.WSManager.ListConnections() {
+			a.container.WSManager.CloseConnection(conn)
+		}
+	} else if a.container != nil {
 		err = errors.Join(err, a.container.Close())
 	}
 
@@ -222,6 +231,10 @@ func isPortAvailable(port int) bool {
 }
 
 func (a *App) httpServerSetup() {
+	a.httpSetup.Do(a.setupHTTPRoutes)
+}
+
+func (a *App) setupHTTPRoutes() {
 	// TODO: find a way to read REQUEST_TIMEOUT config only once and log it there. currently doing it twice one for populating
 	// the value and other for logging
 	requestTimeout := a.Config.Get("REQUEST_TIMEOUT")

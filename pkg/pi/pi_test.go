@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -741,9 +742,8 @@ func Test_UseMiddleware(t *testing.T) {
 		return "success", nil
 	})
 
-	go app.Run()
-
-	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, app.Start(t.Context()))
+	t.Cleanup(func() { require.NoError(t, app.Stop(context.Background())) })
 
 	var netClient = &http.Client{
 		Timeout: 200 * time.Millisecond,
@@ -827,7 +827,9 @@ func TestUseMiddlewareWithContainer(t *testing.T) {
 func Test_APIKeyAuthMiddleware(t *testing.T) {
 	port := testutil.GetFreePort(t)
 
-	c, _ := infra.NewMockContainer(t)
+	c, mocks := infra.NewMockContainer(t)
+	mocks.PubSub.EXPECT().Close().Return(nil)
+	mocks.SQL.ExpectClose()
 
 	app := &App{
 		httpServer: &httpServer{
@@ -852,9 +854,8 @@ func Test_APIKeyAuthMiddleware(t *testing.T) {
 		return "success", nil
 	})
 
-	go app.Run()
-
-	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, app.Start(t.Context()))
+	t.Cleanup(func() { require.NoError(t, app.Stop(context.Background())) })
 
 	var netClient = &http.Client{
 		Timeout: 200 * time.Millisecond,
@@ -877,7 +878,7 @@ func Test_APIKeyAuthMiddleware(t *testing.T) {
 }
 
 func Test_SwaggerEndpoints(t *testing.T) {
-	configs := testutil.NewServerConfigs(t)
+	testutil.NewServerConfigs(t)
 
 	// Create the openapi.json file within the static directory
 	openAPIFilePath := filepath.Join("static", OpenAPIJSON)
@@ -897,19 +898,19 @@ func Test_SwaggerEndpoints(t *testing.T) {
 
 	app := New()
 	app.httpRegistered = true
-	app.httpServer.port = configs.HTTPPort
-
-	go app.Run()
-
-	time.Sleep(100 * time.Millisecond)
+	app.httpServer.address = "127.0.0.1:0"
+	app.metricServer = nil
+	require.NoError(t, app.Start(t.Context()))
+	t.Cleanup(func() { require.NoError(t, app.Stop(context.Background())) })
 
 	var netClient = &http.Client{
 		Timeout: 200 * time.Millisecond,
 	}
 
 	re, _ := http.NewRequestWithContext(t.Context(), http.MethodGet,
-		configs.HTTPHost+"/.well-known/swagger", http.NoBody)
+		"http://"+app.HTTPAddress()+"/.well-known/swagger", http.NoBody)
 	resp, err := netClient.Do(re)
+	require.NoError(t, err, "Expected error to be nil, got : %v", err)
 
 	defer func() {
 		err = resp.Body.Close()
@@ -918,7 +919,6 @@ func Test_SwaggerEndpoints(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, err, "Expected error to be nil, got : %v", err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
 }
@@ -977,9 +977,9 @@ func setupTestEnvironment(t *testing.T) (host string, htmlContent []byte) {
 	app.httpRegistered = true
 	app.httpServer.port = configs.HTTPPort
 
-	go app.Run()
-
-	time.Sleep(100 * time.Millisecond)
+	app.metricServer = nil
+	require.NoError(t, app.Start(t.Context()))
+	t.Cleanup(func() { require.NoError(t, app.Stop(context.Background())) })
 
 	host = configs.HTTPHost
 

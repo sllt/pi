@@ -47,6 +47,8 @@ const (
 // etc. which is shared across is placed here.
 type Container struct {
 	logging.Logger
+	// Validate is an optional per-instance request validator. Nil keeps legacy validation.
+	Validate func(any) error
 
 	appName    string
 	appVersion string
@@ -175,8 +177,10 @@ func (c *Container) Close() error {
 		err = errors.Join(err, c.PubSub.Close())
 	}
 
-	for _, conn := range c.WSManager.ListConnections() {
-		c.WSManager.CloseConnection(conn)
+	if c.WSManager != nil {
+		for _, conn := range c.WSManager.ListConnections() {
+			c.WSManager.CloseConnection(conn)
+		}
 	}
 
 	return err

@@ -49,10 +49,8 @@ func TestRun_ServerStartsListening(t *testing.T) {
 	}
 
 	// Start the server
-	go server.run(c)
-
-	// Wait for the server to start listening
-	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, server.run(c))
+	t.Cleanup(func() { require.NoError(t, server.Shutdown(context.Background())) })
 
 	var netClient = &http.Client{
 		Timeout: 200 * time.Millisecond,

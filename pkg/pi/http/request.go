@@ -27,7 +27,8 @@ var (
 // Request is an abstraction over the underlying http.Request. This abstraction is useful because it allows us
 // to create applications without being aware of the transport. cmd.Request is another such abstraction.
 type Request struct {
-	req *http.Request
+	req      *http.Request
+	validate func(any) error
 }
 
 // NewRequest creates a new Pi Request instance from the given http.Request.
@@ -35,6 +36,11 @@ func NewRequest(r *http.Request) *Request {
 	return &Request{
 		req: r,
 	}
+}
+
+// NewRequestWithValidator uses an app-owned validator; nil preserves legacy behavior.
+func NewRequestWithValidator(r *http.Request, validate func(any) error) *Request {
+	return &Request{req: r, validate: validate}
 }
 
 // Param returns the query parameter with the given key.
@@ -81,6 +87,9 @@ func (r *Request) Bind(i any) error {
 	}
 
 	// Validate the struct after binding
+	if r.validate != nil {
+		return r.validate(i)
+	}
 	return validateStruct(i)
 }
 

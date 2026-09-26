@@ -66,7 +66,7 @@ func (a *App) RunContext(ctx context.Context) error {
 
 	stopErr := a.Stop(shutdownCtx)
 	cause := context.Cause(runtimeCtx)
-	if cause == nil || errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+	if cause == nil || errors.Is(cause, context.Canceled) || (!a.pureBuild && errors.Is(cause, context.DeadlineExceeded)) {
 		return stopErr
 	}
 
@@ -99,11 +99,24 @@ func (a *App) Start(ctx context.Context) error {
 	a.runtimeState = lifecycleStarting
 	a.startupDone = make(chan struct{})
 	a.startDone = make(chan struct{})
-	a.runtimeCtx, a.runtimeCancel = context.WithCancelCause(ctx)
+	runtimeParent := ctx
+	if a.pureBuild {
+		runtimeParent = context.WithoutCancel(ctx)
+	}
+	a.runtimeCtx, a.runtimeCancel = context.WithCancelCause(runtimeParent)
 	runtimeCtx := a.runtimeCtx
 	a.runtimeMu.Unlock()
 
-	err := a.startOnce(runtimeCtx)
+	var err error
+	if a.pureBuild {
+		startupCtx, cancel := context.WithCancel(ctx)
+		detach := context.AfterFunc(runtimeCtx, cancel)
+		err = a.startPure(startupCtx, runtimeCtx)
+		detach()
+		cancel()
+	} else {
+		err = a.startOnce(runtimeCtx)
+	}
 	if err != nil {
 		a.requestShutdown(err)
 	}
@@ -120,6 +133,9 @@ func (a *App) Start(ctx context.Context) error {
 		a.runtimeState = lifecycleRunning
 		close(a.startDone)
 		a.runtimeMu.Unlock()
+		if a.pureBuild {
+			go a.stopWhenCanceled(runtimeCtx)
+		}
 		return nil
 	}
 	a.runtimeMu.Unlock()
@@ -130,6 +146,69 @@ func (a *App) Start(ctx context.Context) error {
 	close(a.startDone)
 	a.runtimeMu.Unlock()
 	return err
+}
+
+func (a *App) startPure(startupCtx, runtimeCtx context.Context) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("%w: %v", errRuntimeStartPanic, v)
+		}
+	}()
+	if err = a.startResources(startupCtx); err != nil {
+		return err
+	}
+	if err = a.handleStartupHooks(startupCtx); err != nil {
+		return err
+	}
+	if err = startupCtx.Err(); err != nil {
+		return err
+	}
+	if err = a.startAllServers(runtimeCtx); err != nil {
+		return err
+	}
+	return startupCtx.Err()
+}
+
+func (a *App) stopWhenCanceled(ctx context.Context) {
+	<-ctx.Done()
+	timeout, _ := a.shutdownTimeout()
+	stopCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_ = a.Stop(stopCtx)
+}
+
+// Wait waits for complete cleanup, including owned resources, and returns the
+// runtime cause plus cleanup errors. Its context only bounds this caller's wait.
+// Legacy New callers should continue using RunContext; Wait requires Build.
+func (a *App) Wait(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.runtimeMu.Lock()
+	state := a.runtimeState
+	done := a.waitDone
+	a.runtimeMu.Unlock()
+	if done == nil {
+		return errors.New("Wait requires an app created with Build")
+	}
+	if state == lifecycleNew {
+		return errors.New("application has not started")
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	var cause error
+	if a.runtimeCtx != nil {
+		cause = context.Cause(a.runtimeCtx)
+	}
+	if errors.Is(cause, context.Canceled) {
+		cause = nil
+	}
+	return errors.Join(cause, a.stopErr)
 }
 
 func (a *App) startOnce(ctx context.Context) (err error) {

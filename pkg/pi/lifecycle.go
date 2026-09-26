@@ -155,6 +155,9 @@ func (a *App) finishStop(ctx context.Context, startupDone <-chan struct{}) {
 		a.stopErr = errors.Join(err, ctx.Err())
 		a.runtimeState = lifecycleStopped
 		close(a.stopDone)
+		if a.waitDone != nil {
+			close(a.waitDone)
+		}
 		a.runtimeMu.Unlock()
 	}()
 	if startupDone != nil {

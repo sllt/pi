@@ -60,7 +60,7 @@ func (el *ErrorLogEntry) PrettyPrint(writer io.Writer) {
 
 func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	responder := piHTTP.NewResponder(w, r.Method)
-	c := newContext(responder, piHTTP.NewRequest(r), h.container)
+	c := newContext(responder, piHTTP.NewRequestWithValidator(r, h.container.Validate), h.container)
 
 	traceID := trace.SpanFromContext(r.Context()).SpanContext().TraceID().String()
 	if !trace.SpanFromContext(r.Context()).SpanContext().HasTraceID() {

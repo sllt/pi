@@ -23,7 +23,12 @@ var (
 )
 
 func initValidator() {
-	validate = validator.New(validator.WithRequiredStructEnabled())
+	validate, trans = createValidator(os.Getenv("VALIDATION_LOCALE"))
+}
+
+func createValidator(locale string) (*validator.Validate, ut.Translator) {
+	validate := validator.New(validator.WithRequiredStructEnabled())
+	var trans ut.Translator
 	validate.SetTagName("binding")
 
 	// Use "label" tag for field display name, fallback to "json" tag
@@ -42,8 +47,6 @@ func initValidator() {
 	})
 
 	// Initialize translator based on VALIDATION_LOCALE env
-	locale := os.Getenv("VALIDATION_LOCALE")
-
 	switch locale {
 	case "zh":
 		loc := zh.New()
@@ -55,6 +58,30 @@ func initValidator() {
 		uni := ut.New(loc, loc)
 		trans, _ = uni.GetTranslator("en")
 		_ = enTrans.RegisterDefaultTranslations(validate, trans)
+	}
+	return validate, trans
+}
+
+// NewValidator owns both validation rules and their translator per app. Configure
+// it before concurrent requests; validation never reads the process environment.
+func NewValidator(locale string) func(any) error {
+	v, t := createValidator(locale)
+	return func(i any) error {
+		val := reflect.ValueOf(i)
+		for val.IsValid() && val.Kind() == reflect.Ptr {
+			if val.IsNil() {
+				return nil
+			}
+			val = val.Elem()
+		}
+		if !val.IsValid() || val.Kind() != reflect.Struct || !hasValidationTags(val.Type()) {
+			return nil
+		}
+		err := v.Struct(i)
+		if es, ok := err.(validator.ValidationErrors); ok {
+			return &ValidationError{Errors: es, structType: val.Type(), translator: t}
+		}
+		return err
 	}
 }
 
@@ -125,10 +152,14 @@ func hasValidationTags(t reflect.Type) bool {
 type ValidationError struct {
 	Errors     validator.ValidationErrors
 	structType reflect.Type
+	translator ut.Translator
 }
 
 func (e *ValidationError) Error() string {
-	t := getTranslator()
+	t := e.translator
+	if t == nil {
+		t = getTranslator()
+	}
 
 	var msgs []string
 

@@ -1,5 +1,35 @@
 # Pi
 
+### 显式构造与宿主集成（v0.4.0）
+
+```go
+cfg, err := config.LoadSnapshot("configs", os.Environ()) // .env < 环境覆盖文件 < 显式环境
+if err != nil { return err }
+app, err := pi.Build(pi.WithConfig(cfg.Values()), pi.WithManagedSQL())
+if err != nil { return err }
+// 注册路由、OnStart/OnStop、Go workers，然后由宿主调用 Start/Stop。
+```
+
+`Build` 不读取隐式环境，不连接数据库、监听端口、安装全局 telemetry provider 或启动后台任务；
+配置快照与默认校验器按 App 隔离，`Snapshot.Redacted()` 可用于脱敏输出。`WithLogger`、`WithMetrics`、
+`WithValidator` 支持注入；指标监听默认关闭，启用时须提供 `WithMetricsHandler`，由应用显式管理 exporter。
+`WithManagedSQL` 在构造时提供稳定的 `Container().SQL` 句柄，`Start` 在应用 Hook 前激活连接；
+构造后的查询返回 `sql.ErrNotStarted`。不需要数据库时省略该选项。
+
+外部 SQL 用 `WithSQL(db, pi.Borrowed)` 或 `pi.Owned` 声明关闭责任。其他资源用 `WithResource`：
+Owned 按登记顺序启动、逆序关闭，失败的 Start 也执行 Stop；Borrowed 不执行启动/关闭 Hook。
+仅已成功进入启动的资源与已经持有的 Owned 资源参与清理。构造参数不能在 Start 后修改。
+
+新入口的 `Start(ctx)` 仅把 ctx 用作启动预算；运行期由 `Stop`、`RunContext` 的外部取消或 fatal Worker
+错误结束。`Wait(ctx)` 等待完整清理并返回运行错误和清理错误，等待者超时不取消资源清理。
+单一启动/关闭、失败回滚、停止后不重启语义保持不变。旧 `New()` 保留环境加载、自动连接和旧 Start
+父 context 契约；迁移到 Build 时必须显式选用资源。完整观测 provider 管理与后台重连监督仍是后续范围。
+
+`app.HTTPHandler()` 编译完整路由但不监听端口；`app.Handler(fn)` 包装单个 Handler；`app.NewContext(ctx)`
+提供应用依赖但不授予身份。`pkg/pi/testkit` 提供自动清理、HTTP 请求与生命周期 Probe。
+路由注册应在首次 HTTPHandler/Start 前完成。示例见 `examples/build`；Fx 与一次性迁移的参考实现分别
+位于 pi-layout 的 `internal/bootstrap` 和 `internal/migrationcmd`。
+
 ### Reproducible projects (v0.3.2)
 
 Install a specific CLI (`go install github.com/sllt/pi/cmd/pi@v0.3.2`), then run

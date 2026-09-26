@@ -31,3 +31,13 @@ func TestQuotePostgresValue(t *testing.T) {
 		require.Equal(t, want, quotePostgresValue(input))
 	}
 }
+
+func TestMySQLConnectorUsesSnapshotTLS(t *testing.T) {
+	t.Setenv("DB_TLS_CA_CERT", "/must-not-read-ambient-certificate.pem")
+	cfg := &DBConfig{Dialect: "mysql", HostName: "127.0.0.1", Port: "3306", Database: "test", SSLMode: "verify-full"}
+	connector, err := snapshotMySQLConnector(cfg, config.NewSnapshot(nil))
+	require.NoError(t, err)
+	require.NotNil(t, connector)
+	_, err = snapshotMySQLConnector(cfg, config.NewSnapshot(map[string]string{"DB_TLS_CLIENT_CERT": "half.pem"}))
+	require.ErrorContains(t, err, "must be configured together")
+}

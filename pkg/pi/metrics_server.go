@@ -14,8 +14,9 @@ import (
 
 type metricServer struct {
 	listenerState
-	port int
-	srv  *http.Server
+	port    int
+	srv     *http.Server
+	handler http.Handler
 }
 
 func newMetricServer(port int) *metricServer {
@@ -38,9 +39,13 @@ func (m *metricServer) start(c *infra.Container, onError func(error)) error {
 		c.Logf("Starting metrics server on port: %d", m.port)
 
 		addr := m.listenAddress(m.port)
+		h := m.handler
+		if h == nil {
+			h = metrics.GetHandler(c.Metrics())
+		}
 		m.srv = &http.Server{
 			Addr:              addr,
-			Handler:           metrics.GetHandler(c.Metrics()),
+			Handler:           h,
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 
