@@ -18,19 +18,29 @@ func ShutdownWithContext(ctx context.Context, shutdownFunc func(ctx context.Cont
 		errCh <- shutdownFunc(ctx) // Run shutdownFunc in a goroutine and send any error to errCh
 	}()
 
-	// Wait for either the context to be done or shutdownFunc to complete
+	// Both signals may be ready. Always check the budget after selecting so a
+	// graceful result cannot bypass force-close when cancellation has occurred.
+	var err error
 	select {
-	case <-ctx.Done(): // Context timeout reached
-		err := ctx.Err()
-
-		if forceCloseFunc != nil {
-			err = errors.Join(err, forceCloseFunc()) // Attempt force close if available
+	case err = <-errCh:
+	case <-ctx.Done():
+		// Keep an already available graceful error without waiting past the budget.
+		select {
+		case err = <-errCh:
+		default:
 		}
-
-		return err
-	case err := <-errCh:
-		return err
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if err == nil {
+			err = ctxErr
+		} else if !errors.Is(err, ctxErr) {
+			err = errors.Join(err, ctxErr)
+		}
+		if forceCloseFunc != nil {
+			err = errors.Join(err, forceCloseFunc())
+		}
+	}
+	return err
 }
 
 func getShutdownTimeoutFromConfig(cfg config.Config) (time.Duration, error) {

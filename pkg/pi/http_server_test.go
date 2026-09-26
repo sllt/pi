@@ -97,25 +97,18 @@ func TestShutdown_ServerStopsListening(t *testing.T) {
 	// Create an instance of httpServer
 	server := &httpServer{
 		router: router,
-		port:   8080,
+		port:   testutil.GetFreePort(t),
 	}
 
-	// Start the server
-	go server.run(c)
+	// Startup is synchronous, as it is in App.Start. Sleeping after a goroutine
+	// launch does not synchronize publication of server.srv with Shutdown.
+	require.NoError(t, server.start(c, func(err error) { c.Logger.Error(err) }))
 
 	// Create a context with a timeout to test the shutdown
-	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	errChan := make(chan error, 1)
-
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-
-		errChan <- server.Shutdown(ctx)
-	}()
-
-	err := <-errChan
+	err := server.Shutdown(ctx)
 
 	require.NoError(t, err, "TEST Failed.\n")
 }
@@ -135,26 +128,16 @@ func TestShutdown_ServerContextDeadline(t *testing.T) {
 	// Create an instance of httpServer
 	server := &httpServer{
 		router: router,
-		port:   8080,
+		port:   testutil.GetFreePort(t),
 	}
 
-	// Start the server
-	go server.run(c)
+	require.NoError(t, server.start(c, func(err error) { c.Logger.Error(err) }))
 
 	// Create a context with a timeout to test the shutdown
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer cancel()
 
-	// Simulate a delay in the shutdown process to trigger context timeout
-	shutdownCh := make(chan error, 1)
-
-	go func() {
-		time.Sleep(100 * time.Millisecond) // Delay longer than the context timeout
-
-		shutdownCh <- server.Shutdown(ctx)
-	}()
-
-	err := <-shutdownCh
+	err := server.Shutdown(ctx)
 
 	require.ErrorIs(t, err, context.DeadlineExceeded, "Expected context deadline exceeded error")
 }

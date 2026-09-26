@@ -42,7 +42,13 @@ func (a *App) RunContext(ctx context.Context) error {
 		return nil
 	}
 
-	<-runtimeCtx.Done()
+	select {
+	case <-runtimeCtx.Done():
+	case <-ctx.Done():
+		// Start may have reused a runtime owned by an earlier caller. Once
+		// startup succeeds, RunContext also owns shutdown on its own cancellation.
+		a.requestShutdown(context.Cause(ctx))
+	}
 
 	timeout, err := a.shutdownTimeout()
 	if err != nil {

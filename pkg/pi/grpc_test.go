@@ -270,12 +270,9 @@ func TestGRPC_ServerRun(t *testing.T) {
 }
 
 func TestGRPC_ServerShutdown(t *testing.T) {
-	c, _, g := setupTestGRPCServer(t, 9999, false)
+	c, _, g := setupTestGRPCServer(t, testutil.GetFreePort(t), false)
 
-	go g.Run(c)
-
-	// Wait for the server to start
-	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, g.Run(c))
 
 	// Create a context with a timeout to test the shutdown
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
@@ -286,26 +283,18 @@ func TestGRPC_ServerShutdown(t *testing.T) {
 }
 
 func TestGRPC_ServerShutdown_ContextCanceled(t *testing.T) {
-	c, _, g := setupTestGRPCServer(t, 9999, false)
+	c, _, g := setupTestGRPCServer(t, testutil.GetFreePort(t), false)
 
-	go g.Run(c)
-
-	// Wait for the server to start
-	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, g.Run(c))
 
 	// Create a context that can be canceled
 	ctx, cancel := context.WithCancel(t.Context())
 
-	errChan := make(chan error, 1)
-
-	go func() {
-		errChan <- g.Shutdown(ctx)
-	}()
-
-	// Cancel the context immediately
+	// Cancellation must precede shutdown; otherwise a successful graceful stop
+	// may legitimately finish before this test cancels its context.
 	cancel()
 
-	err := <-errChan
+	err := g.Shutdown(ctx)
 	require.ErrorContains(t, err, "context canceled", "Expected error due to context cancellation")
 }
 

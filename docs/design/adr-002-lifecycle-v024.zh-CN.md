@@ -13,6 +13,8 @@
 - 启动失败先进入一次回滚，等待者读取同一启动错误及已取得的回滚错误。回滚使用
   `SHUTDOWN_GRACE_PERIOD`；预算耗尽时启动可返回错误，实际关闭仍由唯一执行者负责。
 - stopping/stopped 后不允许重新启动，包括初始化失败后的实例；重试需创建新 App。
+- `RunContext(ctx)` 在启动成功后同时观察自己的 ctx 与运行期 context；即使复用
+  之前 Start 建立的 runtime，调用方取消仍会驱动关闭，并保留自定义取消原因。
 - Stop 与 startup 并发时，先取消运行期 context，再等待 startup 不再增加资源，
   才执行清理。已启动 HTTP 后发生 gRPC 监听失败时，HTTP 监听也会回滚。
 
@@ -46,6 +48,10 @@ context 错误；已进入的 Hook 不会重跑。Container 关闭错误和执�
 已经执行，也不承诺任意外部 SDK 的强制关闭已经完成全部内部工作。HTTP/gRPC
 继续使用现有 graceful/force-close 机制；cron、telemetry 和适配器内部循环的统一
 监督属于后续版本。
+
+`ShutdownWithContext` 在选取优雅关闭结果后仍检查执行预算；结果与取消同时就绪
+时，不能因选中了结果通道而返回成功或跳过强制关闭。若预算已取消/到期，强制关闭
+回调执行一次，并保留 context 错误与强制关闭错误。
 
 ## 兼容与验证
 

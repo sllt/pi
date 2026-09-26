@@ -49,6 +49,7 @@ if err := app.RunContext(ctx); err != nil {
 
 - `Start(ctx)` runs `OnStart`, starts HTTP/gRPC/metrics servers, subscriptions, and background workers, then returns.
 - `RunContext(ctx)` calls `Start(ctx)`, blocks until the context is canceled or a managed worker/server requests shutdown, then calls `Stop(ctx)`.
+- After startup succeeds, `RunContext` observes its own caller context even when reusing a runtime created by an earlier `Start`; custom cancellation causes are preserved.
 - `Stop(ctx)` gracefully shuts down servers, cron, runtime tasks, stop hooks, container resources, and metrics.
 - Server startup failures are returned from `Start` / `RunContext`.
 - Concurrent `Start` calls share one startup result; hooks, listeners and workers start once. The first caller's context remains the runtime parent. Later callers only bound their own wait.
