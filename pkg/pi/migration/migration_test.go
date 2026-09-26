@@ -1,7 +1,9 @@
 package migration
 
 import (
+	"context"
 	"database/sql"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,7 +18,7 @@ func TestMigration_InvalidKeys(t *testing.T) {
 	logs := testutil.StderrOutputForFunc(func() {
 		c, _ := infra.NewMockContainer(t)
 
-		Run(map[int64]Migrate{
+		Run(t.Context(), map[int64]Migrate{
 			1: {UP: nil},
 		}, c)
 	})
@@ -29,7 +31,7 @@ func TestMigration_NoDatasource(t *testing.T) {
 		c := infra.NewContainer(nil)
 		c.Logger = logging.NewLogger(logging.DEBUG)
 
-		Run(map[int64]Migrate{
+		Run(t.Context(), map[int64]Migrate{
 			1: {UP: func(d Datasource) error {
 				_, err := d.SQL.Exec("CREATE table customer(id int not null);")
 				if err != nil {
@@ -77,7 +79,7 @@ func TestMigrationRunClickhouseSuccess(t *testing.T) {
 		mockClickHouse.EXPECT().Exec(gomock.Any(), insertChPiMigrationRow, int64(1),
 			"UP", gomock.Any(), gomock.Any()).Return(nil)
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 	})
 
 	assert.Contains(t, logs, "Migration 1 ran successfully")
@@ -103,7 +105,7 @@ func TestMigrationRunClickhouseMigrationFailure(t *testing.T) {
 		mockClickHouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).Return(nil)
 		mockClickHouse.EXPECT().Exec(gomock.Any(), "SELECT * FROM users").Return(sql.ErrConnDone)
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 
 		assert.True(t, mockClickHouse.ctrl.Satisfied())
 	})
@@ -128,7 +130,7 @@ func TestMigrationRunClickhouseMigrationFailureWhileCheckingTable(t *testing.T) 
 
 		mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(sql.ErrConnDone)
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 	})
 
 	assert.True(t, mockClickHouse.ctrl.Satisfied())
@@ -137,7 +139,7 @@ func TestMigrationRunClickhouseMigrationFailureWhileCheckingTable(t *testing.T) 
 func TestMigrationRunClickhouseCurrentMigrationEqualLastMigration(t *testing.T) {
 	logs := testutil.StdoutOutputForFunc(func() {
 		migrationMap := map[int64]Migrate{
-			0: {UP: func(d Datasource) error {
+			1: {UP: func(d Datasource) error {
 				err := d.Clickhouse.Exec(t.Context(), "SELECT * FROM users")
 				if err != nil {
 					return err
@@ -150,12 +152,19 @@ func TestMigrationRunClickhouseCurrentMigrationEqualLastMigration(t *testing.T) 
 		mockClickHouse, mockContainer := initializeClickHouseRunMocks(t)
 
 		mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(nil)
-		mockClickHouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).Return(nil)
+		mockClickHouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).
+			DoAndReturn(func(_ context.Context, dest any, _ string, _ ...any) error {
+				value := reflect.ValueOf(dest).Elem()
+				row := reflect.New(value.Type().Elem()).Elem()
+				row.FieldByName("Timestamp").SetInt(1)
+				value.Set(reflect.Append(value, row))
+				return nil
+			})
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 	})
 
-	assert.Contains(t, logs, "skipping migration 0")
+	assert.Contains(t, logs, "skipping migration 1")
 }
 
 func TestMigrationRunClickhouseCommitError(t *testing.T) {
@@ -179,7 +188,7 @@ func TestMigrationRunClickhouseCommitError(t *testing.T) {
 		mockClickHouse.EXPECT().Exec(gomock.Any(), insertChPiMigrationRow, int64(1),
 			"UP", gomock.Any(), gomock.Any()).Return(sql.ErrConnDone)
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 	})
 
 	assert.Contains(t, logs, "failed to commit migration, err: sql: connection is already closed")

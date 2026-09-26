@@ -70,22 +70,22 @@ func (ds arangoDS) apply(m migrator) migrator {
 	}
 }
 
-func (am arangoMigrator) checkAndCreateMigrationTable(c *infra.Container) error {
-	err := am.CreateCollection(context.Background(), arangoMigrationDB, arangoMigrationCollection, false)
+func (am arangoMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
+	err := am.CreateCollection(ctx, arangoMigrationDB, arangoMigrationCollection, false)
 	if err != nil {
 		c.Debug("Migration collection might already exist:", err)
 	}
 
-	return am.migrator.checkAndCreateMigrationTable(c)
+	return am.migrator.checkAndCreateMigrationTable(ctx, c)
 }
 
-func (am arangoMigrator) getLastMigration(c *infra.Container) (int64, error) {
+func (am arangoMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
 	var (
 		lastMigrations []int64
 		lastMigration  int64
 	)
 
-	err := c.ArangoDB.Query(context.Background(), arangoMigrationDB, getLastArangoMigration, nil, &lastMigrations)
+	err := c.ArangoDB.Query(ctx, arangoMigrationDB, getLastArangoMigration, nil, &lastMigrations)
 	if err != nil {
 		return -1, fmt.Errorf("arangodb: %w", err)
 	}
@@ -96,7 +96,7 @@ func (am arangoMigrator) getLastMigration(c *infra.Container) (int64, error) {
 
 	c.Debugf("ArangoDB last migration fetched value is: %v", lastMigration)
 
-	lm2, err := am.migrator.getLastMigration(c)
+	lm2, err := am.migrator.getLastMigration(ctx, c)
 	if err != nil {
 		return -1, err
 	}
@@ -104,15 +104,18 @@ func (am arangoMigrator) getLastMigration(c *infra.Container) (int64, error) {
 	return max(lastMigration, lm2), nil
 }
 
-func (am arangoMigrator) beginTransaction(c *infra.Container) transactionData {
-	data := am.migrator.beginTransaction(c)
+func (am arangoMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
+	data, err := am.migrator.beginTransaction(ctx, c)
+	if err != nil {
+		return transactionData{}, err
+	}
 
 	c.Debug("ArangoDB migrator begin successfully")
 
-	return data
+	return data, nil
 }
 
-func (am arangoMigrator) commitMigration(c *infra.Container, data transactionData) error {
+func (am arangoMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
 	bindVars := map[string]any{
 		"version":    data.MigrationNumber,
 		"method":     "UP",
@@ -122,18 +125,16 @@ func (am arangoMigrator) commitMigration(c *infra.Container, data transactionDat
 
 	var result []map[string]any
 
-	err := c.ArangoDB.Query(context.Background(), arangoMigrationDB, insertArangoMigrationRecord, bindVars, &result)
+	err := c.ArangoDB.Query(ctx, arangoMigrationDB, insertArangoMigrationRecord, bindVars, &result)
 	if err != nil {
 		return err
 	}
 
 	c.Debugf("Inserted record for migration %v in ArangoDB kite_migrations collection", data.MigrationNumber)
 
-	return am.migrator.commitMigration(c, data)
+	return am.migrator.commitMigration(ctx, c, data)
 }
 
-func (am arangoMigrator) rollback(c *infra.Container, data transactionData) {
-	am.migrator.rollback(c, data)
-
-	c.Fatalf("Migration %v failed and rolled back", data.MigrationNumber)
+func (am arangoMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
+	return am.migrator.rollback(ctx, c, data)
 }

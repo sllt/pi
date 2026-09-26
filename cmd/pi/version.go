@@ -1,4 +1,6 @@
 package main
 
-// CLIVersion is the version of the Pi CLI.
-const CLIVersion = "v0.2.4"
+import "github.com/sllt/pi/pkg/pi/version"
+
+// CLIVersion shares the framework's release version.
+const CLIVersion = version.Framework

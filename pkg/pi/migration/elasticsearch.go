@@ -44,7 +44,7 @@ func (ds elasticsearchDS) apply(m migrator) migrator {
 }
 
 // checkAndCreateMigrationTable creates the migration tracking index if it doesn't exist.
-func (em elasticsearchMigrator) checkAndCreateMigrationTable(c *infra.Container) error {
+func (em elasticsearchMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
 	// Check if the migration index exists
 	query := map[string]any{
 		"query": map[string]any{
@@ -53,7 +53,7 @@ func (em elasticsearchMigrator) checkAndCreateMigrationTable(c *infra.Container)
 		"size": 0,
 	}
 
-	_, err := c.Elasticsearch.Search(context.Background(), []string{elasticsearchMigrationIndex}, query)
+	_, err := c.Elasticsearch.Search(ctx, []string{elasticsearchMigrationIndex}, query)
 	if err != nil {
 		c.Debug("Migration index might already exist:", err)
 		// Index doesn't exist, create it
@@ -80,7 +80,7 @@ func (em elasticsearchMigrator) checkAndCreateMigrationTable(c *infra.Container)
 			},
 		}
 
-		err = c.Elasticsearch.CreateIndex(context.Background(), elasticsearchMigrationIndex, settings)
+		err = c.Elasticsearch.CreateIndex(ctx, elasticsearchMigrationIndex, settings)
 		if err != nil {
 			return fmt.Errorf("failed to create migration index: %w", err)
 		}
@@ -88,14 +88,14 @@ func (em elasticsearchMigrator) checkAndCreateMigrationTable(c *infra.Container)
 		c.Debugf("Created Elasticsearch migration index: %s", elasticsearchMigrationIndex)
 	}
 
-	return em.migrator.checkAndCreateMigrationTable(c)
+	return em.migrator.checkAndCreateMigrationTable(ctx, c)
 }
 
 // getLastMigration retrieves the latest migration version from Elasticsearch.
-func (em elasticsearchMigrator) getLastMigration(c *infra.Container) (int64, error) {
+func (em elasticsearchMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
 	var lastMigration int64
 
-	result, err := c.Elasticsearch.Search(context.Background(), []string{elasticsearchMigrationIndex}, getLastElasticsearchMigrationQuery())
+	result, err := c.Elasticsearch.Search(ctx, []string{elasticsearchMigrationIndex}, getLastElasticsearchMigrationQuery())
 	if err != nil {
 		return -1, fmt.Errorf("elasticsearch: %w", err)
 	}
@@ -103,7 +103,7 @@ func (em elasticsearchMigrator) getLastMigration(c *infra.Container) (int64, err
 	lastMigration = extractLastMigrationVersion(result)
 	c.Debugf("Elasticsearch last migration fetched value is: %v", lastMigration)
 
-	lm2, err := em.migrator.getLastMigration(c)
+	lm2, err := em.migrator.getLastMigration(ctx, c)
 	if err != nil {
 		return -1, err
 	}
@@ -142,12 +142,12 @@ func extractLastMigrationVersion(result map[string]any) int64 {
 }
 
 // beginTransaction starts a new transaction (Elasticsearch doesn't support traditional transactions).
-func (em elasticsearchMigrator) beginTransaction(c *infra.Container) transactionData {
-	return em.migrator.beginTransaction(c)
+func (em elasticsearchMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
+	return em.migrator.beginTransaction(ctx, c)
 }
 
 // commitMigration records the migration in the tracking index.
-func (em elasticsearchMigrator) commitMigration(c *infra.Container, data transactionData) error {
+func (em elasticsearchMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
 	migrationDoc := map[string]any{
 		"version":    data.MigrationNumber,
 		"method":     "UP",
@@ -158,18 +158,17 @@ func (em elasticsearchMigrator) commitMigration(c *infra.Container, data transac
 	// Use the migration number as the document ID for idempotency
 	docID := fmt.Sprintf("%d", data.MigrationNumber)
 
-	err := c.Elasticsearch.IndexDocument(context.Background(), elasticsearchMigrationIndex, docID, migrationDoc)
+	err := c.Elasticsearch.IndexDocument(ctx, elasticsearchMigrationIndex, docID, migrationDoc)
 	if err != nil {
 		return fmt.Errorf("failed to record migration: %w", err)
 	}
 
 	c.Debugf("Inserted record for migration %v in Elasticsearch kite_migrations index", data.MigrationNumber)
 
-	return em.migrator.commitMigration(c, data)
+	return em.migrator.commitMigration(ctx, c, data)
 }
 
 // rollback is a no-op for Elasticsearch migrations.
-func (em elasticsearchMigrator) rollback(c *infra.Container, data transactionData) {
-	em.migrator.rollback(c, data)
-	c.Fatalf("Migration %v failed.", data.MigrationNumber)
+func (em elasticsearchMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
+	return em.migrator.rollback(ctx, c, data)
 }

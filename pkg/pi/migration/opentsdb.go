@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,10 +45,21 @@ func (ds openTSDBDS) apply(m migrator) migrator {
 
 // checkAndCreateMigrationTable ensures the migration directory and file structure exists.
 // It only creates an empty file if no migration file exists at all.
-func (om *openTSDBMigrator) checkAndCreateMigrationTable(c *infra.Container) error {
+func (om *openTSDBMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
 	om.mu.Lock()
-	defer om.mu.Unlock()
+	err := om.ensureMigrationFile(c)
+	om.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if om.migrator == nil {
+		return nil
+	}
 
+	return om.migrator.checkAndCreateMigrationTable(ctx, c)
+}
+
+func (om *openTSDBMigrator) ensureMigrationFile(c *infra.Container) error {
 	// Ensure directory exists
 	dir := filepath.Dir(om.filePath)
 	if dir != "." {
@@ -115,7 +127,7 @@ func (om *openTSDBMigrator) createEmptyMigrationFile(c *infra.Container) error {
 }
 
 // getLastMigration reads JSON file to find the highest applied migration version.
-func (om *openTSDBMigrator) getLastMigration(c *infra.Container) (int64, error) {
+func (om *openTSDBMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
 	om.mu.Lock()
 	defer om.mu.Unlock()
 
@@ -134,7 +146,7 @@ func (om *openTSDBMigrator) getLastMigration(c *infra.Container) (int64, error) 
 
 	c.Debugf("JSON migration file last migration: %v", lastMigration)
 
-	baseMigration, err := om.migrator.getLastMigration(c)
+	baseMigration, err := om.migrator.getLastMigration(ctx, c)
 	if err != nil {
 		return -1, err
 	}
@@ -143,22 +155,30 @@ func (om *openTSDBMigrator) getLastMigration(c *infra.Container) (int64, error) 
 }
 
 // beginTransaction delegates to base migrator.
-func (om *openTSDBMigrator) beginTransaction(c *infra.Container) transactionData {
-	return om.migrator.beginTransaction(c)
+func (om *openTSDBMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
+	return om.migrator.beginTransaction(ctx, c)
 }
 
 // commitMigration records a new migration in a JSON file in a thread-safe manner.
 // It prevents duplicates and delegates the actual migration logic to the embedded migrator.
-func (om *openTSDBMigrator) commitMigration(c *infra.Container, data transactionData) error {
-	// First, delegate to base migrator to perform the actual migration
-	if err := om.migrator.commitMigration(c, data); err != nil {
+func (om *openTSDBMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
+	// Record this datasource first. SQL/Redis are placed deeper in the decorator
+	// chain and act as the authoritative state store, so they must commit last.
+	om.mu.Lock()
+	err := om.recordMigration(c, data)
+	om.mu.Unlock()
+	if err != nil {
 		return err
 	}
 
-	// Then record it in our JSON file
-	om.mu.Lock()
-	defer om.mu.Unlock()
+	if om.migrator == nil {
+		return nil
+	}
 
+	return om.migrator.commitMigration(ctx, c, data)
+}
+
+func (om *openTSDBMigrator) recordMigration(c *infra.Container, data transactionData) error {
 	// Load existing migrations from file
 	migrations, err := om.loadMigrationsUnsafe()
 	if err != nil {
@@ -266,18 +286,23 @@ func (om *openTSDBMigrator) writeMigrationsAtomically(migrations []tsdbMigration
 }
 
 // rollback logs the failure and handles cleanup.
-func (om *openTSDBMigrator) rollback(c *infra.Container, data transactionData) {
+func (om *openTSDBMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
 	// Clean up any temporary files
+	var rollbackErr error
 	tmpFilePath := om.filePath + ".tmp"
 	if _, err := os.Stat(tmpFilePath); err == nil {
 		if removeErr := os.Remove(tmpFilePath); removeErr != nil {
 			c.Debugf("Failed to clean up temporary migration file: %v", removeErr)
+			rollbackErr = removeErr
 		} else {
 			c.Debugf("Cleaned up temporary migration file: %s", tmpFilePath)
 		}
 	}
 
+	if om.migrator == nil {
+		return rollbackErr
+	}
+
 	// Delegate to base migrator
-	om.migrator.rollback(c, data)
-	c.Fatalf("Migration %v failed.", data.MigrationNumber)
+	return errorsJoin(rollbackErr, om.migrator.rollback(ctx, c, data))
 }

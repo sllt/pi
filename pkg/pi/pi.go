@@ -335,17 +335,69 @@ func (a *App) SubCommand(pattern string, handler Handler, options ...Options) {
 	a.cmd.addRoute(pattern, handler, options...)
 }
 
-// Migrate applies a set of migrations to the application's database.
+// Migrate applies a set of migrations to the application's database using context.Background.
 //
 // The migrationsMap argument is a map where the key is the version number of the migration
 // and the value is a migration.Migrate instance that implements the migration logic.
-func (a *App) Migrate(migrationsMap map[int64]migration.Migrate) {
-	// TODO : Move panic recovery at central location which will manage for all the different cases.
+//
+// The returned Result and error should be checked by production callers. Existing code may
+// still call Migrate as a statement and ignore the return values, but new code should prefer
+// MigrateContext so deployment cancellation and timeouts can propagate into migration work.
+func (a *App) Migrate(migrationsMap map[int64]migration.Migrate, opts ...migration.Option) (migration.Result, error) {
+	return a.MigrateContext(context.Background(), migrationsMap, opts...)
+}
+
+// MigrateContext applies migrations with caller-controlled cancellation and returns a structured result.
+func (a *App) MigrateContext(
+	ctx context.Context,
+	migrationsMap map[int64]migration.Migrate,
+	opts ...migration.Option,
+) (result migration.Result, err error) {
 	defer func() {
-		panicRecovery(recover(), a.container.Logger)
+		if re := recover(); re != nil {
+			panicRecovery(re, a.container.Logger)
+			err = fmt.Errorf("migration panic: %v", re)
+		}
 	}()
 
-	migration.Run(migrationsMap, a.container)
+	return migration.Run(ctx, migrationsMap, a.container, opts...)
+}
+
+// MustMigrate applies migrations and panics if they fail. It is intended for small programs
+// that deliberately want fail-fast startup semantics. Deployment commands should normally
+// call MigrateContext and handle the returned error explicitly.
+func (a *App) MustMigrate(migrationsMap map[int64]migration.Migrate, opts ...migration.Option) {
+	if _, err := a.Migrate(migrationsMap, opts...); err != nil {
+		panic(err)
+	}
+}
+
+// MigrationPlan builds a plan without running user migrations. It may initialize the state store.
+func (a *App) MigrationPlan(migrationsMap map[int64]migration.Migrate, opts ...migration.Option) (migration.PlanResult, error) {
+	return a.MigrationPlanContext(context.Background(), migrationsMap, opts...)
+}
+
+// MigrationPlanContext builds a plan using caller context. It may initialize the state store.
+func (a *App) MigrationPlanContext(
+	ctx context.Context,
+	migrationsMap map[int64]migration.Migrate,
+	opts ...migration.Option,
+) (migration.PlanResult, error) {
+	return migration.Plan(ctx, migrationsMap, a.container, opts...)
+}
+
+// MigrationStatus returns migration status. It may initialize the state store.
+func (a *App) MigrationStatus(migrationsMap map[int64]migration.Migrate, opts ...migration.Option) (migration.StatusResult, error) {
+	return a.MigrationStatusContext(context.Background(), migrationsMap, opts...)
+}
+
+// MigrationStatusContext returns status using caller context. It may initialize the state store.
+func (a *App) MigrationStatusContext(
+	ctx context.Context,
+	migrationsMap map[int64]migration.Migrate,
+	opts ...migration.Option,
+) (migration.StatusResult, error) {
+	return migration.Status(ctx, migrationsMap, a.container, opts...)
 }
 
 // Subscribe registers a handler for the given topic.

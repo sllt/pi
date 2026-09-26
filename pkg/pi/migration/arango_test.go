@@ -49,7 +49,7 @@ func Test_ArangoCheckAndCreateMigrationTable(t *testing.T) {
 	for i, tc := range testCases {
 		mockArango.EXPECT().CreateCollection(gomock.Any(), arangoMigrationDB, arangoMigrationCollection, false).Return(tc.err)
 
-		err := migratorWithArango.checkAndCreateMigrationTable(mockContainer)
+		err := migratorWithArango.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 		assert.Equal(t, tc.err, err, "TEST[%v]\n %v Failed! ", i, tc.desc)
 	}
@@ -72,7 +72,7 @@ func Test_ArangoGetLastMigration(t *testing.T) {
 	for i, tc := range testCases {
 		mockArango.EXPECT().Query(gomock.Any(), arangoMigrationDB, getLastArangoMigration, nil, &lastMigrations).Return(tc.err)
 
-		resp, err := migratorWithArango.getLastMigration(mockContainer)
+		resp, err := migratorWithArango.getLastMigration(t.Context(), mockContainer)
 
 		assert.Equal(t, tc.resp, resp, "TEST[%v]\n %v Failed! ", i, tc.desc)
 
@@ -112,7 +112,7 @@ func Test_ArangoCommitMigration(t *testing.T) {
 
 		mockArango.EXPECT().Query(gomock.Any(), arangoMigrationDB, insertArangoMigrationRecord, bindVars, gomock.Any()).Return(tc.err)
 
-		err := migratorWithArango.commitMigration(mockContainer, td)
+		err := migratorWithArango.commitMigration(t.Context(), mockContainer, td)
 
 		assert.Equal(t, tc.err, err, "TEST[%v]\n %v Failed! ", i, tc.desc)
 	}
@@ -121,7 +121,7 @@ func Test_ArangoCommitMigration(t *testing.T) {
 func Test_ArangoBeginTransaction(t *testing.T) {
 	logs := testutil.StdoutOutputForFunc(func() {
 		migratorWithArango, _, mockContainer := arangoSetup(t)
-		migratorWithArango.beginTransaction(mockContainer)
+		migratorWithArango.beginTransaction(t.Context(), mockContainer)
 	})
 
 	assert.Contains(t, logs, "ArangoDB migrator begin successfully")

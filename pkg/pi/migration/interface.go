@@ -165,8 +165,13 @@ type Elasticsearch interface {
 	// Useful for seeding data or adding configuration documents during migrations.
 	IndexDocument(ctx context.Context, index, id string, document any) error
 
+	// GetDocument retrieves a single document by ID.
+	GetDocument(ctx context.Context, index, id string) (map[string]any, error)
+
+	// UpdateDocument applies a partial update to an existing document.
+	UpdateDocument(ctx context.Context, index, id string, update map[string]any) error
+
 	// DeleteDocument removes a document by ID.
-	// Useful for removing specific documents during migrations.
 	DeleteDocument(ctx context.Context, index, id string) error
 
 	// Bulk executes multiple indexing/updating/deleting operations in one request.
@@ -174,18 +179,24 @@ type Elasticsearch interface {
 	// following the Elasticsearch bulk API format.
 	// Useful for bulk operations during migrations.
 	Bulk(ctx context.Context, operations []map[string]any) (map[string]any, error)
+
+	// Search executes a query against one or more indices.
+	Search(ctx context.Context, indices []string, query map[string]any) (map[string]any, error)
+
+	HealthCheck(ctx context.Context) (any, error)
 }
 
 // keeping the migrator interface unexported as, right now it is not being implemented directly, by the externalDB drivers.
 // keeping the implementations for externalDB at one place such that if any change in migration logic, we would change directly here.
 type migrator interface {
-	checkAndCreateMigrationTable(c *infra.Container) error
-	getLastMigration(c *infra.Container) (int64, error)
+	checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error
+	listApplied(ctx context.Context, c *infra.Container) ([]Record, error)
+	getLastMigration(ctx context.Context, c *infra.Container) (int64, error)
 
-	beginTransaction(c *infra.Container) transactionData
+	beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error)
 
-	commitMigration(c *infra.Container, data transactionData) error
-	rollback(c *infra.Container, data transactionData)
+	commitMigration(ctx context.Context, c *infra.Container, data transactionData) error
+	rollback(ctx context.Context, c *infra.Container, data transactionData) error
 }
 
 type OpenTSDB interface {

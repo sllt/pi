@@ -45,7 +45,7 @@ func Test_ClickHouseCheckAndCreateMigrationTable(t *testing.T) {
 	for i, tc := range testCases {
 		mockClickhouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(tc.err)
 
-		err := mg.checkAndCreateMigrationTable(mockContainer)
+		err := mg.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 		assert.Equal(t, tc.err, err, "TEST[%v]\n %v Failed! ", i, tc.desc)
 	}
@@ -66,7 +66,7 @@ func Test_ClickHouseGetLastMigration(t *testing.T) {
 	for i, tc := range testCases {
 		mockClickhouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).Return(tc.err)
 
-		resp, err := mg.getLastMigration(mockContainer)
+		resp, err := mg.getLastMigration(t.Context(), mockContainer)
 
 		assert.Equal(t, tc.resp, resp, "TEST[%v]\n %v Failed! ", i, tc.desc)
 
@@ -100,7 +100,7 @@ func Test_ClickHouseCommitMigration(t *testing.T) {
 		mockClickhouse.EXPECT().Exec(gomock.Any(), insertChPiMigrationRow, td.MigrationNumber,
 			"UP", td.StartTime, gomock.Any()).Return(tc.err)
 
-		err := mg.commitMigration(mockContainer, td)
+		err := mg.commitMigration(t.Context(), mockContainer, td)
 
 		assert.Equal(t, tc.err, err, "TEST[%v]\n %v Failed! ", i, tc.desc)
 	}
@@ -109,7 +109,7 @@ func Test_ClickHouseCommitMigration(t *testing.T) {
 func Test_ClickHouseBeginTransaction(t *testing.T) {
 	logs := testutil.StdoutOutputForFunc(func() {
 		mg, _, mockContainer := clickHouseSetup(t)
-		mg.beginTransaction(mockContainer)
+		mg.beginTransaction(t.Context(), mockContainer)
 	})
 
 	assert.Contains(t, logs, "Clickhouse Migrator begin successfully")

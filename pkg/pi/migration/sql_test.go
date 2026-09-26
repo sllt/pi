@@ -235,7 +235,7 @@ func TestCheckAndCreateMigrationTableSuccess(t *testing.T) {
 
 	mockContainer, mocks := infra.NewMockContainer(t)
 
-	mockMigrator.EXPECT().checkAndCreateMigrationTable(mockContainer)
+	mockMigrator.EXPECT().checkAndCreateMigrationTable(gomock.Any(), mockContainer)
 
 	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(mocks.SQL.NewResult(1, 1))
 
@@ -244,7 +244,7 @@ func TestCheckAndCreateMigrationTableSuccess(t *testing.T) {
 		migrator: mockMigrator,
 	}
 
-	err := migrator.checkAndCreateMigrationTable(mockContainer)
+	err := migrator.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 	require.NoError(t, err, "TestCheckAndCreateMigrationTable: error while executing mock query")
 }
@@ -265,7 +265,7 @@ func TestCheckAndCreateMigrationTableExecError(t *testing.T) {
 		migrator: mockMigrator,
 	}
 
-	err := migrator.checkAndCreateMigrationTable(mockContainer)
+	err := migrator.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 	require.Error(t, err, "TestCheckAndCreateMigrationTable: expected an error while executing mock query")
 
@@ -281,14 +281,15 @@ func TestBeginTransactionSuccess(t *testing.T) {
 
 	mocks.SQL.ExpectBegin()
 
-	mockMigrator.EXPECT().beginTransaction(mockContainer)
+	mockMigrator.EXPECT().beginTransaction(gomock.Any(), mockContainer)
 
 	migrator := sqlMigrator{
 		SQL:      mockContainer.SQL,
 		migrator: mockMigrator,
 	}
 
-	data := migrator.beginTransaction(mockContainer)
+	data, err := migrator.beginTransaction(t.Context(), mockContainer)
+	require.NoError(t, err)
 
 	require.NotNil(t, data.SQLTx.Tx, "TestBeginTransaction: SQLTX.tx should not be nil")
 }
@@ -311,7 +312,8 @@ func TestBeginTransactionDBError(t *testing.T) {
 		migrator: mockMigrator,
 	}
 
-	data := migrator.beginTransaction(mockContainer)
+	data, err := migrator.beginTransaction(t.Context(), mockContainer)
+	require.Error(t, err)
 
 	require.Nil(t, data.SQLTx, "TestBeginTransaction: beginTransaction should not return a transaction on DB error")
 }
@@ -321,7 +323,7 @@ func TestRollbackNoTransaction(t *testing.T) {
 
 	migrator := sqlMigrator{}
 
-	migrator.rollback(mockContainer, transactionData{})
+	migrator.rollback(t.Context(), mockContainer, transactionData{})
 }
 
 func TestApply(t *testing.T) {
@@ -346,11 +348,11 @@ func TestGetLastMigration_UseMigratorFallback(t *testing.T) {
 	mocks.SQL.ExpectQuery(getLastSQLPiMigration).
 		WillReturnRows(mocks.SQL.NewRows([]string{"version"}).AddRow(2))
 
-	mockMigrator.EXPECT().getLastMigration(mockContainer).Return(int64(5), nil)
+	mockMigrator.EXPECT().getLastMigration(gomock.Any(), mockContainer).Return(int64(5), nil)
 
 	migrator := sqlMigrator{SQL: mockContainer.SQL, migrator: mockMigrator}
 
-	last, err := migrator.getLastMigration(mockContainer)
+	last, err := migrator.getLastMigration(t.Context(), mockContainer)
 	require.NoError(t, err)
 	require.Equal(t, int64(5), last, "Expected getLastMigration to return higher value from embedded migrator")
 }
@@ -363,11 +365,11 @@ func TestGetLastMigration_MigratorReturnsLesser(t *testing.T) {
 	mocks.SQL.ExpectQuery(getLastSQLPiMigration).
 		WillReturnRows(mocks.SQL.NewRows([]string{"version"}).AddRow(7))
 
-	mockMigrator.EXPECT().getLastMigration(mockContainer).Return(int64(5), nil)
+	mockMigrator.EXPECT().getLastMigration(gomock.Any(), mockContainer).Return(int64(5), nil)
 
 	migrator := sqlMigrator{SQL: mockContainer.SQL, migrator: mockMigrator}
 
-	last, err := migrator.getLastMigration(mockContainer)
+	last, err := migrator.getLastMigration(t.Context(), mockContainer)
 	require.NoError(t, err)
 	require.Equal(t, int64(7), last, "Should return SQL migration value as it's higher")
 }
@@ -379,13 +381,14 @@ func TestBeginTransaction_ReplaceSQLTx(t *testing.T) {
 
 	mocks.SQL.ExpectBegin() // this returns a usable SQLTx
 
-	mockMigrator.EXPECT().beginTransaction(mockContainer).Return(transactionData{
+	mockMigrator.EXPECT().beginTransaction(gomock.Any(), mockContainer).Return(transactionData{
 		MigrationNumber: 123,
-	})
+	}, nil)
 
 	migrator := sqlMigrator{SQL: mockContainer.SQL, migrator: mockMigrator}
 
-	data := migrator.beginTransaction(mockContainer)
+	data, err := migrator.beginTransaction(t.Context(), mockContainer)
+	require.NoError(t, err)
 
 	require.NotNil(t, data.SQLTx, "SQLTx should not be nil")
 	require.Equal(t, int64(123), data.MigrationNumber, "Expected migration number from embedded migrator")
@@ -399,7 +402,7 @@ func TestCheckAndCreateMigrationTable_ErrorCreatingTable(t *testing.T) {
 	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnError(errCreateTable)
 
 	m := sqlMigrator{}
-	err := m.checkAndCreateMigrationTable(mockContainer)
+	err := m.checkAndCreateMigrationTable(t.Context(), mockContainer)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "create table error")
 }

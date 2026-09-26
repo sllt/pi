@@ -18,14 +18,16 @@ func Test_getMigratorDatastoreNotInitialized(t *testing.T) {
 
 		mg := Datasource{}
 
-		mg.rollback(mockContainer, transactionData{})
+		mg.rollback(t.Context(), mockContainer, transactionData{})
 
-		lastMigration, err := mg.getLastMigration(mockContainer)
+		lastMigration, err := mg.getLastMigration(t.Context(), mockContainer)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), lastMigration, "TEST Failed \n Last Migration is not 0")
-		require.NoError(t, mg.checkAndCreateMigrationTable(mockContainer), "TEST Failed")
-		assert.Equal(t, transactionData{}, mg.beginTransaction(mockContainer), "TEST Failed")
-		require.NoError(t, mg.commitMigration(mockContainer, transactionData{}), "TEST Failed")
+		require.NoError(t, mg.checkAndCreateMigrationTable(t.Context(), mockContainer), "TEST Failed")
+		data, err := mg.beginTransaction(t.Context(), mockContainer)
+		require.NoError(t, err)
+		assert.Equal(t, transactionData{}, data, "TEST Failed")
+		require.NoError(t, mg.commitMigration(t.Context(), mockContainer, transactionData{}), "TEST Failed")
 	})
 
 	assert.Contains(t, logs, "Migration 0 ran successfully", "TEST Failed")

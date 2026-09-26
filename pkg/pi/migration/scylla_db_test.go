@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -89,10 +90,10 @@ func TestScyllaCheckAndCreateMigrationTable(t *testing.T) {
 
 	for i, tc := range testCases {
 		mockScylla.EXPECT().
-			Exec(gomock.Any()).
+			ExecWithCtx(gomock.Any(), gomock.Any()).
 			Return(tc.err)
 
-		err := migratorWithScylla.checkAndCreateMigrationTable(mockContainer)
+		err := migratorWithScylla.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 		assert.Equal(t, tc.err, err, "TEST[%v] %s failed", i, tc.desc)
 	}
@@ -119,8 +120,8 @@ func TestScyllaGetLastMigration(t *testing.T) {
 		}
 
 		mockScylla.EXPECT().
-			Query(gomock.Any(), gomock.Any()).
-			DoAndReturn(func(dest any, _ string, _ ...any) error {
+			QueryWithCtx(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(_ context.Context, dest any, _ string, _ ...any) error {
 				if tc.err != nil {
 					return tc.err
 				}
@@ -131,7 +132,7 @@ func TestScyllaGetLastMigration(t *testing.T) {
 				return nil
 			})
 
-		got, err := migratorWithScylla.getLastMigration(mockContainer)
+		got, err := migratorWithScylla.getLastMigration(t.Context(), mockContainer)
 
 		assert.Equal(t, tc.expectedV, got, "TEST[%v] %s failed", i, tc.desc)
 
@@ -161,10 +162,17 @@ func TestScyllaCommitMigration(t *testing.T) {
 		}
 
 		mockScylla.EXPECT().
-			Exec(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+			ExecWithCtx(
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+			).
 			Return(tc.err)
 
-		err := migratorWithScylla.commitMigration(mockContainer, td)
+		err := migratorWithScylla.commitMigration(t.Context(), mockContainer, td)
 
 		assert.Equal(t, tc.err, err, "TEST[%v] %s failed", i, tc.desc)
 	}
@@ -173,7 +181,8 @@ func TestScyllaCommitMigration(t *testing.T) {
 func TestScyllaBeginTransaction(t *testing.T) {
 	migratorWithScylla, _, mockContainer := scyllaSetup(t)
 
-	data := migratorWithScylla.beginTransaction(mockContainer)
+	data, err := migratorWithScylla.beginTransaction(t.Context(), mockContainer)
+	assert.NoError(t, err)
 
 	assert.NotNil(t, data)
 }
@@ -195,13 +204,8 @@ func TestScyllaMigrator_Rollback(t *testing.T) {
 
 	data := transactionData{MigrationNumber: 123}
 
-	mockMigrator.EXPECT().rollback(mockContainer, data).Times(1)
+	mockMigrator.EXPECT().rollback(gomock.Any(), mockContainer, data).Times(1)
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("Expected panic from Fatalf, but none occurred")
-		}
-	}()
-
-	s.rollback(mockContainer, data)
+	err := s.rollback(t.Context(), mockContainer, data)
+	assert.NoError(t, err)
 }

@@ -408,7 +408,7 @@ func runEnhancedTestCase(t *testing.T, tc struct {
 			}
 		}()
 
-		return migratorWithOpenTSDB.checkAndCreateMigrationTable(mockContainer)
+		return migratorWithOpenTSDB.checkAndCreateMigrationTable(t.Context(), mockContainer)
 	}()
 
 	// Verify results
@@ -456,7 +456,7 @@ func Test_OpenTSDBCheckAndCreateMigrationTable_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			err := migratorWithOpenTSDB.checkAndCreateMigrationTable(mockContainer)
+			err := migratorWithOpenTSDB.checkAndCreateMigrationTable(t.Context(), mockContainer)
 			errCh <- err
 		}()
 	}
@@ -499,7 +499,7 @@ func Test_OpenTSDBCheckAndCreateMigrationTable_MutexProtection(t *testing.T) {
 	// This test verifies that the mutex is properly protecting the critical section
 	// We'll run the function multiple times and verify consistent behavior
 	for i := range 5 {
-		err := openTSDBMig.checkAndCreateMigrationTable(mockContainer)
+		err := openTSDBMig.checkAndCreateMigrationTable(t.Context(), mockContainer)
 		require.NoError(t, err, "Iteration %d should succeed", i)
 
 		// Verify file exists and has correct content
@@ -548,7 +548,7 @@ func Test_OpenTSDBCheckAndCreateMigrationTable_EdgeCases(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			migratorWithOpenTSDB, mockContainer, filePath := tc.setupFunc(t)
 
-			err := migratorWithOpenTSDB.checkAndCreateMigrationTable(mockContainer)
+			err := migratorWithOpenTSDB.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 			if tc.expectedErr != "" {
 				require.Error(t, err, "TEST[%v] %v Failed! Expected error but got none", i, tc.desc)
@@ -715,7 +715,7 @@ func Test_OpenTSDBGetLastMigration(t *testing.T) {
 			os.RemoveAll(filepath.Dir(filePath))
 			tc.setupFunc()
 
-			result, err := migratorWithOpenTSDB.getLastMigration(mockContainer)
+			result, err := migratorWithOpenTSDB.getLastMigration(t.Context(), mockContainer)
 			assert.Equal(t, tc.expectedResult, result, "TEST[%v] %v Failed!", i, tc.desc)
 
 			if tc.expectedResult == -1 {
@@ -734,7 +734,7 @@ func Test_OpenTSDBCommitMigration_ConcurrentAccess(t *testing.T) {
 	// Clean up and setup empty migration file
 	os.RemoveAll(filepath.Dir(filePath))
 
-	err := migratorWithOpenTSDB.checkAndCreateMigrationTable(mockContainer)
+	err := migratorWithOpenTSDB.checkAndCreateMigrationTable(t.Context(), mockContainer)
 	require.NoError(t, err)
 
 	const numGoroutines = 20
@@ -755,7 +755,7 @@ func Test_OpenTSDBCommitMigration_ConcurrentAccess(t *testing.T) {
 				MigrationNumber: int64(migrationNum),
 			}
 
-			err := migratorWithOpenTSDB.commitMigration(mockContainer, txData)
+			err := migratorWithOpenTSDB.commitMigration(t.Context(), mockContainer, txData)
 			errCh <- err
 		}(i)
 	}
@@ -792,7 +792,7 @@ func Test_OpenTSDBCommitMigration_ConcurrentDuplicates(t *testing.T) {
 	// Clean up and setup empty migration file
 	os.RemoveAll(filepath.Dir(filePath))
 
-	err := migratorWithOpenTSDB.checkAndCreateMigrationTable(mockContainer)
+	err := migratorWithOpenTSDB.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 	require.NoError(t, err)
 
@@ -816,7 +816,7 @@ func Test_OpenTSDBCommitMigration_ConcurrentDuplicates(t *testing.T) {
 				MigrationNumber: migrationNumber,
 			}
 
-			err := migratorWithOpenTSDB.commitMigration(mockContainer, txData)
+			err := migratorWithOpenTSDB.commitMigration(t.Context(), mockContainer, txData)
 			errCh <- err
 		}()
 	}
@@ -855,7 +855,7 @@ func Test_OpenTSDBCommitMigration_JSONFormatValidation(t *testing.T) {
 	// Clean up and setup
 	os.RemoveAll(filepath.Dir(filePath))
 
-	err := migratorWithOpenTSDB.checkAndCreateMigrationTable(mockContainer)
+	err := migratorWithOpenTSDB.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 	require.NoError(t, err)
 
@@ -865,7 +865,7 @@ func Test_OpenTSDBCommitMigration_JSONFormatValidation(t *testing.T) {
 		MigrationNumber: 1,
 	}
 
-	err = migratorWithOpenTSDB.commitMigration(mockContainer, txData)
+	err = migratorWithOpenTSDB.commitMigration(t.Context(), mockContainer, txData)
 	require.NoError(t, err)
 
 	// Read the file and verify JSON formatting
@@ -895,7 +895,7 @@ func Test_OpenTSDBCommitMigration_TimestampAccuracy(t *testing.T) {
 	// Clean up and setup
 	os.RemoveAll(filepath.Dir(filePath))
 
-	err := migratorWithOpenTSDB.checkAndCreateMigrationTable(mockContainer)
+	err := migratorWithOpenTSDB.checkAndCreateMigrationTable(t.Context(), mockContainer)
 	require.NoError(t, err)
 
 	// Use a specific time for accuracy testing
@@ -908,7 +908,7 @@ func Test_OpenTSDBCommitMigration_TimestampAccuracy(t *testing.T) {
 
 	// Record time just before commit for duration calculation
 	beforeCommit := time.Now()
-	err = migratorWithOpenTSDB.commitMigration(mockContainer, txData)
+	err = migratorWithOpenTSDB.commitMigration(t.Context(), mockContainer, txData)
 	afterCommit := time.Now()
 
 	require.NoError(t, err)

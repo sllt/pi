@@ -45,13 +45,16 @@ func All() map[int64]migration.Migrate {
 		`package migrations
 
 import (
+	"context"
+
 	"github.com/sllt/pi/pkg/pi/migration"
 )
 
 func {{ . }}() migration.Migrate {
 	return migration.Migrate{
-		UP: func(d migration.Datasource) error {
-			// write your migrations here
+		Name: "{{ . }}",
+		UpContext: func(ctx context.Context, d migration.Datasource) error {
+			// write your migrations here and pass ctx to datasource calls when available
 
 			return nil
 		},

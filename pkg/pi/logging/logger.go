@@ -215,9 +215,21 @@ func (l *logger) prettyPrint(e *logEntry, out io.Writer) {
 // NewLogger creates a new Logger instance configured with the given log level.
 // Logs will be printed to stdout and stderr depending on the level.
 func NewLogger(level Level) Logger {
+	return NewWriterLogger(level, os.Stdout, os.Stderr)
+}
+
+// NewWriterLogger directs normal and error logs to caller-owned writers.
+// Nil writers discard output. Writers are not closed by the logger.
+func NewWriterLogger(level Level, normalOut, errorOut io.Writer) Logger {
+	if normalOut == nil {
+		normalOut = io.Discard
+	}
+	if errorOut == nil {
+		errorOut = io.Discard
+	}
 	l := &logger{
-		normalOut: os.Stdout,
-		errorOut:  os.Stderr,
+		normalOut: normalOut,
+		errorOut:  errorOut,
 		lock:      make(chan struct{}, 1),
 	}
 

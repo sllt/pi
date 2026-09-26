@@ -34,21 +34,21 @@ const (
 	insertCassandraPiMigrationRow = `INSERT INTO kite_migrations (version, method, start_time, duration) VALUES (?, ?, ?, ?);`
 )
 
-func (cs cassandraMigrator) checkAndCreateMigrationTable(c *infra.Container) error {
-	if err := c.Cassandra.ExecWithCtx(context.Background(), checkAndCreateCassandraMigrationTable); err != nil {
+func (cs cassandraMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
+	if err := c.Cassandra.ExecWithCtx(ctx, checkAndCreateCassandraMigrationTable); err != nil {
 		return err
 	}
 
-	return cs.migrator.checkAndCreateMigrationTable(c)
+	return cs.migrator.checkAndCreateMigrationTable(ctx, c)
 }
 
-func (cs cassandraMigrator) getLastMigration(c *infra.Container) (int64, error) {
+func (cs cassandraMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
 	var (
 		lastMigration  int64
 		lastMigrations []int64
 	)
 
-	err := c.Cassandra.QueryWithCtx(context.Background(), &lastMigrations, getLastCassandraPiMigration)
+	err := c.Cassandra.QueryWithCtx(ctx, &lastMigrations, getLastCassandraPiMigration)
 	if err != nil {
 		return -1, fmt.Errorf("cassandra: %w", err)
 	}
@@ -61,7 +61,7 @@ func (cs cassandraMigrator) getLastMigration(c *infra.Container) (int64, error) 
 
 	c.Debugf("cassandra last migration fetched value is: %v", lastMigration)
 
-	lm2, err := cs.migrator.getLastMigration(c)
+	lm2, err := cs.migrator.getLastMigration(ctx, c)
 	if err != nil {
 		return -1, err
 	}
@@ -69,16 +69,19 @@ func (cs cassandraMigrator) getLastMigration(c *infra.Container) (int64, error) 
 	return max(lastMigration, lm2), nil
 }
 
-func (cs cassandraMigrator) beginTransaction(c *infra.Container) transactionData {
-	cmt := cs.migrator.beginTransaction(c)
+func (cs cassandraMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
+	cmt, err := cs.migrator.beginTransaction(ctx, c)
+	if err != nil {
+		return transactionData{}, err
+	}
 
 	c.Debug("cassandra migrator begin successfully")
 
-	return cmt
+	return cmt, nil
 }
 
-func (cs cassandraMigrator) commitMigration(c *infra.Container, data transactionData) error {
-	err := cs.CassandraWithContext.ExecWithCtx(context.Background(), insertCassandraPiMigrationRow, data.MigrationNumber,
+func (cs cassandraMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
+	err := cs.CassandraWithContext.ExecWithCtx(ctx, insertCassandraPiMigrationRow, data.MigrationNumber,
 		"UP", data.StartTime, time.Since(data.StartTime).Milliseconds())
 	if err != nil {
 		return err
@@ -86,11 +89,9 @@ func (cs cassandraMigrator) commitMigration(c *infra.Container, data transaction
 
 	c.Debugf("inserted record for migration %v in cassandra kite_migrations table", data.MigrationNumber)
 
-	return cs.migrator.commitMigration(c, data)
+	return cs.migrator.commitMigration(ctx, c, data)
 }
 
-func (cs cassandraMigrator) rollback(c *infra.Container, data transactionData) {
-	cs.migrator.rollback(c, data)
-
-	c.Fatalf("migration %v failed and rolled back", data.MigrationNumber)
+func (cs cassandraMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
+	return cs.migrator.rollback(ctx, c, data)
 }

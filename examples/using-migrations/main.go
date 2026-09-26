@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -18,7 +19,9 @@ func main() {
 	a := pi.New()
 
 	// Add migrations to run
-	a.Migrate(migrations.All())
+	if _, err := a.MigrateContext(context.Background(), migrations.All()); err != nil {
+		panic(err)
+	}
 
 	// Add all the routes
 	a.GET("/employee", GetHandler)

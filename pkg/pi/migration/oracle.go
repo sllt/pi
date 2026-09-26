@@ -58,25 +58,29 @@ VALUES (:1, :2, :3, :4)
 )
 
 // Create migration table if it doesn't exist.
-func (om oracleMigrator) checkAndCreateMigrationTable(c *infra.Container) error {
-	err := om.Oracle.Exec(context.Background(), checkAndCreateOracleMigrationTable)
+func (om oracleMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
+	err := om.Oracle.Exec(ctx, checkAndCreateOracleMigrationTable)
 	if err != nil {
 		c.Errorf("Failed to create Oracle migration table: %v", err)
-	} else {
-		c.Infof("Oracle migration table checked/created successfully")
+		return err
+	}
+	c.Infof("Oracle migration table checked/created successfully")
+
+	if om.migrator == nil {
+		return nil
 	}
 
-	return err
+	return om.migrator.checkAndCreateMigrationTable(ctx, c)
 }
 
 // Get the last applied migration version.
-func (om oracleMigrator) getLastMigration(c *infra.Container) (int64, error) {
+func (om oracleMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
 	var (
 		results             []map[string]any
 		oracleLastMigration int64
 	)
 
-	err := om.Oracle.Select(context.Background(), &results, getLastOraclePiMigration)
+	err := om.Oracle.Select(ctx, &results, getLastOraclePiMigration)
 	if err != nil {
 		return -1, fmt.Errorf("oracle: %w", err)
 	}
@@ -87,7 +91,7 @@ func (om oracleMigrator) getLastMigration(c *infra.Container) (int64, error) {
 
 	c.Debugf("Oracle last migration fetched value is: %v", oracleLastMigration)
 
-	baseLastMigration, err := om.migrator.getLastMigration(c)
+	baseLastMigration, err := om.migrator.getLastMigration(ctx, c)
 	if err != nil {
 		return -1, err
 	}
@@ -139,14 +143,14 @@ func (oracleMigrator) parseStringValue(value any) int64 {
 }
 
 // Commit the migration and insert a record into the migration table.
-func (om oracleMigrator) commitMigration(c *infra.Container, data transactionData) error {
+func (om oracleMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
 	if data.OracleTx == nil {
 		c.Error("invalid Oracle transaction")
 		return errInvalidOracleTransaction
 	}
 
 	// Insert migration record using the transaction.
-	err := data.OracleTx.ExecContext(context.Background(), insertOraclePiMigrationRow,
+	err := data.OracleTx.ExecContext(ctx, insertOraclePiMigrationRow,
 		data.MigrationNumber, "UP", data.StartTime, time.Since(data.StartTime).Milliseconds())
 	if err != nil {
 		c.Errorf("failed to insert migration record: %v", err)
@@ -162,39 +166,47 @@ func (om oracleMigrator) commitMigration(c *infra.Container, data transactionDat
 		return err
 	}
 
-	return om.migrator.commitMigration(c, data)
+	return om.migrator.commitMigration(ctx, c, data)
 }
 
 // Rollback the migration transaction.
-func (om oracleMigrator) rollback(c *infra.Container, data transactionData) {
+func (om oracleMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
+	var rollbackErr error
 	if data.OracleTx != nil {
 		if err := data.OracleTx.Rollback(); err != nil {
-			c.Fatalf("unable to rollback Oracle transaction: %v", err)
-		} else {
-			c.Fatalf("Oracle migration failed, transaction rolled back - exiting application")
+			c.Errorf("unable to rollback Oracle transaction: %v", err)
+			rollbackErr = err
 		}
 	}
 
 	// Call the base migrator's rollback.
-	om.migrator.rollback(c, data)
+	return errorsJoin(rollbackErr, om.migrator.rollback(ctx, c, data))
 }
 
 // Begin a new migration transaction.
-func (om oracleMigrator) beginTransaction(c *infra.Container) transactionData {
+func (om oracleMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
 	// Begin a proper transaction
 	tx, err := om.Oracle.Begin()
 	if err != nil {
 		c.Errorf("unable to begin Oracle transaction: %v", err)
 
-		return transactionData{}
+		return transactionData{}, err
 	}
 
-	td := om.migrator.beginTransaction(c)
+	td, err := om.migrator.beginTransaction(ctx, c)
+	if err != nil {
+		rollbackErr := tx.Rollback()
+		if rollbackErr != nil {
+			rollbackErr = fmt.Errorf("rollback Oracle transaction after nested begin failure: %w", rollbackErr)
+		}
+
+		return transactionData{}, errorsJoin(err, rollbackErr)
+	}
 	td.OracleTx = tx // Store the transaction in transactionData
 
 	c.Debug("Oracle Transaction begin successful")
 
-	return td
+	return td, nil
 }
 
 type oracleTransactionWrapper struct {

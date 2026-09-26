@@ -120,7 +120,13 @@ func (d *DB) Prepare(query string) (*sql.Stmt, error) {
 }
 
 func (d *DB) Begin() (*Tx, error) {
-	tx, err := d.DB.BeginTx(context.Background(), nil)
+	return d.BeginTxContext(context.Background(), nil)
+}
+
+// BeginTxContext starts a Pi transaction whose lifetime is bounded by ctx.
+// It leaves the embedded database/sql BeginTx method and existing Begin callers compatible.
+func (d *DB) BeginTxContext(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
+	tx, err := d.DB.BeginTx(ctx, opts)
 	if err != nil {
 		return nil, err
 	}

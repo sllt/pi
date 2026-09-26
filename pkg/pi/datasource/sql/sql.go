@@ -251,7 +251,8 @@ func getDBConnectionString(dbConfig *DBConfig) (string, error) {
 		return connStr, nil
 	case dialectPostgres, supabaseDialect, cockroachDB:
 		return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-			dbConfig.HostName, dbConfig.Port, dbConfig.User, dbConfig.Password, dbConfig.Database, dbConfig.SSLMode), nil
+			quotePostgresValue(dbConfig.HostName), quotePostgresValue(dbConfig.Port), quotePostgresValue(dbConfig.User),
+			quotePostgresValue(dbConfig.Password), quotePostgresValue(dbConfig.Database), quotePostgresValue(dbConfig.SSLMode)), nil
 	case sqlite:
 		s := strings.TrimSuffix(dbConfig.Database, ".db")
 
@@ -259,6 +260,15 @@ func getDBConnectionString(dbConfig *DBConfig) (string, error) {
 	default:
 		return "", errUnsupportedDialect
 	}
+}
+
+func quotePostgresValue(value string) string {
+	if value != "" && !strings.ContainsAny(value, " \t\n\r\\'") {
+		return value
+	}
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "'", "\\'")
+	return "'" + value + "'"
 }
 
 func pushDBMetrics(db *sql.DB, metrics Metrics) {

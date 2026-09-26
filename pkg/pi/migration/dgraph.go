@@ -84,24 +84,24 @@ func (ds dgraphDS) DropField(ctx context.Context, fieldName string) error {
 }
 
 // checkAndCreateMigrationTable ensures migration schema exists.
-func (dm dgraphMigrator) checkAndCreateMigrationTable(c *infra.Container) error {
-	err := dm.ApplySchema(context.Background(), dgraphSchema)
+func (dm dgraphMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
+	err := dm.ApplySchema(ctx, dgraphSchema)
 	if err != nil {
 		c.Debug("Migration schema might already exist:", err)
 	}
 
-	return dm.migrator.checkAndCreateMigrationTable(c)
+	return dm.migrator.checkAndCreateMigrationTable(ctx, c)
 }
 
 // getLastMigration retrieves the last applied migration version.
-func (dm dgraphMigrator) getLastMigration(c *infra.Container) (int64, error) {
+func (dm dgraphMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
 	var response struct {
 		Migrations []struct {
 			Version int64 `json:"version"`
 		} `json:"migrations"`
 	}
 
-	resp, err := c.DGraph.Query(context.Background(), getLastMigrationQuery)
+	resp, err := c.DGraph.Query(ctx, getLastMigrationQuery)
 	if err != nil {
 		return -1, fmt.Errorf("dgraph: %w", err)
 	}
@@ -125,7 +125,7 @@ func (dm dgraphMigrator) getLastMigration(c *infra.Container) (int64, error) {
 		lastMigration = response.Migrations[0].Version
 	}
 
-	lm2, err := dm.migrator.getLastMigration(c)
+	lm2, err := dm.migrator.getLastMigration(ctx, c)
 	if err != nil {
 		return -1, err
 	}
@@ -134,16 +134,19 @@ func (dm dgraphMigrator) getLastMigration(c *infra.Container) (int64, error) {
 }
 
 // beginTransaction starts a new migration transaction.
-func (dm dgraphMigrator) beginTransaction(c *infra.Container) transactionData {
-	data := dm.migrator.beginTransaction(c)
+func (dm dgraphMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
+	data, err := dm.migrator.beginTransaction(ctx, c)
+	if err != nil {
+		return transactionData{}, err
+	}
 
 	c.Debug("Dgraph migrator begin successfully")
 
-	return data
+	return data, nil
 }
 
 // commitMigration commits the migration and records its metadata.
-func (dm dgraphMigrator) commitMigration(c *infra.Container, data transactionData) error {
+func (dm dgraphMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
 	// Build the JSON payload for the migration record.
 	payload := map[string]any{
 		"migrations": []map[string]any{
@@ -161,7 +164,7 @@ func (dm dgraphMigrator) commitMigration(c *infra.Container, data transactionDat
 		return err
 	}
 
-	_, err = c.DGraph.Mutate(context.Background(), &api.Mutation{
+	_, err = c.DGraph.Mutate(ctx, &api.Mutation{
 		SetJson: jsonPayload,
 	})
 	if err != nil {
@@ -170,12 +173,10 @@ func (dm dgraphMigrator) commitMigration(c *infra.Container, data transactionDat
 
 	c.Debugf("Inserted record for migration %v in Dgraph migrations", data.MigrationNumber)
 
-	return dm.migrator.commitMigration(c, data)
+	return dm.migrator.commitMigration(ctx, c, data)
 }
 
 // rollback handles migration failure and rollback.
-func (dm dgraphMigrator) rollback(c *infra.Container, data transactionData) {
-	dm.migrator.rollback(c, data)
-
-	c.Fatalf("Migration %v failed and rolled back", data.MigrationNumber)
+func (dm dgraphMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
+	return dm.migrator.rollback(ctx, c, data)
 }

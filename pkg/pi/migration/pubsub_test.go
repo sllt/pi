@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -129,7 +130,7 @@ func Test_PubSubCheckAndCreateMigrationTable(t *testing.T) {
 	for i, tc := range testCases {
 		mockPubSub.EXPECT().CreateTopic(gomock.Any(), pubsubMigrationTopic).Return(tc.err)
 
-		err := migratorWithPubSub.checkAndCreateMigrationTable(mockContainer)
+		err := migratorWithPubSub.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 		assert.Equal(t, tc.err, err, "TEST[%v]\n %v Failed! ", i, tc.desc)
 	}
@@ -146,7 +147,7 @@ func Test_PubSubCommitMigration_Success(t *testing.T) {
 
 	mockPubSub.EXPECT().Publish(gomock.Any(), pubsubMigrationTopic, gomock.Any()).Return(nil)
 
-	err := migratorWithPubSub.commitMigration(mockContainer, data)
+	err := migratorWithPubSub.commitMigration(t.Context(), mockContainer, data)
 
 	assert.NoError(t, err, "Successful migration commit should not return an error")
 }
@@ -162,7 +163,7 @@ func Test_PubSubCommitMigration_PublishError(t *testing.T) {
 
 	mockPubSub.EXPECT().Publish(gomock.Any(), pubsubMigrationTopic, gomock.Any()).Return(errTopic)
 
-	err := migratorWithPubSub.commitMigration(mockContainer, data)
+	err := migratorWithPubSub.commitMigration(t.Context(), mockContainer, data)
 
 	assert.Equal(t, errTopic, err, "Publish error should be returned")
 }
@@ -173,7 +174,7 @@ type mockNextMigrator struct {
 	err     error
 }
 
-func (m mockNextMigrator) getLastMigration(*infra.Container) (int64, error) {
+func (m mockNextMigrator) getLastMigration(context.Context, *infra.Container) (int64, error) {
 	return m.version, m.err
 }
 
@@ -241,7 +242,7 @@ func Test_PubSubGetLastMigration(t *testing.T) {
 			}
 
 			// Call the method under test
-			result, err := pm.getLastMigration(mockContainer)
+			result, err := pm.getLastMigration(t.Context(), mockContainer)
 
 			assert.Equal(t, tc.expectedResult, result, "TEST[%v] %v Failed!", i, tc.desc)
 

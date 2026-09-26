@@ -18,10 +18,10 @@ Run the following commands to create a migration file
 
 ```shell
   # Install Pi CLI
-  go install github.com/sllt/pi/cli/pi@latest
+  go install github.com/sllt/pi/cmd/pi@v0.3.0
 
   # Create migration
-  pi migrate create -name=create_employee_table
+  pi migrate create create_employee_table
 ```
 
 Add the `createTableEmployee` function given below in the created file in `migrations` directory.
@@ -31,7 +31,11 @@ Add the `createTableEmployee` function given below in the created file in `migra
 ```go
 package migrations
 
-import "github.com/sllt/pi/pkg/pi/migration"
+import (
+	"context"
+
+	"github.com/sllt/pi/pkg/pi/migration"
+)
 
 const createTable = `CREATE TABLE IF NOT EXISTS employee
 (
@@ -44,19 +48,19 @@ const createTable = `CREATE TABLE IF NOT EXISTS employee
 
 func createTableEmployee() migration.Migrate {
 	return migration.Migrate{
-		UP: func(d migration.Datasource) error {
-			_, err := d.SQL.Exec(createTable)
-			if err != nil {
-				return err
-			}
-			return nil
+		Name: "create_table_employee",
+		UpContext: func(ctx context.Context, d migration.Datasource) error {
+			_, err := d.SQL.ExecContext(ctx, createTable)
+			return err
 		},
 	}
 }
 ```
 
 `migration.Datasource` have the datasources whose migrations are supported i.e., Redis and SQL (MySQL and PostgreSQL).
-All migrations always run in a transaction.
+SQL migrations receive a transaction, and Redis commands are queued in a transactional pipeline.
+These wrappers do not make nontransactional DDL or multiple backends atomic. In particular,
+Redis EXEC may apply other queued commands even when one command fails at execution time.
 
 For MySQL, it is highly recommended to use `IF EXISTS` and `IF NOT EXIST` in DDL commands as MySQL implicitly commits these commands.
 
@@ -86,6 +90,8 @@ Migrations run in ascending order of keys in this map.
 package main
 
 import (
+	"context"
+
 	"github.com/sllt/pi/examples/using-migrations/migrations"
 	"github.com/sllt/pi/pkg/pi"
 )
@@ -95,7 +101,11 @@ func main() {
 	a := pi.New()
 
 	// Add migrations to run
-	a.Migrate(migrations.All())
+	if result, err := a.MigrateContext(context.Background(), migrations.All()); err != nil {
+		panic(err)
+	} else {
+		a.Logger().Infof("applied migrations=%v skipped migrations=%v", result.AppliedVersions(), result.SkippedVersions())
+	}
 
 	// Run the application
 	a.Run()
@@ -109,6 +119,87 @@ INFO [16:55:46] Migration 20240226153000 ran successfully
 ```
 
 Pi maintains the records in the database itself which helps in tracking which migrations have already been executed and ensures that only migrations that have never been run are executed.
+
+### Handling Migration Results and Errors
+
+Migration APIs now return a structured result and an error so deployment scripts can fail fast when a migration fails.
+
+```go
+result, err := app.MigrateContext(ctx, migrations.All())
+if err != nil {
+    return fmt.Errorf("run migrations: %w", err)
+}
+
+log.Printf("applied=%v skipped=%v", result.AppliedVersions(), result.SkippedVersions())
+```
+
+For small programs that intentionally want fail-fast behavior, `MustMigrate` is available:
+
+```go
+app.MustMigrate(migrations.All())
+```
+
+### Planning and Status
+
+Pi can build a plan without executing user migration functions. Plan and status may create
+the authoritative state store on a fresh database; they do not acquire an execution lock:
+
+```go
+plan, err := app.MigrationPlanContext(ctx, migrations.All())
+if err != nil {
+    return err
+}
+
+for _, item := range plan.Items {
+    log.Printf("%d %s %s", item.Version, item.Action, item.Reason)
+}
+```
+
+A status summary is also available:
+
+```go
+status, err := app.MigrationStatusContext(ctx, migrations.All())
+if err != nil {
+    return err
+}
+
+log.Printf("applied=%v pending=%v gaps=%v", status.Applied, status.Pending, status.Gaps)
+```
+
+### Migration Locking
+
+When a SQL or Redis datasource is available, callers can request a migration lock:
+
+```go
+_, err := app.MigrateContext(ctx, migrations.All(), migration.WithLock())
+```
+
+Pi prefers SQL for the lock when SQL is configured, and falls back to Redis when SQL is not configured. If no supported lock backend is available, `WithLock` returns an error instead of silently running unlocked.
+
+Locking is **off by default** in the framework. The default enabled lease is 15 minutes;
+`WithLockTTL` changes it. There is no renewal or fencing: every writer must cooperate,
+and a migration that outlives its lease may overlap another process. Use a caller deadline
+shorter than the lease and ensure migration code honors cancellation. A lock backend error
+is `ErrMigrationLockUnavailable`; actual contention is `ErrMigrationLocked`.
+
+SQL is the authoritative state store whenever configured; an SQL error is returned instead
+of falling back to Redis. Redis is authoritative only without SQL. Other datasource chains
+infer applied versions from a maximum version and report `StatePrecise=false`.
+Versions must be positive. A missing defined version below an applied version is a gap;
+Run rejects it, while Plan marks error items and Status exposes Gaps. A target limits which
+defined versions are considered, but does not roll back higher versions already applied.
+
+`WithDryRun` skips user functions and transactions, but may initialize state structures and
+acquire a lock if requested. It is not a SQL preview or a zero-write database operation.
+
+User errors, panics, and observed cancellation trigger rollback and return a partial Result.
+Use `errors.Is` for the cause/sentinel and `errors.As` for `*migration.VersionError` (version,
+name, operation). Rollback and lock release use a separate, bounded cleanup context.
+Network failure during commit can leave the outcome uncertain; inspect state before retrying.
+Neither Down/DownContext, migration checksums, history nor schema diff is implemented in v0.3.0.
+
+See [the v0.3.0 compatibility and operational contract](../../design/migration-v2.zh-CN.md)
+for function-value/interface changes and the one-shot SQL connection API.
 
 ## Organizing Migrations by Feature
 
@@ -147,18 +238,19 @@ func All() map[int64]migration.Migrate {
 
 func addMonitoringFeature() migration.Migrate {
     return migration.Migrate{
-        UP: func(d migration.Datasource) error {
+        Name: "add_monitoring_feature",
+        UpContext: func(ctx context.Context, d migration.Datasource) error {
             // Create all tables for the monitoring feature
-            if _, err := d.SQL.Exec(createTableUsers); err != nil {
+            if _, err := d.SQL.ExecContext(ctx, createTableUsers); err != nil {
                 return err
             }
-            if _, err := d.SQL.Exec(createTableMonitors); err != nil {
+            if _, err := d.SQL.ExecContext(ctx, createTableMonitors); err != nil {
                 return err
             }
-            if _, err := d.SQL.Exec(createTableCheckResults); err != nil {
+            if _, err := d.SQL.ExecContext(ctx, createTableCheckResults); err != nil {
                 return err
             }
-            if _, err := d.SQL.Exec(createTableIncidents); err != nil {
+            if _, err := d.SQL.ExecContext(ctx, createTableIncidents); err != nil {
                 return err
             }
             return nil
@@ -244,6 +336,8 @@ When using batch operations, consider using a `LoggedBatch` for atomicity or an 
 package migrations
 
 import (
+	"context"
+
 	"github.com/sllt/pi/pkg/pi/migration"
 )
 
@@ -266,8 +360,10 @@ const (
 
 func createTableEmployeeCassandra() migration.Migrate {
 	return migration.Migrate{
-		UP: func(d migration.Datasource) error {
+		Name: "create_table_employee_cassandra",
+		UpContext: func(ctx context.Context, d migration.Datasource) error {
 			// Execute the create table statement
+			_ = ctx // Cassandra migration helpers are currently synchronous.
 			if err := d.Cassandra.Exec(createTableCassandra); err != nil {
 				return err
 			}
@@ -309,35 +405,42 @@ Pi allows Elasticsearch document migrations, focusing on **single document** and
 
 ### Single Document Migration
 
-```go  
-func addSingleProduct() migration.Migrate {  
- return migration.Migrate{ 
-	 UP: func(d migration.Datasource) error { 
-			 product := map[string]any{ 
-			 "title": "Laptop", 
-			 "price": 999.99, 
-			 "category": "electronics", 
-			 } 
-			 
-		return d.Elasticsearch.IndexDocument( context.Background(), "products", "1", product, ) }, }
-		}  
-```  
+```go
+func addSingleProduct() migration.Migrate {
+	return migration.Migrate{
+		Name: "add_single_product",
+		UpContext: func(ctx context.Context, d migration.Datasource) error {
+			product := map[string]any{
+				"title":    "Laptop",
+				"price":    999.99,
+				"category": "electronics",
+			}
+
+			return d.Elasticsearch.IndexDocument(ctx, "products", "1", product)
+		},
+	}
+}
+```
 
 ### Bulk Operation Migration
 
-```go  
-func bulkProducts() migration.Migrate {  
- return migration.Migrate{ 
- UP: func(d migration.Datasource) error { 
-		operations := []map[string]any{ 
-			{"index": map[string]any{"_index": "products", "_id": "1"}}, 
-			{"title": "Phone", "price": 699.99, "category": "electronics"}, 
-			{"index": map[string]any{"_index": "products", "_id": "2"}}, 
-			{"title": "Mug", "price": 12.99, "category": "kitchen"}, 
-			 }
-		
-		_, err := d.Elasticsearch.Bulk(context.Background(), operations) return err },}
-	}  
-``` 
+```go
+func bulkProducts() migration.Migrate {
+	return migration.Migrate{
+		Name: "bulk_products",
+		UpContext: func(ctx context.Context, d migration.Datasource) error {
+			operations := []map[string]any{
+				{"index": map[string]any{"_index": "products", "_id": "1"}},
+				{"title": "Phone", "price": 699.99, "category": "electronics"},
+				{"index": map[string]any{"_index": "products", "_id": "2"}},
+				{"title": "Mug", "price": 12.99, "category": "kitchen"},
+			}
 
-> ##### Check out the example to add and run migrations in Pi: [Visit GitHub](https://github.com/kite-dev/pi/blob/main/examples/using-migrations/main.go)
+			_, err := d.Elasticsearch.Bulk(ctx, operations)
+			return err
+		},
+	}
+}
+```
+
+> ##### Check out the example to add and run migrations in Pi: [Visit GitHub](https://github.com/sllt/pi/blob/master/examples/using-migrations/main.go)

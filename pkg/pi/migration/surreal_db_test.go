@@ -44,7 +44,7 @@ func Test_SurrealCheckAndCreateMigrationTable(t *testing.T) {
 	for i, tc := range testCases {
 		mockSurreal.EXPECT().Query(gomock.Any(), gomock.Any(), nil).Return([]any{}, tc.err).MaxTimes(8)
 
-		err := migratorWithSurreal.checkAndCreateMigrationTable(mockContainer)
+		err := migratorWithSurreal.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 		assert.Equal(t, tc.err, err, "TEST[%v]\n %v Failed! ", i, tc.desc)
 	}
@@ -67,7 +67,7 @@ func Test_SurrealGetLastMigration(t *testing.T) {
 			map[string]any{"version": float64(tc.resp)},
 		}, tc.err)
 
-		resp, err := migratorWithSurreal.getLastMigration(mockContainer)
+		resp, err := migratorWithSurreal.getLastMigration(t.Context(), mockContainer)
 
 		assert.Equal(t, tc.resp, resp, "TEST[%v]\n %v Failed! ", i, tc.desc)
 
@@ -107,7 +107,7 @@ func Test_SurrealCommitMigration(t *testing.T) {
 
 		mockSurreal.EXPECT().Query(gomock.Any(), insertSurrealDBPiMigrationRow, bindVars).Return([]any{}, tc.err)
 
-		err := migratorWithSurreal.commitMigration(mockContainer, td)
+		err := migratorWithSurreal.commitMigration(t.Context(), mockContainer, td)
 
 		assert.Equal(t, tc.err, err, "TEST[%v]\n %v Failed! ", i, tc.desc)
 	}
@@ -116,7 +116,7 @@ func Test_SurrealCommitMigration(t *testing.T) {
 func Test_SurrealBeginTransaction(t *testing.T) {
 	logs := testutil.StdoutOutputForFunc(func() {
 		migratorWithSurreal, _, mockContainer := surrealSetup(t)
-		migratorWithSurreal.beginTransaction(mockContainer)
+		migratorWithSurreal.beginTransaction(t.Context(), mockContainer)
 	})
 
 	assert.Contains(t, logs, "surrealDB migrator begin successfully")

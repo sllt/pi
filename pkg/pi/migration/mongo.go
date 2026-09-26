@@ -30,16 +30,20 @@ const (
 )
 
 // checkAndCreateMigrationTable initializes a MongoDB collection if it doesn't exist.
-func (mg mongoMigrator) checkAndCreateMigrationTable(_ *infra.Container) error {
-	err := mg.Mongo.CreateCollection(context.Background(), mongoMigrationCollection)
+func (mg mongoMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
+	err := mg.Mongo.CreateCollection(ctx, mongoMigrationCollection)
 	if err != nil {
 		return err
 	}
 
-	return nil
+	if mg.migrator == nil {
+		return nil
+	}
+
+	return mg.migrator.checkAndCreateMigrationTable(ctx, c)
 }
 
-func (mg mongoMigrator) getLastMigration(c *infra.Container) (int64, error) {
+func (mg mongoMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
 	var (
 		lastMigration int64
 		migrations    []struct {
@@ -49,7 +53,7 @@ func (mg mongoMigrator) getLastMigration(c *infra.Container) (int64, error) {
 
 	filter := make(map[string]any)
 
-	err := mg.Mongo.Find(context.Background(), mongoMigrationCollection, filter, &migrations)
+	err := mg.Mongo.Find(ctx, mongoMigrationCollection, filter, &migrations)
 	if err != nil {
 		return -1, fmt.Errorf("mongo: %w", err)
 	}
@@ -60,7 +64,7 @@ func (mg mongoMigrator) getLastMigration(c *infra.Container) (int64, error) {
 
 	c.Debugf("MongoDB last migration fetched value is: %v", lastMigration)
 
-	lm2, err := mg.migrator.getLastMigration(c)
+	lm2, err := mg.migrator.getLastMigration(ctx, c)
 	if err != nil {
 		return -1, err
 	}
@@ -68,11 +72,11 @@ func (mg mongoMigrator) getLastMigration(c *infra.Container) (int64, error) {
 	return max(lastMigration, lm2), nil
 }
 
-func (mg mongoMigrator) beginTransaction(c *infra.Container) transactionData {
-	return mg.migrator.beginTransaction(c)
+func (mg mongoMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
+	return mg.migrator.beginTransaction(ctx, c)
 }
 
-func (mg mongoMigrator) commitMigration(c *infra.Container, data transactionData) error {
+func (mg mongoMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
 	migrationDoc := map[string]any{
 		"version":    data.MigrationNumber,
 		"method":     "UP",
@@ -80,17 +84,16 @@ func (mg mongoMigrator) commitMigration(c *infra.Container, data transactionData
 		"duration":   time.Since(data.StartTime).Milliseconds(),
 	}
 
-	_, err := mg.Mongo.InsertOne(context.Background(), mongoMigrationCollection, migrationDoc)
+	_, err := mg.Mongo.InsertOne(ctx, mongoMigrationCollection, migrationDoc)
 	if err != nil {
 		return err
 	}
 
 	c.Debugf("Inserted record for migration %v in MongoDB kite_migrations collection", data.MigrationNumber)
 
-	return mg.migrator.commitMigration(c, data)
+	return mg.migrator.commitMigration(ctx, c, data)
 }
 
-func (mg mongoMigrator) rollback(c *infra.Container, data transactionData) {
-	mg.migrator.rollback(c, data)
-	c.Fatalf("Migration %v failed.", data.MigrationNumber)
+func (mg mongoMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
+	return mg.migrator.rollback(ctx, c, data)
 }

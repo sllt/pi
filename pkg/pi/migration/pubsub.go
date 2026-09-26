@@ -52,19 +52,19 @@ func (ds pubsubDS) apply(m migrator) migrator {
 	}
 }
 
-func (pm pubsubMigrator) checkAndCreateMigrationTable(c *infra.Container) error {
-	err := pm.CreateTopic(context.Background(), pubsubMigrationTopic)
+func (pm pubsubMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
+	err := pm.CreateTopic(ctx, pubsubMigrationTopic)
 	if err != nil {
 		c.Debug("Migration topic might already exist:", err)
 	}
 
-	return pm.migrator.checkAndCreateMigrationTable(c)
+	return pm.migrator.checkAndCreateMigrationTable(ctx, c)
 }
 
-func (pm pubsubMigrator) getLastMigration(c *infra.Container) (int64, error) {
+func (pm pubsubMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
 	queryTopic := resolveMigrationTopic(c)
 
-	ctx, cancel := context.WithTimeout(context.Background(), migrationTimeout)
+	ctx, cancel := context.WithTimeout(ctx, migrationTimeout)
 	defer cancel()
 
 	var pubsubLastMigration int64
@@ -78,7 +78,7 @@ func (pm pubsubMigrator) getLastMigration(c *infra.Container) (int64, error) {
 		pubsubLastMigration = extractLastVersion(c, result)
 	}
 
-	nextMigratorLastMigration, err := pm.migrator.getLastMigration(c)
+	nextMigratorLastMigration, err := pm.migrator.getLastMigration(ctx, c)
 	if err != nil {
 		return -1, err
 	}
@@ -130,7 +130,7 @@ func extractLastVersion(c *infra.Container, data []byte) int64 {
 	return lastVersion
 }
 
-func (pm pubsubMigrator) commitMigration(c *infra.Container, data transactionData) error {
+func (pm pubsubMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
 	record := migrationRecord{
 		Version:   data.MigrationNumber,
 		Method:    "UP",
@@ -145,12 +145,12 @@ func (pm pubsubMigrator) commitMigration(c *infra.Container, data transactionDat
 
 	publishTopic := resolveMigrationTopic(c)
 
-	err = c.PubSub.Publish(context.Background(), publishTopic, recordBytes)
+	err = c.PubSub.Publish(ctx, publishTopic, recordBytes)
 	if err != nil {
 		return err
 	}
 
 	c.Debugf("Inserted record for migration %v in PubSub kite_migrations topic", data.MigrationNumber)
 
-	return pm.migrator.commitMigration(c, data)
+	return pm.migrator.commitMigration(ctx, c, data)
 }

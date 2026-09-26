@@ -1,6 +1,8 @@
 package migration
 
 import (
+	"context"
+	"fmt"
 	"reflect"
 	"time"
 
@@ -13,8 +15,25 @@ import (
 
 type MigrateFunc func(d Datasource) error
 
+type ContextFunc func(ctx context.Context, d Datasource) error
+
 type Migrate struct {
 	UP MigrateFunc
+
+	// Down is reserved for explicit rollback/down flows. The first Migration v2
+	// delivery keeps UP-compatible migrations working and does not automatically
+	// call Down on UP failures.
+	Down MigrateFunc
+
+	// UpContext is preferred for new migrations because it allows deployment
+	// cancellation and timeouts to propagate into datasource calls.
+	UpContext ContextFunc
+
+	// DownContext is reserved for explicit down flows.
+	DownContext ContextFunc
+
+	// Name is optional human-readable metadata used in structured results.
+	Name string
 }
 
 type transactionData struct {
@@ -26,55 +45,131 @@ type transactionData struct {
 	OracleTx infra.OracleTx
 }
 
-func Run(migrationsMap map[int64]Migrate, c *infra.Container) {
+// Run applies pending migrations and returns a structured result.
+func Run(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Container, opts ...Option) (result Result, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	options := applyOptions(opts)
+	result.Direction = options.Direction
+	result.StartedAt = time.Now()
+	defer func() {
+		result.FinishedAt = time.Now()
+	}()
+	if err = validateOptions(options); err != nil {
+		return result, err
+	}
+
+	if options.Direction != DirectionUp {
+		return result, fmt.Errorf("%w: direction %q is not implemented", ErrDownNotDefined, options.Direction)
+	}
+
 	invalidKeys, keys := getKeys(migrationsMap)
 	if len(invalidKeys) > 0 {
-		c.Errorf("migration run failed! UP not defined for the following keys: %v", invalidKeys)
+		err = fmt.Errorf("%w: versions must be positive and define UP or UpContext: %v", ErrInvalidMigration, invalidKeys)
+		if c != nil {
+			c.Errorf("migration run failed! UP not defined for the following keys: %v", invalidKeys)
+		}
 
-		return
+		return result, err
 	}
 
 	sortkeys.Int64s(keys)
 
+	if err = ctx.Err(); err != nil {
+		return result, err
+	}
+
 	ds, mg, ok := getMigrator(c)
-	ds.Logger = c.Logger
+	if c != nil {
+		ds.Logger = c.Logger
+	}
 
-	// Returning with an error log as migration would eventually fail as No databases are initialized.
-	// Pub/Sub is considered as initialized if its configurations are given.
+	// Returning with an error as migration would eventually fail if no databases are initialized.
+	// Pub/Sub is considered initialized if its configurations are given.
 	if !ok {
-		c.Errorf("no migrations are running as datasources are not initialized")
+		if c != nil {
+			c.Errorf("no migrations are running as datasources are not initialized")
+		}
 
-		return
+		return result, ErrNoDatasource
 	}
 
-	err := mg.checkAndCreateMigrationTable(c)
-	if err != nil {
-		c.Fatalf("failed to create pi_migration table, err: %v", err)
-
-		return
+	stateReader := selectMigrationStateReader(c, mg)
+	result.StateSource = stateReader.source
+	result.StatePrecise = stateReader.precise
+	if err = mg.checkAndCreateMigrationTable(ctx, c); err != nil {
+		return result, fmt.Errorf("migration: ensure state store: %w", err)
 	}
 
-	lastMigration, err := mg.getLastMigration(c)
+	releaseLock, err := acquireMigrationLock(ctx, c, options)
 	if err != nil {
-		c.Fatalf("migration failed: could not verify migration state from datasources, err: %v", err)
+		return result, err
+	}
+	if releaseLock != nil {
+		defer func() {
+			if releaseErr := releaseMigrationLock(ctx, releaseLock); releaseErr != nil {
+				err = errorsJoin(err, releaseErr)
+			}
+		}()
+	}
 
-		return
+	state, err := readMigrationState(ctx, c, stateReader, migrationsMap)
+	if err != nil {
+		return result, err
+	}
+	result.StatePrecise = state.Precise
+
+	if gaps := state.detectGaps(keys, options.Target); len(gaps) > 0 {
+		return result, fmt.Errorf("%w: versions %v", ErrMigrationGap, gaps)
 	}
 
 	for _, currentMigration := range keys {
-		if currentMigration <= lastMigration {
-			c.Infof("skipping migration %v", currentMigration)
+		migrationDef := migrationsMap[currentMigration]
+		name := migrationDef.displayName(currentMigration)
 
+		if options.Target > 0 && currentMigration > options.Target {
+			result.Skipped = append(result.Skipped, VersionResult{Version: currentMigration, Name: name, Reason: SkipAboveTarget})
 			continue
 		}
 
-		c.Logger.Infof("running migration %v", currentMigration)
+		if state.shouldSkipAsApplied(currentMigration) {
+			if c != nil {
+				c.Infof("skipping migration %v", currentMigration)
+			}
 
-		migrationInfo := mg.beginTransaction(c)
+			result.Skipped = append(result.Skipped, VersionResult{Version: currentMigration, Name: name, Reason: SkipAlreadyApplied})
+			continue
+		}
+
+		if options.DryRun {
+			result.Skipped = append(result.Skipped, VersionResult{Version: currentMigration, Name: name, Reason: SkipDryRun})
+			continue
+		}
+
+		if err = ctx.Err(); err != nil {
+			return result, err
+		}
+
+		if c != nil {
+			c.Logger.Infof("running migration %v", currentMigration)
+		}
+
+		migrationInfo, err := mg.beginTransaction(ctx, c)
+		if err != nil {
+			ve := &VersionError{Version: currentMigration, Name: name, Op: "begin", Err: err}
+			result.Failed = &VersionResult{Version: currentMigration, Name: name, Error: ve}
+			return result, joinVersionError(ve, nil)
+		}
 
 		// Replacing the objects in datasource object only for those Datasources which support transactions.
-		ds.SQL = migrationInfo.SQLTx
-		ds.Redis = migrationInfo.RedisTx
+		if migrationInfo.SQLTx != nil {
+			ds.SQL = migrationInfo.SQLTx
+		}
+		if migrationInfo.RedisTx != nil {
+			ds.Redis = migrationInfo.RedisTx
+		}
 
 		if migrationInfo.OracleTx != nil {
 			ds.Oracle = &oracleTransactionWrapper{tx: migrationInfo.OracleTx}
@@ -83,24 +178,89 @@ func Run(migrationsMap map[int64]Migrate, c *infra.Container) {
 		migrationInfo.StartTime = time.Now()
 		migrationInfo.MigrationNumber = currentMigration
 
-		err = migrationsMap[currentMigration].UP(ds)
+		err = migrationDef.runUp(ctx, ds)
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err != nil {
-			c.Logger.Errorf("failed to run migration : [%v], err: %v", currentMigration, err)
+			if c != nil {
+				c.Logger.Errorf("failed to run migration : [%v], err: %v", currentMigration, err)
+			}
 
-			mg.rollback(c, migrationInfo)
+			rollbackErr := rollbackMigration(ctx, mg, c, migrationInfo)
+			ve := &VersionError{Version: currentMigration, Name: name, Op: "up", Err: err}
+			result.Failed = &VersionResult{Version: currentMigration, Name: name, Duration: time.Since(migrationInfo.StartTime), Error: ve}
 
-			return
+			return result, joinVersionError(ve, rollbackErr)
 		}
 
-		err = mg.commitMigration(c, migrationInfo)
+		err = invokeMigration(func() error { return mg.commitMigration(ctx, c, migrationInfo) })
 		if err != nil {
-			c.Errorf("failed to commit migration, err: %v", err)
+			if c != nil {
+				c.Errorf("failed to commit migration, err: %v", err)
+			}
 
-			mg.rollback(c, migrationInfo)
+			rollbackErr := rollbackMigration(ctx, mg, c, migrationInfo)
+			ve := &VersionError{Version: currentMigration, Name: name, Op: "commit", Err: err}
+			result.Failed = &VersionResult{Version: currentMigration, Name: name, Duration: time.Since(migrationInfo.StartTime), Error: ve}
 
-			return
+			return result, joinVersionError(ve, rollbackErr)
 		}
+
+		result.Applied = append(result.Applied, VersionResult{Version: currentMigration, Name: name, Duration: time.Since(migrationInfo.StartTime)})
 	}
+
+	return result, nil
+}
+
+func joinVersionError(ve *VersionError, rollbackErr error) error {
+	if rollbackErr == nil {
+		return fmt.Errorf("%w: %w", ErrMigrationFailed, ve)
+	}
+
+	return fmt.Errorf("%w: %w", ErrMigrationFailed, errorsJoin(ve, fmt.Errorf("rollback: %w", rollbackErr)))
+}
+
+func (m Migrate) hasUp() bool {
+	return m.UP != nil || m.UpContext != nil
+}
+
+func (m Migrate) runUp(ctx context.Context, ds Datasource) error {
+	return invokeMigration(func() error {
+		if m.UpContext != nil {
+			return m.UpContext(ctx, ds)
+		}
+		return m.UP(ds)
+	})
+}
+
+// Recover inside the transaction boundary so a user panic follows the same
+// rollback and structured-error path as a returned error.
+func invokeMigration(fn func() error) (err error) {
+	defer func() {
+		if value := recover(); value != nil {
+			if cause, ok := value.(error); ok {
+				err = fmt.Errorf("%w: %w", ErrMigrationPanic, cause)
+			} else {
+				err = fmt.Errorf("%w: %v", ErrMigrationPanic, value)
+			}
+		}
+	}()
+	return fn()
+}
+
+func rollbackMigration(ctx context.Context, mg migrator, c *infra.Container, data transactionData) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return invokeMigration(func() error { return mg.rollback(cleanupCtx, c, data) })
+}
+
+func (m Migrate) displayName(version int64) string {
+	if m.Name != "" {
+		return m.Name
+	}
+
+	return fmt.Sprintf("%d", version)
 }
 
 func getKeys(migrationsMap map[int64]Migrate) (invalidKey, keys []int64) {
@@ -108,7 +268,7 @@ func getKeys(migrationsMap map[int64]Migrate) (invalidKey, keys []int64) {
 	keys = make([]int64, 0, len(migrationsMap))
 
 	for k, v := range migrationsMap {
-		if v.UP == nil {
+		if k <= 0 || !v.hasUp() {
 			invalidKey = append(invalidKey, k)
 
 			continue
@@ -117,6 +277,7 @@ func getKeys(migrationsMap map[int64]Migrate) (invalidKey, keys []int64) {
 		keys = append(keys, k)
 	}
 
+	sortkeys.Int64s(invalidKey)
 	return invalidKey, keys
 }
 
@@ -140,6 +301,10 @@ type datasourceInitializer struct {
 }
 
 func initializeDatasources(c *infra.Container, ds *Datasource, mg migrator) (migrator, bool) {
+	if c == nil {
+		return mg, false
+	}
+
 	var initialized bool
 
 	initializers := []datasourceInitializer{
@@ -240,9 +405,16 @@ func initializeDatasources(c *infra.Container, ds *Datasource, mg migrator) (mig
 }
 
 func isNil(i any) bool {
-	// Get the value of the interface.
+	if i == nil {
+		return true
+	}
+
 	val := reflect.ValueOf(i)
 
-	// If the interface is not assigned or is nil, return true.
-	return !val.IsValid() || val.IsNil()
+	switch val.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return val.IsNil()
+	default:
+		return false
+	}
 }

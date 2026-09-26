@@ -65,25 +65,29 @@ func getMigrationTableQueries() []string {
 	}
 }
 
-func (s surrealMigrator) checkAndCreateMigrationTable(*infra.Container) error {
-	if _, err := s.SurrealDB.Query(context.Background(), "USE NS test DB test", nil); err != nil {
+func (s surrealMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
+	if _, err := s.SurrealDB.Query(ctx, "USE NS test DB test", nil); err != nil {
 		return err
 	}
 
 	// Create migration table directly
 	for _, q := range getMigrationTableQueries() {
-		if _, err := s.SurrealDB.Query(context.Background(), q, nil); err != nil {
+		if _, err := s.SurrealDB.Query(ctx, q, nil); err != nil {
 			return fmt.Errorf("%w: %s: %w", errExecuteQuery, q, err)
 		}
 	}
 
-	return nil
+	if s.migrator == nil {
+		return nil
+	}
+
+	return s.migrator.checkAndCreateMigrationTable(ctx, c)
 }
 
-func (s surrealMigrator) getLastMigration(c *infra.Container) (int64, error) {
+func (s surrealMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
 	var lastMigration int64
 
-	result, err := s.SurrealDB.Query(context.Background(), getLastSurrealDBPiMigration, nil)
+	result, err := s.SurrealDB.Query(ctx, getLastSurrealDBPiMigration, nil)
 	if err != nil {
 		return -1, fmt.Errorf("surrealdb: %w", err)
 	}
@@ -96,7 +100,7 @@ func (s surrealMigrator) getLastMigration(c *infra.Container) (int64, error) {
 
 	c.Debugf("surrealDB last migration fetched value is: %v", lastMigration)
 
-	lm2, err := s.migrator.getLastMigration(c)
+	lm2, err := s.migrator.getLastMigration(ctx, c)
 	if err != nil {
 		return -1, err
 	}
@@ -104,16 +108,19 @@ func (s surrealMigrator) getLastMigration(c *infra.Container) (int64, error) {
 	return max(lastMigration, lm2), nil
 }
 
-func (s surrealMigrator) beginTransaction(c *infra.Container) transactionData {
-	data := s.migrator.beginTransaction(c)
+func (s surrealMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
+	data, err := s.migrator.beginTransaction(ctx, c)
+	if err != nil {
+		return transactionData{}, err
+	}
 
 	c.Debug("surrealDB migrator begin successfully")
 
-	return data
+	return data, nil
 }
 
-func (s surrealMigrator) commitMigration(c *infra.Container, data transactionData) error {
-	_, err := s.SurrealDB.Query(context.Background(), insertSurrealDBPiMigrationRow, map[string]any{
+func (s surrealMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
+	_, err := s.SurrealDB.Query(ctx, insertSurrealDBPiMigrationRow, map[string]any{
 		"version":    data.MigrationNumber,
 		"method":     "UP",
 		"start_time": data.StartTime,
@@ -125,11 +132,9 @@ func (s surrealMigrator) commitMigration(c *infra.Container, data transactionDat
 
 	c.Debugf("inserted record for migration %v in surrealDB kite_migrations table", data.MigrationNumber)
 
-	return s.migrator.commitMigration(c, data)
+	return s.migrator.commitMigration(ctx, c, data)
 }
 
-func (s surrealMigrator) rollback(c *infra.Container, data transactionData) {
-	s.migrator.rollback(c, data)
-
-	c.Fatalf("migration %v failed and rolled back", data.MigrationNumber)
+func (s surrealMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
+	return s.migrator.rollback(ctx, c, data)
 }

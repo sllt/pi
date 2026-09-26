@@ -34,7 +34,7 @@ func Test_DGraphCheckAndCreateMigrationTable(t *testing.T) {
 
 	mockDGraph.EXPECT().ApplySchema(gomock.Any(), dgraphSchema).Return(nil)
 
-	err := migratorWithDGraph.checkAndCreateMigrationTable(mockContainer)
+	err := migratorWithDGraph.checkAndCreateMigrationTable(t.Context(), mockContainer)
 
 	require.NoError(t, err, "Test_DGraphCheckAndCreateMigrationTable Failed!")
 }
@@ -80,7 +80,7 @@ func Test_DGraphGetLastMigration(t *testing.T) {
 			mockDGraph.EXPECT().Query(gomock.Any(), getLastMigrationQuery).
 				Return(tc.mockResp, tc.err)
 
-			resp, err := migratorWithDGraph.getLastMigration(mockContainer)
+			resp, err := migratorWithDGraph.getLastMigration(t.Context(), mockContainer)
 
 			assert.Equal(t, tc.expected, resp, "TEST[%v] Failed!", i)
 
@@ -114,7 +114,7 @@ func Test_DGraphCommitMigration(t *testing.T) {
 	for i, tc := range testCases {
 		mockDGraph.EXPECT().Mutate(gomock.Any(), gomock.Any()).Return(nil, tc.err)
 
-		err := migratorWithDGraph.commitMigration(mockContainer, td)
+		err := migratorWithDGraph.commitMigration(t.Context(), mockContainer, td)
 
 		assert.Equal(t, tc.err, err, "TEST[%v]\n %v Failed!", i, tc.desc)
 	}
@@ -123,7 +123,7 @@ func Test_DGraphCommitMigration(t *testing.T) {
 func Test_DGraphBeginTransaction(t *testing.T) {
 	logs := testutil.StdoutOutputForFunc(func() {
 		migratorWithDGraph, _, mockContainer := dgraphSetup(t)
-		migratorWithDGraph.beginTransaction(mockContainer)
+		migratorWithDGraph.beginTransaction(t.Context(), mockContainer)
 	})
 
 	assert.Contains(t, logs, "Dgraph migrator begin successfully")

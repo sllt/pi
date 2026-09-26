@@ -94,7 +94,7 @@ func TestMigrationRunElasticsearchSuccess(t *testing.T) {
 		mockElasticsearch.EXPECT().IndexDocument(gomock.Any(), elasticsearchMigrationIndex, "1", gomock.Any()).
 			Return(nil)
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 	})
 
 	assert.Contains(t, logs, "Migration 1 ran successfully")
@@ -137,7 +137,7 @@ func TestMigrationRunElasticsearchMigrationFailure(t *testing.T) {
 		mockElasticsearch.EXPECT().CreateIndex(gomock.Any(), "test-index", gomock.Any()).
 			Return(assert.AnError)
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 	})
 
 	assert.Contains(t, logs, "failed to run migration : [1], err: assert.AnError general error for testing")
@@ -161,7 +161,7 @@ func TestMigrationRunElasticsearchMigrationFailureWhileCheckingTable(t *testing.
 		mockElasticsearch.EXPECT().CreateIndex(gomock.Any(), elasticsearchMigrationIndex, gomock.Any()).
 			Return(assert.AnError)
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 	})
 
 	assert.True(t, mockElasticsearch.ctrl.Satisfied())
@@ -200,7 +200,7 @@ func TestMigrationRunElasticsearchCurrentMigrationEqualLastMigration(t *testing.
 				},
 			}, nil)
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 	})
 
 	assert.Contains(t, logs, "skipping migration 1")
@@ -246,7 +246,7 @@ func TestMigrationRunElasticsearchCommitError(t *testing.T) {
 		mockElasticsearch.EXPECT().IndexDocument(gomock.Any(), elasticsearchMigrationIndex, "1", gomock.Any()).
 			Return(assert.AnError)
 
-		Run(migrationMap, mockContainer)
+		Run(t.Context(), migrationMap, mockContainer)
 	})
 
 	assert.Contains(t, logs, "failed to commit migration, err: failed to record migration: assert.AnError general error for testing")
@@ -268,7 +268,7 @@ func TestElasticsearchMigrator_checkAndCreateMigrationTable_IndexExists(t *testi
 	ds := elasticsearchDS{client: mockElasticsearch}
 	mg := elasticsearchMigrator{elasticsearchDS: ds, migrator: &Datasource{}}
 
-	err := mg.checkAndCreateMigrationTable(mockContainer)
+	err := mg.checkAndCreateMigrationTable(t.Context(), mockContainer)
 	assert.NoError(t, err)
 }
 
@@ -293,7 +293,7 @@ func TestElasticsearchMigrator_getLastMigration_WithMigrations(t *testing.T) {
 	ds := elasticsearchDS{client: mockElasticsearch}
 	mg := elasticsearchMigrator{elasticsearchDS: ds, migrator: &Datasource{}}
 
-	lastMigration, err := mg.getLastMigration(mockContainer)
+	lastMigration, err := mg.getLastMigration(t.Context(), mockContainer)
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), lastMigration)
 }
@@ -313,7 +313,7 @@ func TestElasticsearchMigrator_getLastMigration_NoMigrations(t *testing.T) {
 	ds := elasticsearchDS{client: mockElasticsearch}
 	mg := elasticsearchMigrator{elasticsearchDS: ds, migrator: &Datasource{}}
 
-	lastMigration, err := mg.getLastMigration(mockContainer)
+	lastMigration, err := mg.getLastMigration(t.Context(), mockContainer)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), lastMigration)
 }
@@ -333,7 +333,7 @@ func TestElasticsearchMigrator_commitMigration_Success(t *testing.T) {
 		StartTime:       time.Now(),
 	}
 
-	err := mg.commitMigration(mockContainer, data)
+	err := mg.commitMigration(t.Context(), mockContainer, data)
 	assert.NoError(t, err)
 }
 
@@ -352,7 +352,7 @@ func TestElasticsearchMigrator_commitMigration_Failure(t *testing.T) {
 		StartTime:       time.Now(),
 	}
 
-	err := mg.commitMigration(mockContainer, data)
+	err := mg.commitMigration(t.Context(), mockContainer, data)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to record migration")
 }

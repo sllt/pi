@@ -117,10 +117,10 @@ func TestRedisMigrator_GetLastMigration(t *testing.T) {
 			goRedis.NewMapStringStringResult(tc.mockedData, tc.redisErr))
 
 		if tc.redisErr == nil && tc.desc != "UnmarshalError" {
-			mockMigrator.EXPECT().getLastMigration(gomock.Any()).Return(tc.migratorLastMigration, tc.migratorErr).MaxTimes(2)
+			mockMigrator.EXPECT().getLastMigration(gomock.Any(), gomock.Any()).Return(tc.migratorLastMigration, tc.migratorErr).MaxTimes(2)
 		}
 
-		lastMigration, err := m.getLastMigration(c)
+		lastMigration, err := m.getLastMigration(t.Context(), c)
 
 		assert.Equal(t, tc.expectedLastMigration, lastMigration, "TEST[%d], Failed.\n%s", i, tc.desc)
 
@@ -145,9 +145,10 @@ func TestRedisMigrator_beginTransaction(t *testing.T) {
 	}
 
 	mocks.Redis.EXPECT().TxPipeline()
-	mockMigrator.EXPECT().beginTransaction(c)
+	mockMigrator.EXPECT().beginTransaction(gomock.Any(), c)
 
-	data := m.beginTransaction(c)
+	data, err := m.beginTransaction(t.Context(), c)
+	require.NoError(t, err)
 
 	assert.Equal(t, transactionData{}, data, "TEST Failed.\n")
 }

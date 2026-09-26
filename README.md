@@ -1,12 +1,8 @@
-# v0.2.4 candidate
-
-This isolated candidate contains the Pi rename and runtime correctness fixes. It retains
-the v0.2.3 migration API; Migration v2 remains in the main development workspace for v0.3.0.
-See [release notes](docs/releases/v0.2.4.zh-CN.md). This local branch is not a published tag.
-
 # Pi
 
 一个为微服务开发而设计的 Go 语言框架。
+
+项目已由 Kite 更名为 Pi，CLI 命令为 `pi`，脚手架为 [pi-layout](https://github.com/sllt/pi-layout)。新 module 从 v0.2.4 开始发布；v0.3.0 提供 Migration v2，见[发布说明](docs/releases/v0.3.0.zh-CN.md)和[迁移兼容性](docs/design/migration-v2.zh-CN.md)。历史 `v0.2.3` 仍使用旧路径。
 
 ## 核心特性
 

@@ -44,7 +44,7 @@ func Test_OracleCheckAndCreateMigrationTable(t *testing.T) {
 
 	for i, tc := range testCases {
 		mockOracle.EXPECT().Exec(gomock.Any(), checkAndCreateOracleMigrationTable).Return(tc.err)
-		err := mg.checkAndCreateMigrationTable(mockContainer)
+		err := mg.checkAndCreateMigrationTable(t.Context(), mockContainer)
 		assert.Equal(t, tc.err, err, "TEST[%d]: %s failed", i, tc.desc)
 	}
 }
@@ -64,7 +64,7 @@ func Test_OracleGetLastMigration(t *testing.T) {
 	for i, tc := range testCases {
 		mockOracle.EXPECT().Select(gomock.Any(), gomock.Any(), getLastOraclePiMigration).Return(tc.err)
 
-		resp, err := mg.getLastMigration(mockContainer)
+		resp, err := mg.getLastMigration(t.Context(), mockContainer)
 		assert.Equal(t, tc.resp, resp, "TEST[%d]: %s failed", i, tc.desc)
 
 		if tc.err != nil {
@@ -95,7 +95,7 @@ func Test_OracleCommitMigration(t *testing.T) {
 
 	mockTxSuccess.EXPECT().Commit().Return(nil)
 
-	err := mg.commitMigration(mockContainer, tdSuccess)
+	err := mg.commitMigration(t.Context(), mockContainer, tdSuccess)
 	require.NoError(t, err, "Success case failed")
 
 	// Error case
@@ -113,7 +113,7 @@ func Test_OracleCommitMigration(t *testing.T) {
 
 	mockTxError.EXPECT().Rollback().Return(nil).AnyTimes()
 
-	err = mg.commitMigration(mockContainer, tdError)
+	err = mg.commitMigration(t.Context(), mockContainer, tdError)
 	assert.Equal(t, sql.ErrConnDone, err, "Error case failed")
 }
 
@@ -146,7 +146,7 @@ func TestOracleMigration_RunMigrationSuccess(t *testing.T) {
 		int64(1), "UP", gomock.Any(), gomock.Any()).Return(nil)
 	mockTx.EXPECT().Commit().Return(nil)
 
-	Run(migrationMap, mockContainer)
+	Run(t.Context(), migrationMap, mockContainer)
 }
 
 func TestOracleMigration_FailCreateMigrationTable(t *testing.T) {
@@ -163,7 +163,7 @@ func TestOracleMigration_FailCreateMigrationTable(t *testing.T) {
 
 	mockOracle.EXPECT().Exec(gomock.Any(), checkAndCreateOracleMigrationTable).Return(sql.ErrConnDone)
 
-	err := mg.checkAndCreateMigrationTable(mockContainer)
+	err := mg.checkAndCreateMigrationTable(t.Context(), mockContainer)
 	assert.Equal(t, sql.ErrConnDone, err)
 }
 
@@ -181,7 +181,7 @@ func TestOracleMigration_GetLastMigration_ReturnsZeroOnError(t *testing.T) {
 
 	mockOracle.EXPECT().Select(gomock.Any(), gomock.Any(), getLastOraclePiMigration).Return(sql.ErrConnDone)
 
-	lastMigration, err := mg.getLastMigration(mockContainer)
+	lastMigration, err := mg.getLastMigration(t.Context(), mockContainer)
 	assert.Equal(t, int64(-1), lastMigration)
 	assert.ErrorContains(t, err, sql.ErrConnDone.Error())
 }

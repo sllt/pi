@@ -316,7 +316,9 @@ func TestApp_MigrateInvalidKeys(t *testing.T) {
 		testutil.NewServerConfigs(t)
 
 		app := New()
-		app.Migrate(map[int64]migration.Migrate{1: {}})
+		_, err := app.Migrate(map[int64]migration.Migrate{1: {}})
+		require.Error(t, err)
+		require.ErrorIs(t, err, migration.ErrInvalidMigration)
 	})
 
 	assert.Contains(t, logs, "migration run failed! UP not defined for the following keys: [1]")
@@ -330,9 +332,10 @@ func TestApp_MigratePanicRecovery(t *testing.T) {
 
 		app.container.PubSub = &infra.MockPubSub{}
 
-		app.Migrate(map[int64]migration.Migrate{1: {UP: func(_ migration.Datasource) error {
+		_, err := app.Migrate(map[int64]migration.Migrate{1: {UP: func(_ migration.Datasource) error {
 			panic("test panic")
 		}}})
+		require.Error(t, err)
 	})
 
 	assert.Contains(t, logs, "test panic")
