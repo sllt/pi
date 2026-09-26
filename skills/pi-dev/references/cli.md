@@ -20,6 +20,8 @@ Directory 与 module 独立；旧 `pi init myapp` 仍可用，module 默认目�
 不 tidy、不复制本地 .env/go.work；冲突、校验失败、可处理的取消不留下成功目录。
 `--offline --template /local/git/template` 需要本地 Git 模板，跳过 build 且明确 verified=false，不能当成已验证交付。
 编译通过不代表完成业务配置/迁移/启动；实际消费还应检查无 replace、依赖文件不变与 smoke。
+v0.4.1 init 的 AST 改写会把 protobuf rawDesc 字节数组排成单行；首次 `make generator` 会恢复 protoc 的多行格式。
+初始化后先生成一次，再执行 `make check-generated` 验证稳定性；该已知差异应只有排版，描述符字节与其他代码仍需一致，不能据此忽略其他生成差异。
 
 ## create / migration
 
