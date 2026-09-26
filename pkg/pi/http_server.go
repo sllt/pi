@@ -34,7 +34,11 @@ var (
 
 func newHTTPServer(c *infra.Container, port int, middlewareConfigs middleware.Config) *httpServer {
 	r := piHTTP.NewRouter()
-	wsManager := websocket.New()
+	wsManager := c.WSManager
+	if wsManager == nil {
+		wsManager = websocket.New()
+		c.WSManager = wsManager
+	}
 
 	r.Use(
 		middleware.Tracer,

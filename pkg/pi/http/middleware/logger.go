@@ -41,10 +41,23 @@ func (w *StatusResponseWriter) WriteHeader(status int) {
 // connection that requires the responseWriter implementation to implement this method.
 func (w *StatusResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if hijacker, ok := w.ResponseWriter.(http.Hijacker); ok {
-		return hijacker.Hijack()
+		conn, rw, err := hijacker.Hijack()
+		if err == nil {
+			w.status = http.StatusSwitchingProtocols
+			w.wroteHeader = true
+		}
+		return conn, rw, err
 	}
 
 	return nil, nil, fmt.Errorf("%w: cannot hijack connection", errHijackNotSupported)
+}
+
+func (w *StatusResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *StatusResponseWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 // RequestLog represents a log entry for HTTP requests.

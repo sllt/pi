@@ -58,7 +58,7 @@ func sendStats(logger datasource.Logger, metrics Metrics, config *DBConfig, star
 			Type:     queryType,
 			Query:    query,
 			Duration: duration,
-			Args:     args,
+			// Query arguments can contain credentials or password hashes.
 		})
 	}
 
@@ -131,7 +131,7 @@ func (d *DB) BeginTxContext(ctx context.Context, opts *sql.TxOptions) (*Tx, erro
 		return nil, err
 	}
 
-	return &Tx{Tx: tx, config: d.config, logger: d.logger, metrics: d.metrics}, nil
+	return &Tx{Tx: tx, config: d.config, logger: d.logger, metrics: d.metrics, owner: d}, nil
 }
 
 func (d *DB) Close() error {
@@ -144,10 +144,14 @@ func (d *DB) Close() error {
 
 type Tx struct {
 	*sql.Tx
+	owner   *DB
 	config  *DBConfig
 	logger  datasource.Logger
 	metrics Metrics
 }
+
+// Owns reports transaction identity, not merely matching database configuration.
+func (d *DB) Owns(tx *Tx) bool { return tx != nil && tx.owner == d }
 
 func (t *Tx) sendOperationStats(start time.Time, queryType, query string, args ...any) {
 	sendStats(t.logger, t.metrics, t.config, start, queryType, query, args...)

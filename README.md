@@ -1,5 +1,18 @@
 # Pi
 
+### 业务契约（v0.4.1）
+
+- `apperror.New(kind, code, publicMessage)` 定义业务错误，`WithCause` 保留内部错误链，`WithDetails` 只携带公开的字段/规则；未知错误统一脱敏。HTTP、`grpc.MapError`、`cmd.MapError` 分别映射协议状态和退出码，取消优先于其他错误，HTTP 兼容旧 Code/StatusCode 接口。
+- `auth.WithPrincipal` 仅用于已验证的 transport 或可信任务，不能从请求 userId 直接建立身份。`auth.Require` / `AuthorizeSubject` 让业务层执行本人或显式权限判断，权限切片跨 context 边界复制。
+- `response.OK/Created/Accepted/NoContent` 显式选择 200/201/202/204。`WithExplicitHTTPStatus()` 让其余成功结果默认 200；未选用时保留旧 method/data 推断。所有 204 都不写正文；error 优先于 data 和特殊响应。`response.Stream` 在 Handler 返回后同步写入，只继承客户端取消，长流自行设定时限；已提交后的错误只记录，不补 JSON。`response.Handled` 仅供明确接管响应的适配器。
+- HTTP Handler 独占请求体、header 和路由参数快照；超时后业务仍可能继续，迟到结果不会重新写响应。multipart 临时文件等到 Handler 和响应均结束后清理。Build 默认正文上限 1 MiB（`HTTP_MAX_BODY_BYTES` 可调），旧 New 上限 32 MiB。请求超时也约束读取正文；自定义 writer 需支持 ResponseController 的 deadline 或由宿主设置读超时。
+- SQL `BeginTxContext(ctx, opts)` 返回 Pi Tx/Executor 并保留所属 DB；嵌入的标准库 `BeginTx` 仍返回 `*database/sql.Tx`。`DB.Owns` / `Handle.Owns` 检查归属，`IsUniqueViolation` 分类唯一约束错误。SQL 日志不记录参数值。
+- gRPC wrapper 使用完整服务名、按 App 隔离的 health、安全错误映射与 protobuf 克隆绑定。`Bind` 目标必须是同类型 protobuf 指针，业务 DTO 由手写 adapter 显式转换；重新生成时保留手写 server。`NewPrincipalUnaryInterceptor` / `NewPrincipalStreamInterceptor` 只从已验证 Bearer 建立身份，授权继续放在 service。
+
+框架与 pi-layout 的业务事务、跨入口授权示例以 SQLite 实测为基线；HTTP/gRPC 仍由应用选择注册。
+`make generator-integration` 使用固定 protoc/插件编译双 service 的 unary、server/client streaming、bidi 生成物。
+本地候选生成测试使用临时 replace；发布消费另外以无 replace 的实际 tag 验证。
+
 ### 显式构造与宿主集成（v0.4.0）
 
 ```go
@@ -32,7 +45,7 @@ Owned 按登记顺序启动、逆序关闭，失败的 Start 也执行 Stop；Bo
 
 ### Reproducible projects (v0.3.2)
 
-Install a specific CLI (`go install github.com/sllt/pi/cmd/pi@v0.3.2`), then run
+Install a specific CLI (`go install github.com/sllt/pi/cmd/pi@v0.4.1`), then run
 `pi init --module example.com/company/orders ./orders`. The default template ref
 matches the CLI version. `--ref` selects another tag/commit explicitly. Generated
 `.pi-template.json` records the CLI, framework, template ref/commit and verification

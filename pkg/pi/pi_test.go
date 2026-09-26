@@ -198,6 +198,11 @@ func TestPi_ServerRoutes(t *testing.T) {
 		r.Header.Set("Content-Type", "application/json")
 
 		g.httpServer.router.ServeHTTP(w, r)
+		if tc.method == http.MethodDelete {
+			require.Equal(t, http.StatusNoContent, w.Code)
+			require.Empty(t, w.Body.String())
+			continue
+		}
 
 		var res response
 

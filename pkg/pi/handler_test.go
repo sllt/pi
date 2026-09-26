@@ -65,7 +65,11 @@ func TestHandler_ServeHTTP(t *testing.T) {
 			container: c,
 		}.ServeHTTP(w, r)
 
-		assert.Containsf(t, w.Body.String(), tc.body, "TEST[%d], Failed.\n%s", i, tc.desc)
+		if tc.statusCode == http.StatusNoContent {
+			assert.Empty(t, w.Body.String())
+		} else {
+			assert.Containsf(t, w.Body.String(), tc.body, "TEST[%d], Failed.\n%s", i, tc.desc)
+		}
 		assert.Equal(t, tc.statusCode, w.Code, "TEST[%d], Failed.\n%s", i, tc.desc)
 	}
 }

@@ -276,7 +276,12 @@ func Test_CreateHandler(t *testing.T) {
 
 			assert.Equal(t, tc.expectedResp, resp, "TEST[%d], Failed.\n%s", i, tc.desc)
 
-			assert.IsType(t, tc.expectedErr, err, "TEST[%d], Failed.\n%s", i, tc.desc)
+			if _, ok := tc.expectedErr.(*json.UnmarshalTypeError); ok {
+				var decodeErr *json.UnmarshalTypeError
+				assert.ErrorAs(t, err, &decodeErr)
+			} else {
+				assert.IsType(t, tc.expectedErr, err, "TEST[%d], Failed.\n%s", i, tc.desc)
+			}
 		})
 	}
 }
@@ -529,7 +534,12 @@ func Test_UpdateHandler(t *testing.T) {
 
 				assert.Equal(t, tc.expectedResp, resp, "TEST[%d], Failed.\n%s", i, tc.desc)
 
-				assert.IsType(t, tc.expectedErr, err, "TEST[%d], Failed.\n%s", i, tc.desc)
+				if _, ok := tc.expectedErr.(*json.UnmarshalTypeError); ok {
+					var decodeErr *json.UnmarshalTypeError
+					assert.ErrorAs(t, err, &decodeErr)
+				} else {
+					assert.IsType(t, tc.expectedErr, err, "TEST[%d], Failed.\n%s", i, tc.desc)
+				}
 			})
 		}
 

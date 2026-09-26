@@ -2,11 +2,13 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"reflect"
 
+	"github.com/sllt/pi/pkg/pi/apperror"
 	resTypes "github.com/sllt/pi/pkg/pi/http/response"
 )
 
@@ -21,8 +23,22 @@ func NewResponder(w http.ResponseWriter, method string) *Responder {
 
 // Responder encapsulates an http.ResponseWriter and is responsible for crafting structured responses.
 type Responder struct {
-	w      http.ResponseWriter
-	method string
+	w        http.ResponseWriter
+	method   string
+	ctx      context.Context
+	policy   StatusPolicy
+	override int
+}
+
+type StatusPolicy uint8
+
+const (
+	LegacyStatus StatusPolicy = iota
+	ExplicitStatus
+)
+
+func NewResponderForRequest(w http.ResponseWriter, r *http.Request, policy StatusPolicy) *Responder {
+	return &Responder{w: w, method: r.Method, ctx: r.Context(), policy: policy}
 }
 
 // Respond sends a response with the given data and handles potential errors, setting appropriate
@@ -30,6 +46,31 @@ type Responder struct {
 func (r Responder) Respond(data any, err error) {
 	if err != nil {
 		data = nil
+	}
+	if result, ok := data.(resTypes.Result); ok {
+		switch result.StatusCode {
+		case 200, 201, 202, 204:
+			r.override = result.StatusCode
+			data = result.Data
+			for k, v := range result.Headers {
+				r.w.Header().Set(k, v)
+			}
+		default:
+			data = nil
+			err = errors.New("invalid explicit success status")
+		}
+	}
+	if err == nil {
+		if response, ok := data.(resTypes.Response); ok {
+			response.SetCustomHeaders(r.w)
+		}
+		if _, ok := data.(resTypes.Handled); ok {
+			return
+		}
+		if r.getHTTPStatusCode(data, nil) == http.StatusNoContent {
+			r.w.WriteHeader(http.StatusNoContent)
+			return
+		}
 	}
 	if r.handleSpecialResponseTypes(data, err) {
 		return
@@ -81,16 +122,22 @@ func (r Responder) buildResponse(data any, meta map[string]any, err error) respo
 	}
 
 	_, code, message := ErrorResponse(err)
-	return response{Code: code, Data: nil, Message: message, Meta: meta}
+	return response{Code: code, Data: nil, Message: message, Meta: meta, Details: ErrorDetails(err)}
 }
 
 // getHTTPStatusCode returns the HTTP status code for the response.
 func (r Responder) getHTTPStatusCode(data any, err error) int {
 	if err == nil {
+		if r.override != 0 {
+			return r.override
+		}
 		if customCode, ok := getCustomStatusCode(data); ok {
 			return customCode
 		}
 
+		if r.policy == ExplicitStatus {
+			return http.StatusOK
+		}
 		return handleSuccessStatusCode(r.method, data)
 	}
 
@@ -111,6 +158,23 @@ func (r Responder) handleSpecialResponseTypes(data any, err error) bool {
 	statusCode := r.getStatusCodeForSpecialResponse(data, err)
 
 	switch v := data.(type) {
+	case resTypes.Stream:
+		if v.Run == nil {
+			r.Respond(nil, errors.New("stream callback is nil"))
+			return true
+		}
+		contentType := v.ContentType
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		r.w.Header().Set("Content-Type", contentType)
+		r.w.WriteHeader(statusCode)
+		ctx := r.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		_ = v.Run(ctx, r.w)
+		return true
 	case resTypes.File:
 		r.w.Header().Set("Content-Type", v.ContentType)
 		r.w.WriteHeader(statusCode)
@@ -159,16 +223,7 @@ func (r Responder) handleSpecialResponseTypes(data any, err error) bool {
 
 // getStatusCodeForSpecialResponse returns the appropriate status code for special response types.
 func (r Responder) getStatusCodeForSpecialResponse(data any, err error) int {
-	if err == nil {
-		if customCode, ok := getCustomStatusCode(data); ok {
-			return customCode
-		}
-
-		return handleSuccessStatusCode(r.method, data)
-	}
-
-	status, _, _ := ErrorResponse(err)
-	return status
+	return r.getHTTPStatusCode(data, err)
 }
 
 // getCustomStatusCode extracts optional HTTP status code overrides from supported response types.
@@ -181,6 +236,8 @@ func getCustomStatusCode(data any) (int, bool) {
 	case resTypes.XML:
 		statusCode = v.StatusCode
 	case resTypes.File:
+		statusCode = v.StatusCode
+	case resTypes.Stream:
 		statusCode = v.StatusCode
 	default:
 		return 0, false
@@ -245,10 +302,11 @@ type ResponseMarshaller interface {
 
 // response represents the unified HTTP JSON response format.
 type response struct {
-	Code    int            `json:"code"`
-	Data    any            `json:"data"`
-	Message string         `json:"message"`
-	Meta    map[string]any `json:"meta,omitempty"`
+	Code    int               `json:"code"`
+	Data    any               `json:"data"`
+	Message string            `json:"message"`
+	Meta    map[string]any    `json:"meta,omitempty"`
+	Details []apperror.Detail `json:"details,omitempty"`
 }
 
 // StatusCodeResponder allows errors to specify the HTTP status code.

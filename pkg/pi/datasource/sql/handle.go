@@ -134,6 +134,8 @@ func (h *Handle) HealthCheck() *datasource.Health {
 
 type errorConnector struct{ err error }
 
+func (h *Handle) Owns(tx *Tx) bool { d, err := h.ready(); return err == nil && d.Owns(tx) }
+
 func (c errorConnector) Connect(context.Context) (driver.Conn, error) { return nil, c.err }
 func (c errorConnector) Driver() driver.Driver                        { return c }
 func (c errorConnector) Open(string) (driver.Conn, error)             { return nil, c.err }

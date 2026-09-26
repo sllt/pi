@@ -48,7 +48,9 @@ const (
 type Container struct {
 	logging.Logger
 	// Validate is an optional per-instance request validator. Nil keeps legacy validation.
-	Validate func(any) error
+	Validate           func(any) error
+	ExplicitHTTPStatus bool
+	MaxBodyBytes       int64
 
 	appName    string
 	appVersion string

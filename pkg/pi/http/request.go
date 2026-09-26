@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/sllt/pi/pkg/pi/apperror"
 )
 
 const (
@@ -63,6 +64,10 @@ func (r *Request) PathParam(key string) string {
 func (r *Request) Bind(i any) error {
 	v := r.req.Header.Get("Content-Type")
 	contentType := strings.Split(v, ";")[0]
+	value := reflect.ValueOf(i)
+	if contentType != "binary/octet-stream" && (!value.IsValid() || value.Kind() != reflect.Ptr || value.IsNil()) {
+		return errNonPointerBind
+	}
 
 	var err error
 
@@ -83,7 +88,7 @@ func (r *Request) Bind(i any) error {
 	}
 
 	if err != nil {
-		return err
+		return apperror.New(apperror.InvalidArgument, 400, "invalid request body").WithCause(err)
 	}
 
 	// Validate the struct after binding
@@ -180,7 +185,7 @@ func (r *Request) bindForm(ptr any, isMultipart bool) error {
 func (r *Request) bindBinary(raw any) error {
 	// Ensure raw is a pointer to a byte slice
 	byteSlicePtr, ok := raw.(*[]byte)
-	if !ok {
+	if !ok || byteSlicePtr == nil {
 		return fmt.Errorf("%w: %v", errNonSliceBind, raw)
 	}
 

@@ -41,17 +41,24 @@ type managedResource struct {
 	active bool
 }
 type buildOptions struct {
-	values         map[string]string
-	logger         logging.Logger
-	metrics        metrics.Manager
-	metricsHandler http.Handler
-	validate       func(any) error
-	db             infra.DB
-	dbOwnership    Ownership
-	managedSQL     bool
-	resources      []Resource
+	explicitHTTPStatus bool
+	values             map[string]string
+	logger             logging.Logger
+	metrics            metrics.Manager
+	metricsHandler     http.Handler
+	validate           func(any) error
+	db                 infra.DB
+	dbOwnership        Ownership
+	managedSQL         bool
+	resources          []Resource
 }
 type Option func(*buildOptions) error
+
+// WithExplicitHTTPStatus defaults successful responses to 200. Use response.OK,
+// Created, Accepted or NoContent to express each operation's contract.
+func WithExplicitHTTPStatus() Option {
+	return func(o *buildOptions) error { o.explicitHTTPStatus = true; return nil }
+}
 
 func WithConfig(values map[string]string) Option {
 	snapshot := config.NewSnapshot(values)
@@ -59,7 +66,7 @@ func WithConfig(values map[string]string) Option {
 }
 func WithLogger(l logging.Logger) Option {
 	return func(o *buildOptions) error {
-		if l == nil {
+		if nilOptionValue(l) {
 			return errors.New("logger must not be nil")
 		}
 		o.logger = l
@@ -68,7 +75,7 @@ func WithLogger(l logging.Logger) Option {
 }
 func WithMetrics(m metrics.Manager) Option {
 	return func(o *buildOptions) error {
-		if m == nil {
+		if nilOptionValue(m) {
 			return errors.New("metrics must not be nil")
 		}
 		o.metrics = m
@@ -77,7 +84,7 @@ func WithMetrics(m metrics.Manager) Option {
 }
 func WithMetricsHandler(h http.Handler) Option {
 	return func(o *buildOptions) error {
-		if h == nil {
+		if nilOptionValue(h) {
 			return errors.New("metrics handler must not be nil")
 		}
 		o.metricsHandler = h
@@ -204,6 +211,11 @@ func Build(options ...Option) (*App, error) {
 	}
 	c := infra.NewIsolated(cfg, o.logger, o.metrics)
 	c.Validate = o.validate
+	c.ExplicitHTTPStatus = o.explicitHTTPStatus
+	c.MaxBodyBytes = 1 << 20
+	if v := cfg.Get("HTTP_MAX_BODY_BYTES"); v != "" {
+		c.MaxBodyBytes, _ = strconv.ParseInt(v, 10, 64)
+	}
 	a := &App{Config: cfg, container: c, pureBuild: true, httpDisabled: !httpEnabled, grpcDisabled: !grpcEnabled, waitDone: make(chan struct{})}
 	if o.managedSQL {
 		h := piSQL.NewHandle(cfg, c.Logger, c.Metrics())
@@ -235,6 +247,7 @@ func Build(options ...Option) (*App, error) {
 
 func validateBuildConfig(c *config.Snapshot) error {
 	allowed := map[string]bool{}
+	allowed["HTTP_MAX_BODY_BYTES"] = true
 	// These belong to the HTTP/gRPC libraries, not Pi's endpoint schema.
 	for _, k := range []string{"HTTP_PROXY", "GRPC_GO_LOG_SEVERITY_LEVEL", "GRPC_GO_LOG_VERBOSITY_LEVEL"} {
 		allowed[k] = true
@@ -272,6 +285,12 @@ func validateBuildConfig(c *config.Snapshot) error {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 || n > 65535 {
 			return errors.New("DB_PORT must be in 1..65535")
+		}
+	}
+	if v := c.Get("HTTP_MAX_BODY_BYTES"); v != "" {
+		n, e := strconv.ParseInt(v, 10, 64)
+		if e != nil || n <= 0 {
+			return errors.New("HTTP_MAX_BODY_BYTES must be a positive integer")
 		}
 	}
 	if v := c.Get("SHUTDOWN_GRACE_PERIOD"); v != "" {

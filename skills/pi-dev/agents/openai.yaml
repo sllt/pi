@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pi 框架与脚手架开发"
+  short_description: "开发与审查 Pi Go 框架、Fx 脚手架、业务模块、迁移及 CLI"
+  default_prompt: "使用 $pi-dev，根据当前仓库代码完成 Pi 框架或 pi-layout 的开发任务，并核对兼容性与验证结果。"

@@ -10,8 +10,12 @@ import (
 
 	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 
 	"github.com/sllt/pi/pkg/pi/config"
 	pi_grpc "github.com/sllt/pi/pkg/pi/grpc"
@@ -33,6 +37,7 @@ type grpcServer struct {
 	config             config.Config
 	serverCreated      bool
 	pendingServices    []pendingService
+	health             *health.Server
 }
 
 var (
@@ -118,12 +123,18 @@ func newGRPCServer(c *infra.Container, port int, cfg config.Config) (*grpcServer
 
 	middleware := make([]grpc.UnaryServerInterceptor, 0)
 	middleware = append(middleware,
-		grpc_recovery.UnaryServerInterceptor(),
+		grpc_recovery.UnaryServerInterceptor(grpc_recovery.WithRecoveryHandlerContext(func(_ context.Context, p any) error {
+			c.Errorf("gRPC handler panic: %v", p)
+			return status.Error(codes.Internal, "internal server error")
+		})),
 		pi_grpc.ObservabilityInterceptor(c.Logger, c.Metrics()))
 
 	streamMiddleware := make([]grpc.StreamServerInterceptor, 0)
 	streamMiddleware = append(streamMiddleware,
-		grpc_recovery.StreamServerInterceptor(),
+		grpc_recovery.StreamServerInterceptor(grpc_recovery.WithRecoveryHandlerContext(func(_ context.Context, p any) error {
+			c.Errorf("gRPC stream panic: %v", p)
+			return status.Error(codes.Internal, "internal server error")
+		})),
 		pi_grpc.StreamObservabilityInterceptor(c.Logger, c.Metrics()))
 
 	return &grpcServer{
@@ -240,6 +251,9 @@ func (g *grpcServer) start(c *infra.Container, onError func(error)) error {
 }
 
 func (g *grpcServer) Shutdown(ctx context.Context) error {
+	if g.health != nil {
+		g.health.Shutdown()
+	}
 	return ShutdownWithContext(ctx, func(_ context.Context) error {
 		if g.server != nil {
 			g.server.GracefulStop()
@@ -266,6 +280,25 @@ func (a *App) RegisterService(desc *grpc.ServiceDesc, impl any) {
 
 	a.grpcRegistered = true
 	a.container.Logger.Infof("gRPC service %s queued for registration", desc.ServiceName)
+}
+
+// GRPCHealthServer registers one health service per application. Call during
+// composition, before Start, as with other service registration methods.
+func (a *App) GRPCHealthServer() *health.Server {
+	if a.grpcServer.health != nil {
+		return a.grpcServer.health
+	}
+	if a.grpcServer.serverCreated {
+		panic("register gRPC health before Start")
+	}
+	h := health.NewServer()
+	a.grpcServer.health = h
+	a.RegisterService(&healthpb.Health_ServiceDesc, h)
+	h.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	buckets := []float64{0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10}
+	a.Metrics().NewHistogram("app_gRPC-Server_stats", "gRPC server response duration", buckets...)
+	a.Metrics().NewHistogram("app_gRPC-Stream_stats", "gRPC stream duration", buckets...)
+	return h
 }
 
 func injectContainer(impl any, c *infra.Container) error {

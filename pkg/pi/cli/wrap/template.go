@@ -31,9 +31,7 @@ import (
 
 	"github.com/sllt/pi/pkg/pi"
 	"github.com/sllt/pi/pkg/pi/infra"
-	{{- if $hasStream }}
 	piGRPC "github.com/sllt/pi/pkg/pi/grpc"
-	{{- end }}
 	"google.golang.org/grpc"
 
 	{{- if $hasUnary }}
@@ -67,22 +65,23 @@ type {{ .Service }}ServerWrapper struct {
 	{{ .Service }}Server
 	*healthServer
 	Container *infra.Container
+	app *pi.App
 	server    {{ .Service }}ServerWithPi
 }
 
 {{- if $hasStream }}
 // Base instrumented stream
-type instrumentedStream struct {
+type instrumentedStream{{ $.Service }} struct {
 	grpc.ServerStream
 	ctx    *pi.Context
 	method string
 }
 
-func (s *instrumentedStream) Context() context.Context {
+func (s *instrumentedStream{{ $.Service }}) Context() context.Context {
 	return s.ctx
 }
 
-func (s *instrumentedStream) SendMsg(m interface{}) error {
+func (s *instrumentedStream{{ $.Service }}) SendMsg(m interface{}) error {
 	start := time.Now()
 	span := s.ctx.Trace(s.method + "/SendMsg")
 	defer span.End()
@@ -96,7 +95,7 @@ func (s *instrumentedStream) SendMsg(m interface{}) error {
 	return err
 }
 
-func (s *instrumentedStream) RecvMsg(m interface{}) error {
+func (s *instrumentedStream{{ $.Service }}) RecvMsg(m interface{}) error {
 	start := time.Now()
 	span := s.ctx.Trace(s.method + "/RecvMsg")
 	defer span.End()
@@ -114,11 +113,11 @@ func (s *instrumentedStream) RecvMsg(m interface{}) error {
 {{ range .Methods }}
 {{- if .StreamsRequest }}
 // Client-side streaming specific wrapper
-type clientStreamWrapper{{ .Name }} struct {
-	*instrumentedStream
+type clientStreamWrapper{{ $.Service }}{{ .Name }} struct {
+	*instrumentedStream{{ $.Service }}
 }
 
-func (w *clientStreamWrapper{{ .Name }}) SendAndClose(m *{{ .Response }}) error {
+func (w *clientStreamWrapper{{ $.Service }}{{ .Name }}) SendAndClose(m *{{ .Response }}) error {
 	start := time.Now()
 	span := w.ctx.Trace(w.method + "/SendAndClose")
 	defer span.End()
@@ -132,7 +131,7 @@ func (w *clientStreamWrapper{{ .Name }}) SendAndClose(m *{{ .Response }}) error 
 	return err
 }
 
-func (w *clientStreamWrapper{{ .Name }}) Recv() (*{{ .Request }}, error) {
+func (w *clientStreamWrapper{{ $.Service }}{{ .Name }}) Recv() (*{{ .Request }}, error) {
 	start := time.Now()
 	span := w.ctx.Trace(w.method + "/Recv")
 	defer span.End()
@@ -151,11 +150,11 @@ func (w *clientStreamWrapper{{ .Name }}) Recv() (*{{ .Request }}, error) {
 {{- if .StreamsResponse }}
 {{- if not .StreamsRequest }}
 // Server-side streaming specific wrapper
-type serverStreamWrapper{{ .Name }} struct {
-	*instrumentedStream
+type serverStreamWrapper{{ $.Service }}{{ .Name }} struct {
+	*instrumentedStream{{ $.Service }}
 }
 
-func (w *serverStreamWrapper{{ .Name }}) Send(m *{{ .Response }}) error {
+func (w *serverStreamWrapper{{ $.Service }}{{ .Name }}) Send(m *{{ .Response }}) error {
 	start := time.Now()
 	span := w.ctx.Trace(w.method + "/Send")
 	defer span.End()
@@ -170,11 +169,11 @@ func (w *serverStreamWrapper{{ .Name }}) Send(m *{{ .Response }}) error {
 }
 {{- else }}
 // Bidirectional streaming wrapper
-type bidiStreamWrapper{{ .Name }} struct {
-	*instrumentedStream
+type bidiStreamWrapper{{ $.Service }}{{ .Name }} struct {
+	*instrumentedStream{{ $.Service }}
 }
 
-func (w *bidiStreamWrapper{{ .Name }}) Send(m *{{ .Response }}) error {
+func (w *bidiStreamWrapper{{ $.Service }}{{ .Name }}) Send(m *{{ .Response }}) error {
 	start := time.Now()
 	span := w.ctx.Trace(w.method + "/Send")
 	defer span.End()
@@ -188,7 +187,7 @@ func (w *bidiStreamWrapper{{ .Name }}) Send(m *{{ .Response }}) error {
 	return err
 }
 
-func (w *bidiStreamWrapper{{ .Name }}) Recv() (*{{ .Request }}, error) {
+func (w *bidiStreamWrapper{{ $.Service }}{{ .Name }}) Recv() (*{{ .Request }}, error) {
 	start := time.Now()
 	span := w.ctx.Trace(w.method + "/Recv")
 	defer span.End()
@@ -203,7 +202,7 @@ func (w *bidiStreamWrapper{{ .Name }}) Recv() (*{{ .Request }}, error) {
 	return &req, err
 }
 
-func (w *bidiStreamWrapper{{ .Name }}) CloseSend() error {
+func (w *bidiStreamWrapper{{ $.Service }}{{ .Name }}) CloseSend() error {
 	start := time.Now()
 	span := w.ctx.Trace(w.method + "/CloseSend")
 	defer span.End()
@@ -228,14 +227,14 @@ func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(req *{{ .Request }}, stream {
 	ctx := stream.Context()
 	gctx := h.getPiContext(ctx, &{{ .Request }}Wrapper{ctx: ctx, {{ .Request }}: req})
 
-	is := &instrumentedStream{
+	is := &instrumentedStream{{ $.Service }}{
 		ServerStream: stream,
 		ctx:        gctx,
 		method:     "/{{ $.FullService }}/{{ .Name }}",
 	}
 
-	wrappedStream := &serverStreamWrapper{{ .Name }}{instrumentedStream: is}
-	return h.server.{{ .Name }}(gctx, wrappedStream)
+	wrappedStream := &serverStreamWrapper{{ $.Service }}{{ .Name }}{instrumentedStream{{ $.Service }}: is}
+	return piGRPC.MapError(h.server.{{ .Name }}(gctx, wrappedStream))
 }
 {{- else }}
 // Bidirectional streaming handler for {{ .Name }}
@@ -243,14 +242,14 @@ func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(stream {{ $.Service }}_{{ .Na
 	ctx := stream.Context()
 	gctx := h.getPiContext(ctx, nil)
 
-	is := &instrumentedStream{
+	is := &instrumentedStream{{ $.Service }}{
 		ServerStream: stream,
 		ctx:        gctx,
 		method:     "/{{ $.FullService }}/{{ .Name }}",
 	}
 
-	wrappedStream := &bidiStreamWrapper{{ .Name }}{instrumentedStream: is}
-	return h.server.{{ .Name }}(gctx, wrappedStream)
+	wrappedStream := &bidiStreamWrapper{{ $.Service }}{{ .Name }}{instrumentedStream{{ $.Service }}: is}
+	return piGRPC.MapError(h.server.{{ .Name }}(gctx, wrappedStream))
 }
 {{- end }}
 {{- else if .StreamsRequest }}
@@ -259,14 +258,14 @@ func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(stream {{ $.Service }}_{{ .Na
 	ctx := stream.Context()
 	gctx := h.getPiContext(ctx, nil)
 
-	is := &instrumentedStream{
+	is := &instrumentedStream{{ $.Service }}{
 		ServerStream: stream,
 		ctx:        gctx,
 		method:     "/{{ $.FullService }}/{{ .Name }}",
 	}
 
-	wrappedStream := &clientStreamWrapper{{ .Name }}{instrumentedStream: is}
-	return h.server.{{ .Name }}(gctx, wrappedStream)
+	wrappedStream := &clientStreamWrapper{{ $.Service }}{{ .Name }}{instrumentedStream{{ $.Service }}: is}
+	return piGRPC.MapError(h.server.{{ .Name }}(gctx, wrappedStream))
 }
 {{- else }}
 // Unary method handler for {{ .Name }}
@@ -275,12 +274,12 @@ func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(ctx context.Context, req *{{ 
 
 	res, err := h.server.{{ .Name }}(gctx)
 	if err != nil {
-		return nil, err
+		return nil, piGRPC.MapError(err)
 	}
 
 	resp, ok := res.(*{{ .Response }})
 	if !ok {
-		return nil, status.Errorf(codes.Unknown, "unexpected response type %T", res)
+		return nil, status.Error(codes.Internal, "internal server error")
 	}
 
 	return resp, nil
@@ -296,22 +295,21 @@ func Register{{ .Service }}ServerWithPi(app *pi.App, srv {{ .Service }}ServerWit
 	registerServerWithPi(app, srv, func(s grpc.ServiceRegistrar, srv any) {
 		wrapper := &{{ .Service }}ServerWrapper{
 			server: srv.({{ .Service }}ServerWithPi),
-			healthServer: getOrCreateHealthServer(),
+			healthServer: &healthServer{app.GRPCHealthServer()},
+			app: app,
 		}
 
 		Register{{ .Service }}Server(s, wrapper)
 
-		wrapper.Server.SetServingStatus("{{ .FullService }}", healthpb.HealthCheckResponse_SERVING)
+		wrapper.healthServer.Server.SetServingStatus("{{ .FullService }}", healthpb.HealthCheckResponse_SERVING)
 	})
 }
 
 // getPiContext creates Pi context
 func (h *{{ .Service }}ServerWrapper) getPiContext(ctx context.Context, req pi.Request) *pi.Context {
-	return &pi.Context{
-		Context:   ctx,
-		Container: h.Container,
-		Request:   req,
-	}
+	c := h.app.NewContext(ctx)
+	c.Request = req
+	return c
 }
 `
 
@@ -326,8 +324,7 @@ package {{ .Package }}
 
 import (
 	"context"
-	"fmt"
-	"reflect"
+	piGRPC "github.com/sllt/pi/pkg/pi/grpc"
 )
 
 // Request Wrappers
@@ -350,26 +347,7 @@ func (h *{{ $request }}Wrapper) PathParam(s string) string {
 }
 
 func (h *{{ $request }}Wrapper) Bind(p interface{}) error {
-	ptr := reflect.ValueOf(p)
-	if ptr.Kind() != reflect.Ptr {
-		return fmt.Errorf("expected a pointer, got %T", p)
-	}
-
-	hValue := reflect.ValueOf(h.{{ $request }}).Elem()
-	ptrValue := ptr.Elem()
-
-	for i := 0; i < hValue.NumField(); i++ {
-		field := hValue.Type().Field(i)
-		if field.Name == "state" || field.Name == "sizeCache" || field.Name == "unknownFields" {
-			continue
-		}
-
-		if field.IsExported() {
-			ptrValue.Field(i).Set(hValue.Field(i))
-		}
-	}
-
-	return nil
+	return piGRPC.BindRequest(p, h.{{ $request }})
 }
 
 func (h *{{ $request }}Wrapper) HostName() string {
@@ -392,7 +370,7 @@ import "github.com/sllt/pi/pkg/pi"
 
 // Register the gRPC service in your app using the following code in your main.go:
 //
-// {{ .Package }}.Register{{ $.Service }}ServerWithPi(app, &{{ .Package }}.New{{ $.Service }}PiServer())
+// {{ .Package }}.Register{{ $.Service }}ServerWithPi(app, {{ .Package }}.New{{ $.Service }}PiServer())
 //
 // {{ $.Service }}PiServer defines the gRPC server implementation.
 // Customize the struct with required dependencies and fields as needed.
@@ -553,34 +531,12 @@ type healthServer struct {
 	*health.Server
 }
 
-var globalHealthServer *healthServer
-var healthServerRegistered bool // Global flag to track if health server is registered
-
-// getOrCreateHealthServer ensures only one health server is created and reused.
-func getOrCreateHealthServer() *healthServer {
-	if globalHealthServer == nil {
-		globalHealthServer = &healthServer{health.NewServer()}
-	}
-	return globalHealthServer
-}
+// Compatibility constructor: each call owns a distinct, unregistered server.
+func getOrCreateHealthServer() *healthServer { return &healthServer{health.NewServer()} }
 
 func registerServerWithPi(app *pi.App, srv any, registerFunc func(grpc.ServiceRegistrar, any)) {
-	var s grpc.ServiceRegistrar = app
-	h := getOrCreateHealthServer()
-
-	// Register metrics and health server only once
-	if !healthServerRegistered {
-		gRPCBuckets := []float64{0.005, 0.01, .05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
-		app.Metrics().NewHistogram("app_gRPC-Server_stats", "Response time of gRPC server in milliseconds.", gRPCBuckets...)
-		app.Metrics().NewHistogram("app_gRPC-Stream_stats", "Duration of gRPC stream in milliseconds.", gRPCBuckets...)
-
-		healthpb.RegisterHealthServer(s, h.Server)
-		h.Server.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-		healthServerRegistered = true
-	}
-
-	// Register the provided server
-	registerFunc(s, srv)
+    app.GRPCHealthServer()
+    registerFunc(app, srv)
 }
 
 func (h *healthServer) Check(ctx *pi.Context, req *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {

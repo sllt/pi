@@ -1,15 +1,20 @@
 package pi
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -42,6 +47,118 @@ func (p lateResponsePayload) MarshalJSON() ([]byte, error) {
 type handlerResultLogger struct {
 	logging.Logger
 	errors chan any
+}
+
+type closedRequestBody struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (b *closedRequestBody) Read(p []byte) (int, error) {
+	if b.closed.Load() {
+		return 0, errors.New("original body already closed")
+	}
+	return b.Reader.Read(p)
+}
+func (b *closedRequestBody) Close() error { b.closed.Store(true); return nil }
+
+func TestHandlerSnapshotSurvivesTimeoutAndRouterReuse(t *testing.T) {
+	entered, release, responded := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	type outcome struct {
+		value, param string
+		err          error
+	}
+	got := make(chan outcome, 1)
+	h := handler{container: &infra.Container{Logger: logging.NewLogger(logging.FATAL)}, requestTimeout: 5 * time.Millisecond, function: func(c *Context) (any, error) {
+		close(entered)
+		<-release
+		var body struct {
+			Value string `json:"value"`
+		}
+		err := c.Bind(&body)
+		got <- outcome{body.Value, c.PathParam("id"), err}
+		return nil, err
+	}}
+	r := httptest.NewRequest("POST", "/items/original", nil)
+	r.Header.Set("Content-Type", "application/json")
+	body := &closedRequestBody{Reader: strings.NewReader(`{"value":"original"}`)}
+	r.Body = body
+	route := chi.NewRouteContext()
+	route.URLParams.Add("id", "original")
+	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, route))
+	w := httptest.NewRecorder()
+	go func() { h.ServeHTTP(w, r); close(responded) }()
+	waitForHandlerSignal(t, entered)
+	waitForHandlerSignal(t, responded)
+	require.Equal(t, 408, w.Code)
+	require.True(t, body.closed.Load())
+	route.URLParams.Values[0] = "reused"
+	r.Header.Set("Content-Type", "wrong")
+	unblock()
+	result := <-got
+	require.NoError(t, result.err)
+	require.Equal(t, "original", result.value)
+	require.Equal(t, "original", result.param)
+}
+
+func TestHandlerOwnsPreparsedMultipartAfterTimeout(t *testing.T) {
+	var encoded bytes.Buffer
+	writer := multipart.NewWriter(&encoded)
+	part, err := writer.CreateFormFile("upload", "sample.txt")
+	require.NoError(t, err)
+	_, err = io.WriteString(part, "owned upload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	r := httptest.NewRequest("POST", "/upload", &encoded)
+	r.Header.Set("Content-Type", writer.FormDataContentType())
+	require.NoError(t, r.ParseMultipartForm(1))
+	t.Cleanup(func() { _ = r.MultipartForm.RemoveAll() })
+	entered, release, responded := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	type outcome struct {
+		data string
+		err  error
+	}
+	got := make(chan outcome, 1)
+	h := handler{container: &infra.Container{Logger: logging.NewLogger(logging.FATAL)}, requestTimeout: 5 * time.Millisecond, function: func(c *Context) (any, error) {
+		close(entered)
+		<-release
+		var form struct {
+			Upload *multipart.FileHeader `form:"upload"`
+		}
+		err := c.Bind(&form)
+		if err != nil {
+			got <- outcome{err: err}
+			return nil, err
+		}
+		if form.Upload == nil {
+			err = errors.New("upload not bound")
+			got <- outcome{err: err}
+			return nil, err
+		}
+		file, err := form.Upload.Open()
+		if err != nil {
+			got <- outcome{err: err}
+			return nil, err
+		}
+		defer file.Close()
+		data, err := io.ReadAll(file)
+		got <- outcome{string(data), err}
+		return nil, err
+	}}
+	w := httptest.NewRecorder()
+	go func() { h.ServeHTTP(w, r); close(responded) }()
+	waitForHandlerSignal(t, entered)
+	waitForHandlerSignal(t, responded)
+	require.Equal(t, 408, w.Code)
+	require.NoError(t, r.MultipartForm.RemoveAll())
+	unblock()
+	result := <-got
+	require.NoError(t, result.err)
+	require.Equal(t, "owned upload", result.data)
 }
 
 func (l *handlerResultLogger) Error(args ...any) {
@@ -229,4 +346,23 @@ func TestHandler_ServeHTTP_WebSocketTimeoutExemption(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandler_ExplicitStreamPanicKeepsCommittedResponse(t *testing.T) {
+	var logs bytes.Buffer
+	h := handler{
+		container: &infra.Container{Logger: logging.NewWriterLogger(logging.ERROR, &logs, &logs)},
+		function: func(*Context) (any, error) {
+			return response.Accepted(response.Stream{Run: func(_ context.Context, w io.Writer) error {
+				_, _ = io.WriteString(w, "partial")
+				panic("stream-private-cause")
+			}}), nil
+		},
+	}
+	w := &countedResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	assert.Equal(t, http.StatusAccepted, w.Code)
+	assert.Equal(t, 1, w.commits)
+	assert.Equal(t, "partial", w.Body.String())
+	assert.Contains(t, logs.String(), "stream-private-cause")
 }
