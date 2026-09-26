@@ -3,14 +3,14 @@ package main
 import (
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 const redisExpiryTime = 5
 
 func main() {
 	// Create a new application
-	app := kite.New()
+	app := pi.New()
 
 	// Add routes for Redis operations
 	app.GET("/redis/{key}", RedisGetHandler)
@@ -19,7 +19,7 @@ func main() {
 
 	// Register an OnStart hook to warm up a cache.
 	// This runs before route registration as intended.
-	app.OnStart(func(ctx *kite.Context) error {
+	app.OnStart(func(ctx *pi.Context) error {
 		ctx.Logger.Info("Warming up the cache...")
 
 		// Example: Fetch some data and store it in Redis.
@@ -43,7 +43,7 @@ func main() {
 }
 
 // RedisSetHandler sets a key-value pair in Redis using the Set Command.
-func RedisSetHandler(c *kite.Context) (any, error) {
+func RedisSetHandler(c *pi.Context) (any, error) {
 	input := make(map[string]string)
 
 	if err := c.Request.Bind(&input); err != nil {
@@ -61,7 +61,7 @@ func RedisSetHandler(c *kite.Context) (any, error) {
 }
 
 // RedisGetHandler gets the value from Redis.
-func RedisGetHandler(c *kite.Context) (any, error) {
+func RedisGetHandler(c *pi.Context) (any, error) {
 	key := c.PathParam("key")
 
 	value, err := c.Redis.Get(c, key).Result()
@@ -76,7 +76,7 @@ func RedisGetHandler(c *kite.Context) (any, error) {
 }
 
 // RedisPipelineHandler demonstrates using multiple Redis commands efficiently within a pipeline.
-func RedisPipelineHandler(c *kite.Context) (any, error) {
+func RedisPipelineHandler(c *pi.Context) (any, error) {
 	pipe := c.Redis.Pipeline()
 
 	// Add multiple commands to the pipeline

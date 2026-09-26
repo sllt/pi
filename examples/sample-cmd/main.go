@@ -4,24 +4,24 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/cmd/terminal"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/cmd/terminal"
 )
 
 func main() {
 	// Create a new command-line application
-	app := kite.NewCMD()
+	app := pi.NewCMD()
 
 	// Add a sub-command "hello" with its handler, help and description
-	app.SubCommand("hello", func(c *kite.Context) (any, error) {
+	app.SubCommand("hello", func(c *pi.Context) (any, error) {
 		return "Hello World!", nil
 	},
-		kite.AddDescription("Print 'Hello World!'"),
-		kite.AddHelp("hello world option"),
+		pi.AddDescription("Print 'Hello World!'"),
+		pi.AddHelp("hello world option"),
 	)
 
 	// Add a sub-command "params" with its handler, help and description
-	app.SubCommand("params", func(c *kite.Context) (any, error) {
+	app.SubCommand("params", func(c *pi.Context) (any, error) {
 		return fmt.Sprintf("Hello %s!", c.Param("name")), nil
 	})
 
@@ -33,7 +33,7 @@ func main() {
 	app.Run()
 }
 
-func spinner(ctx *kite.Context) (any, error) {
+func spinner(ctx *pi.Context) (any, error) {
 	// initialize the spinner
 	sp := terminal.NewDotSpinner(ctx.Out)
 	sp.Spin(ctx)
@@ -49,7 +49,7 @@ func spinner(ctx *kite.Context) (any, error) {
 	return "Process Complete", nil
 }
 
-func progress(ctx *kite.Context) (any, error) {
+func progress(ctx *pi.Context) (any, error) {
 	p, err := terminal.NewProgressBar(ctx.Out, 100)
 	if err != nil {
 		ctx.Warn("error initializing progress bar, err : %v", err)

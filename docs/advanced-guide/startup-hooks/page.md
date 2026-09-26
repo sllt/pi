@@ -1,6 +1,6 @@
 # Lifecycle Hooks and Background Workers
 
-Kite provides lifecycle APIs for work that should be managed by the application runtime itself.
+Pi provides lifecycle APIs for work that should be managed by the application runtime itself.
 
 This includes:
 
@@ -13,7 +13,7 @@ This includes:
 For standalone applications, keep using `app.Run()`:
 
 ```go
-app := kite.New()
+app := pi.New()
 // register routes, hooks, workers...
 app.Run()
 ```
@@ -51,7 +51,12 @@ if err := app.RunContext(ctx); err != nil {
 - `RunContext(ctx)` calls `Start(ctx)`, blocks until the context is canceled or a managed worker/server requests shutdown, then calls `Stop(ctx)`.
 - `Stop(ctx)` gracefully shuts down servers, cron, runtime tasks, stop hooks, container resources, and metrics.
 - Server startup failures are returned from `Start` / `RunContext`.
-- `Stop` is idempotent; calling it more than once is safe.
+- Concurrent `Start` calls share one startup result; hooks, listeners and workers start once. The first caller's context remains the runtime parent. Later callers only bound their own wait.
+- `Stop` runs cleanup once and preserves its terminal error. Later callers wait for the same cleanup using their own contexts; a waiting timeout does not mean cleanup completed.
+- The first `Stop` context supplies the cleanup budget. A blocked hook or worker must still cooperate with cancellation; dependencies stay open until managed workers exit.
+- Stopping or stopped instances cannot be restarted. Create a new App to retry a failed startup.
+- Register `OnStart` and `Go` before startup. `OnStop` registration remains available until cleanup begins, including from a startup hook that is still running.
+- Hooks must not synchronously wait on `Start` or `Stop` for their own App.
 
 ## OnStart
 
@@ -59,9 +64,9 @@ You can register a startup hook using the `a.OnStart()` method on your `app` ins
 
 ## Usage
 
-The method accepts a function with the signature `func(ctx *kite.Context) error`.
+The method accepts a function with the signature `func(ctx *pi.Context) error`.
 
-- The `*kite.Context` passed to the hook is fully initialized and provides access to all dependency-injection-managed services (e.g., `ctx.Container.SQL`, `ctx.Container.Redis`).
+- The `*pi.Context` passed to the hook is fully initialized and provides access to all dependency-injection-managed services (e.g., `ctx.Container.SQL`, `ctx.Container.Redis`).
 - If any `OnStart` hook returns an error, the application logs the error, rolls back startup with `Stop`, and returns the startup error.
 
 ### Example: Warming up a Cache
@@ -72,14 +77,14 @@ Here is an example of using `OnStart` to set an initial value in a Redis cache w
 package main
 
 import (
-    "github.com/sllt/kite/pkg/kite"
+    "github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-    a := kite.New()
+    a := pi.New()
 
     // Register an OnStart hook to warm up a cache.
-    a.OnStart(func(ctx *kite.Context) error {
+    a.OnStart(func(ctx *pi.Context) error {
         ctx.Logger.Info("Warming up the cache...")
 
         // In a real app, this might come from a database or another service.
@@ -111,12 +116,13 @@ You can register shutdown hooks using `a.OnStop()`.
 
 - hooks run during graceful shutdown
 - hooks run in **reverse registration order**
-- all hooks are attempted, and Kite joins their errors
+- hooks are attempted while the cleanup budget permits, and Pi joins their errors
+- expiry prevents starting remaining hooks; completed or skipped hooks are not retried by another `Stop`
 
 ### Example
 
 ```go
-app.OnStop(func(ctx *kite.Context) error {
+app.OnStop(func(ctx *pi.Context) error {
     ctx.Logger.Info("flushing final state before shutdown")
     return nil
 })
@@ -131,10 +137,10 @@ Use `OnStop` for:
 
 ## App.Go
 
-`App.Go` registers a long-running background worker managed by Kite.
+`App.Go` registers a long-running background worker managed by Pi.
 
 ```go
-app.Go("cache-warmer", func(ctx *kite.Context) error {
+app.Go("cache-warmer", func(ctx *pi.Context) error {
     ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
 
@@ -152,7 +158,7 @@ app.Go("cache-warmer", func(ctx *kite.Context) error {
 ### Behavior
 
 - workers start with the application runtime
-- the passed `*kite.Context` is canceled when shutdown begins
+- the passed `*pi.Context` is canceled when shutdown begins
 - returning `nil` or `context.Canceled` is treated as graceful exit
 - returning any other error triggers application shutdown
 - panics are recovered and logged

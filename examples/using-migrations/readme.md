@@ -1,13 +1,13 @@
 # Migrations Example
 
-This Kite example demonstrates the use of `migrations` through a simple HTTP server using MySQL, Redis and Kafka.
+This Pi example demonstrates the use of `migrations` through a simple HTTP server using MySQL, Redis and Kafka.
 
 ### To run the example follow the below steps:
 - Run the docker image of MySQL, Redis and Kafka
 
 ```console
-docker run --name kite-mysql -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=test -p 2001:3306 -d mysql:8.0.30
-docker run --name kite-redis -p 2002:6379 -d redis:7.0.5
+docker run --name pi-mysql -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=test -p 2001:3306 -d mysql:8.0.30
+docker run --name pi-redis -p 2002:6379 -d redis:7.0.5
 docker run --name kafka-1 -p 9092:9092 \
 	-e KAFKA_ENABLE_KRAFT=yes \
 	-e KAFKA_CFG_PROCESS_ROLES=broker,controller \

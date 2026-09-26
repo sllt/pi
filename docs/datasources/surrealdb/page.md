@@ -11,8 +11,8 @@ To connect to `SurrealDB`, you need to provide the following environment variabl
 - `TLSENABLED`: TLS mode (e.g., disable, require)
 
 ## Setup 
-Kite supports injecting SurrealDB database that supports the following interface. Any driver that implements the interface can be added
-using `app.AddSurrealDB()` method, and users can use Surreal DB across application through the `kite.Context`.
+Pi supports injecting SurrealDB database that supports the following interface. Any driver that implements the interface can be added
+using `app.AddSurrealDB()` method, and users can use Surreal DB across application through the `pi.Context`.
 
 ```go
 // SurrealDB defines an interface representing a SurrealDB client with common database operations.
@@ -48,18 +48,18 @@ type SurrealDBProvider interface {
     provider
 }
 ```
-Import the kite's external driver for SurrealDB:
+Import the pi's external driver for SurrealDB:
 ```shell
-  go get github.com/sllt/kite/pkg/kite/datasource/surrealdb
+  go get github.com/sllt/pi/pkg/pi/datasource/surrealdb
 ```
-The following example demonstrates injecting an SurrealDB instance into a Kite application.
+The following example demonstrates injecting an SurrealDB instance into a Pi application.
 
 ```go
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/surrealdb"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/surrealdb"
 )
 
 type Person struct {
@@ -74,7 +74,7 @@ type ErrorResponse struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	client := surrealdb.New(&surrealdb.Config{
 		Host:       app.Config.Get("HOST"),
@@ -89,7 +89,7 @@ func main() {
 	app.AddSurrealDB(client)
 
 	// GET request to fetch person by ID
-	app.GET("/person/{id}", func(ctx *kite.Context) (any, error) {
+	app.GET("/person/{id}", func(ctx *pi.Context) (any, error) {
 		id := ctx.PathParam("id")
 
 		query := "SELECT * FROM type::thing('person', $id)"
@@ -106,7 +106,7 @@ func main() {
 	})
 
 	// POST request to create a new person
-	app.POST("/person", func(ctx *kite.Context) (any, error) {
+	app.POST("/person", func(ctx *pi.Context) (any, error) {
 		var person Person
 
 		if err := ctx.Bind(&person); err != nil {

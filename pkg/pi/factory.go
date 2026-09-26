@@ -1,0 +1,100 @@
+package pi
+
+import (
+	"os"
+	"path/filepath"
+	"strconv"
+
+	"github.com/sllt/pi/pkg/pi/cmd/terminal"
+	"github.com/sllt/pi/pkg/pi/http/middleware"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
+)
+
+// New creates an HTTP Server Application and returns that App.
+func New() *App {
+	app := &App{}
+	app.readConfig(false)
+	app.container = infra.NewContainer(app.Config)
+
+	app.initTracer()
+	app.initMetricsServer()
+
+	// HTTP Server
+	port, err := strconv.Atoi(app.Config.Get("HTTP_PORT"))
+	if err != nil || port <= 0 {
+		port = defaultHTTPPort
+	}
+
+	app.httpServer = newHTTPServer(app.container, port, middleware.GetConfigs(app.Config))
+	app.httpServer.certFile = app.Config.GetOrDefault("CERT_FILE", "")
+	app.httpServer.keyFile = app.Config.GetOrDefault("KEY_FILE", "")
+	app.httpServer.staticFiles = make(map[string]string)
+
+	// Note: Default routes (health, alive, favicon, swagger) are registered in httpServerSetup()
+	// only when HTTP server actually starts. This prevents gRPC-only apps from starting HTTP server.
+
+	// gRPC Server
+	port, err = strconv.Atoi(app.Config.Get("GRPC_PORT"))
+	if err != nil || port <= 0 {
+		port = defaultGRPCPort
+	}
+
+	app.grpcServer, err = newGRPCServer(app.container, port, app.Config)
+
+	// Continue without gRPC server rather than failing the entire app
+	if err != nil {
+		app.container.Logger.Errorf("failed to create gRPC server: %v", err)
+	}
+
+	app.subscriptionManager = newSubscriptionManager(app.container)
+
+	// static file server
+	currentWd, _ := os.Getwd()
+	checkDirectory := filepath.Join(currentWd, defaultPublicStaticDir)
+
+	if _, err = os.Stat(checkDirectory); err == nil {
+		app.httpServer.staticFiles[checkDirectory] = "/static"
+	}
+
+	return app
+}
+
+// NewCMD creates a command-line application.
+func NewCMD() *App {
+	app := &App{}
+	app.readConfig(true)
+	app.container = infra.NewContainer(nil)
+	app.container.Logger = logging.NewFileLogger(app.Config.Get("CMD_LOGS_FILE"))
+
+	app.cmd = &cmd{
+		out: terminal.New(),
+	}
+
+	app.container.Create(app.Config)
+	app.initTracer()
+
+	return app
+}
+
+// initMetricsServer initializes the metrics server based on configuration.
+// If METRICS_PORT is explicitly set to 0, the metrics server is disabled.
+func (a *App) initMetricsServer() {
+	metricsPortStr := a.Config.Get("METRICS_PORT")
+
+	if metricsPortStr == "0" {
+		a.container.Logger.Logf("Metrics server is disabled (METRICS_PORT=0)")
+		return
+	}
+
+	port, err := strconv.Atoi(metricsPortStr)
+	if err != nil || port <= 0 {
+		port = defaultMetricPort
+	}
+
+	if !isPortAvailable(port) {
+		a.container.Logger.Fatalf("metrics port %d is blocked or unreachable", port)
+	}
+
+	a.metricServer = newMetricServer(port)
+}

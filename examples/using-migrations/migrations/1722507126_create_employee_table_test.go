@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sllt/kite/pkg/kite/migration"
+	"github.com/sllt/pi/pkg/pi/migration"
 )
 
 func TestCreateTableEmployee(t *testing.T) {

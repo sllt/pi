@@ -1,7 +1,7 @@
 package migrations
 
 import (
-	"github.com/sllt/kite/pkg/kite/migration"
+	"github.com/sllt/pi/pkg/pi/migration"
 )
 
 func All() map[int64]migration.Migrate {

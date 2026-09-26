@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sllt/kite/pkg/kite/migration"
+	"github.com/sllt/pi/pkg/pi/migration"
 )
 
 // MockPubSub implements the PubSub interface for testing

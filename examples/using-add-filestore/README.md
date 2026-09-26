@@ -1,6 +1,6 @@
 # Add FileStore Example
 
-This Kite example demonstrates a CMD application that can be used to interact with a remote file server using FTP or SFTP protocol
+This Pi example demonstrates a CMD application that can be used to interact with a remote file server using FTP or SFTP protocol
 
 ### Setting up an FTP server in local machine
 - https://security.appspot.com/vsftpd.html

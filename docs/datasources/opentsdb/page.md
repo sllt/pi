@@ -9,12 +9,12 @@ To connect to `OpenTSDB`, you need to provide the following environment variable
 - `DETECTDELTANUM`: The number of data points that OpenTSDB looks at to spot unusual time gaps.
 
 ## Setup
-Kite supports injecting OpenTSDB to facilitate interaction with OpenTSDB's REST APIs.
+Pi supports injecting OpenTSDB to facilitate interaction with OpenTSDB's REST APIs.
 Implementations adhering to the `OpenTSDB` interface can be registered with `app.AddOpenTSDB()`,
-enabling applications to leverage OpenTSDB for time-series data management through `kite.Context`.
+enabling applications to leverage OpenTSDB for time-series data management through `pi.Context`.
 
 ```go
-// OpenTSDB provides methods for Kite applications to communicate with OpenTSDB
+// OpenTSDB provides methods for Pi applications to communicate with OpenTSDB
 // through its REST APIs.
 type OpenTSDB interface {
 	// HealthChecker verifies if the OpenTSDB server is reachable.
@@ -95,13 +95,13 @@ type OpenTSDB interface {
 }
 ```
 
-Import the kite's external driver for OpenTSDB:
+Import the pi's external driver for OpenTSDB:
 
 ```go
-go get github.com/sllt/kite/pkg/kite/datasource/opentsdb
+go get github.com/sllt/pi/pkg/pi/datasource/opentsdb
 ```
 
-The following example demonstrates injecting an OpenTSDB instance into a Kite application
+The following example demonstrates injecting an OpenTSDB instance into a Pi application
 and using it to perform a health check on the OpenTSDB server.
 ```go
 package main
@@ -111,12 +111,12 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"time"
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/opentsdb"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/opentsdb"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Initialize OpenTSDB connection
 	app.AddOpenTSDB(opentsdb.New(opentsdb.Config{
@@ -135,7 +135,7 @@ func main() {
 }
 
 // Health check for OpenTSDB
-func opentsdbHealthCheck(c *kite.Context) (any, error) {
+func opentsdbHealthCheck(c *pi.Context) (any, error) {
 	res, err := c.OpenTSDB.HealthCheck(context.Background())
 	if err != nil {
 		return nil, err
@@ -144,14 +144,14 @@ func opentsdbHealthCheck(c *kite.Context) (any, error) {
 }
 
 // Write Data Points to OpenTSDB
-func writeDataPoints(c *kite.Context) (any, error) {
+func writeDataPoints(c *pi.Context) (any, error) {
 	PutDataPointNum := 4
 	name := []string{"cpu", "disk", "net", "mem"}
 	cpuDatas := make([]opentsdb.DataPoint, 0)
 
 	tags := map[string]string{
-		"host":      "kite-host",
-		"try-name":  "kite-sample",
+		"host":      "pi-host",
+		"try-name":  "pi-sample",
 		"demo-name": "opentsdb-test",
 	}
 
@@ -176,7 +176,7 @@ func writeDataPoints(c *kite.Context) (any, error) {
 }
 
 // Query Data Points from OpenTSDB
-func queryDataPoints(c *kite.Context) (any, error) {
+func queryDataPoints(c *pi.Context) (any, error) {
 	st1 := time.Now().Unix() - 3600
 	st2 := time.Now().Unix()
 
@@ -188,8 +188,8 @@ func queryDataPoints(c *kite.Context) (any, error) {
 	name := []string{"cpu", "disk", "net", "mem"}
 	subqueries := make([]opentsdb.SubQuery, 0)
 	tags := map[string]string{
-		"host":      "kite-host",
-		"try-name":  "kite-sample",
+		"host":      "pi-host",
+		"try-name":  "pi-sample",
 		"demo-name": "opentsdb-test",
 	}
 

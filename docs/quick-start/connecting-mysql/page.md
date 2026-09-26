@@ -1,6 +1,6 @@
 # Connecting to MySQL
 
-Just like Redis, Kite supports connection to various SQL-compatible databases (MySQL, MariaDB, PostgreSQL, and Supabase) based on configuration variables.
+Just like Redis, Pi supports connection to various SQL-compatible databases (MySQL, MariaDB, PostgreSQL, and Supabase) based on configuration variables.
 
 ## MySQL/MariaDB
 
@@ -9,16 +9,16 @@ Just like Redis, Kite supports connection to various SQL-compatible databases (M
 Users can run MySQL/MariaDB and create a database locally using the following Docker command:
 
 ```bash
-docker run --name kite-mysql -e MYSQL_ROOT_PASSWORD=root123 -e MYSQL_DATABASE=test_db -p 3306:3306 -d mysql:8.0.30
+docker run --name pi-mysql -e MYSQL_ROOT_PASSWORD=root123 -e MYSQL_DATABASE=test_db -p 3306:3306 -d mysql:8.0.30
 ```
 
 Access the `test_db` database and create a table customer with columns `id` and `name`. Change MySQL to MariaDB as needed: 
 
 ```bash
-docker exec -it kite-mysql mysql -uroot -proot123 test_db -e "CREATE TABLE customers (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL);"
+docker exec -it pi-mysql mysql -uroot -proot123 test_db -e "CREATE TABLE customers (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL);"
 ```
 
-Now that the database with the table is ready, we can connect our Kite server to MySQL/MariaDB. 
+Now that the database with the table is ready, we can connect our Pi server to MySQL/MariaDB.
 
 ### Configuration & Usage
 
@@ -43,7 +43,7 @@ DB_CHARSET=utf8 #(optional)
 
 ### TLS/SSL Configuration
 
-Kite supports secure TLS connections to MySQL/MariaDB databases. Configure TLS by setting the `DB_SSL_MODE` environment variable and optionally providing certificate paths for enhanced security.
+Pi supports secure TLS connections to MySQL/MariaDB databases. Configure TLS by setting the `DB_SSL_MODE` environment variable and optionally providing certificate paths for enhanced security.
 
 #### Available SSL Modes
 
@@ -97,13 +97,13 @@ DB_TLS_CLIENT_KEY=/path/to/client-key.pem
 Users can run PostgreSQL and create a database locally using the following Docker command:
 
 ```bash
-docker run --name kite-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=test_db -p 5432:5432 -d postgres:14
+docker run --name pi-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=test_db -p 5432:5432 -d postgres:14
 ```
 
 Access `test_db` database and create a table customer with columns `id` and `name`:
 
 ```bash
-docker exec -it kite-postgres psql -U postgres test_db -c "CREATE TABLE customers (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL);"
+docker exec -it pi-postgres psql -U postgres test_db -c "CREATE TABLE customers (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL);"
 ```
 
 ### Configuration & Usage
@@ -129,11 +129,11 @@ DB_SSL_MODE=disable #(optional, defaults to disable)
 
 ## Supabase
 
-[Supabase](https://supabase.com) is an open-source Firebase alternative that provides a PostgreSQL database with additional features. Kite supports connecting to Supabase databases with specialized configuration.
+[Supabase](https://supabase.com) is an open-source Firebase alternative that provides a PostgreSQL database with additional features. Pi supports connecting to Supabase databases with specialized configuration.
 
 ### Setup
 
-To use Supabase with Kite:
+To use Supabase with Pi:
 
 1. Sign up for a [Supabase account](https://supabase.com)
 2. Create a new project
@@ -144,7 +144,7 @@ To use Supabase with Kite:
 
 ### Configuration & Usage
 
-Kite provides three connection types for Supabase:
+Pi provides three connection types for Supabase:
 
 1. **Direct Connection**: Standard connection to the database
 2. **Session Pooler**: Connection via Supabase's connection pooler (maintains session variables)
@@ -188,7 +188,7 @@ DB_URL=postgresql://postgres:your_password@db.your_project_ref.supabase.co:5432/
 
 ## Database Usage Example
 
-For all supported SQL databases, Kite provides a consistent API to interact with your data.
+For all supported SQL databases, Pi provides a consistent API to interact with your data.
 
 Now, in the following example, we'll store customer data using **POST** `/customer` and then use **GET** `/customer` to retrieve the same.
 We will be storing the customer data with `id` and `name`.
@@ -202,7 +202,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 type Customer struct {
@@ -211,10 +211,10 @@ type Customer struct {
 }
 
 func main() {
-	// initialize kite object
-	app := kite.New()
+	// initialize pi object
+	app := pi.New()
 
-	app.GET("/redis", func(ctx *kite.Context) (any, error) {
+	app.GET("/redis", func(ctx *pi.Context) (any, error) {
 		// Get the value using the Redis instance
 
 		val, err := ctx.Redis.Get(ctx.Context, "test").Result()
@@ -226,7 +226,7 @@ func main() {
 		return val, nil
 	})
 
-	app.POST("/customer/{name}", func(ctx *kite.Context) (any, error) {
+	app.POST("/customer/{name}", func(ctx *pi.Context) (any, error) {
 		name := ctx.PathParam("name")
 
 		// Inserting a customer row in database using SQL
@@ -235,7 +235,7 @@ func main() {
 		return nil, err
 	})
 
-	app.GET("/customer", func(ctx *kite.Context) (any, error) {
+	app.GET("/customer", func(ctx *pi.Context) (any, error) {
 		var customers []Customer
 
 		// Getting the customer from the database using SQL
@@ -290,7 +290,7 @@ Now when we access {% new-tab-link title="http://localhost:9000/customer" href="
 **Note:** When using PostgreSQL or Supabase, you may need to use `$1` instead of `?` in SQL queries, depending on your driver configuration.
 
 ## Enabling Read/Write Splitting in MySQL (DBResolver)
-Kite provides built-in support for read/write splitting using its `DBRESOLVER` module for **MySQL**.
+Pi provides built-in support for read/write splitting using its `DBRESOLVER` module for **MySQL**.
 This feature automatically routes requests to the **primary database** or **read replicas** based on:
 
 - **HTTP Method**:
@@ -300,10 +300,10 @@ This feature automatically routes requests to the **primary database** or **read
 
 ### Installation
 
-Import the Kite's dbresolver for MySQL:
+Import the Pi's dbresolver for MySQL:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/dbresolver@latest
+go get github.com/sllt/pi/pkg/pi/datasource/dbresolver@latest
 ```
 
 ### Configuration
@@ -324,15 +324,15 @@ DB_DIALECT=mysql
 
 **2. Initialize DBResolver**
 
-After importing the package, you can configure the DBResolver in your Kite application using the `AddDBResolver` method.
+After importing the package, you can configure the DBResolver in your Pi application using the `AddDBResolver` method.
 You can choose the load balancing strategy and enable fallback to primary:
 
 ```go
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/dbresolver"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/dbresolver"
 )
 
 type Customer struct {
@@ -341,7 +341,7 @@ type Customer struct {
 }
 
 func main() {
-	a := kite.New()
+	a := pi.New()
 
 	// Initialize DB resolver with default settings
 	err := dbresolver.InitDBResolver(a, &dbresolver.Config{
@@ -374,7 +374,7 @@ func main() {
 	}
 
 	// Read endpoint - goes to replica
-	a.GET("/customers", func(c *kite.Context) (interface{}, error) {
+	a.GET("/customers", func(c *pi.Context) (interface{}, error) {
 		var customers []Customer
 
 		c.SQL.Select(c, &customers, "SELECT id, name FROM customers")
@@ -383,7 +383,7 @@ func main() {
 	})
 
 	// Write endpoint - goes to primary
-	a.POST("/customers", func(c *kite.Context) (interface{}, error) {
+	a.POST("/customers", func(c *pi.Context) (interface{}, error) {
 		var customer Customer
 
 		c.Bind(&customer)
@@ -394,7 +394,7 @@ func main() {
 	})
 
 	// Admin endpoint - forced to primary
-	a.GET("/admin/customers", func(c *kite.Context) (interface{}, error) {
+	a.GET("/admin/customers", func(c *pi.Context) (interface{}, error) {
 		var customers []Customer
 
 		c.SQL.Select(c, &customers, "SELECT id, name FROM customers")

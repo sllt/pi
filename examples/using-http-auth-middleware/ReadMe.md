@@ -1,6 +1,6 @@
 # HTTP Auth Middleware
 
-This Kite example demonstrates the usage of auth middlewares in Gofr. Gofr supports the following auth middlewares out of the box:
+This Pi example demonstrates the usage of auth middlewares in Gofr. Gofr supports the following auth middlewares out of the box:
 - API Key Auth
 - Basic Auth
 - OAuth
@@ -11,7 +11,7 @@ User can enable requisite auth middleware by adding the respective code snippet
 ### Basic Auth Middleware Setup
 
 ```go
-a := kite.New()
+a := pi.New()
 
 // OPTION 1
 basicAuthProvider, err := middleware.NewBasicAuthProvider(map[string]string{"username": "password"})
@@ -38,7 +38,7 @@ a.EnableBasicAuthWithValidator(func(c *infra.Container, username, password strin
 ### API Key Auth Middleware Setup
 
 ```go
-a := kite.New()
+a := pi.New()
 // OPTION 1
 apiKeyProvider, err := middleware.NewAPIKeyAuthProvider([]string{"valid-key-1", "valid-key-2"})
 // handle error - typically caused by invalid configuration
@@ -64,7 +64,7 @@ a.EnableAPIKeyAuthWithValidator(func(c *infra.Container, apiKey string) bool {
 ### OAuth Middleware Setup
 
 ```go
-a := kite.New()
+a := pi.New()
 a.EnableOAuth("<JWKS-Endpoint>", 10)
 ```
 

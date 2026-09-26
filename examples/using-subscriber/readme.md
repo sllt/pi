@@ -1,6 +1,6 @@
 # Subscriber Example
 
-This Kite example demonstrates a simple Subscriber that subscribes asynchronously to a given topic and commits based
+This Pi example demonstrates a simple Subscriber that subscribes asynchronously to a given topic and commits based
 on the handler response.
 
 ### To run the example follow the below steps:

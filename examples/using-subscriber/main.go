@@ -1,12 +1,12 @@
 package main
 
 import (
-	"github.com/sllt/kite/examples/using-subscriber/migrations"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/examples/using-subscriber/migrations"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.Migrate(migrations.All())
 
@@ -17,7 +17,7 @@ func main() {
 	app.Run()
 }
 
-func productHandler(c *kite.Context) error {
+func productHandler(c *pi.Context) error {
 	var productInfo struct {
 		ProductId string `json:"productId"`
 		Price     string `json:"price"`
@@ -35,7 +35,7 @@ func productHandler(c *kite.Context) error {
 	return nil
 }
 
-func orderHandler(c *kite.Context) error {
+func orderHandler(c *pi.Context) error {
 	var orderStatus struct {
 		OrderId string `json:"orderId"`
 		Status  string `json:"status"`

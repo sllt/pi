@@ -1,15 +1,15 @@
 # Getting started
 
-Kite is an opinionated web framework written in Go (Golang). It helps in building robust and scalable applications. This framework is designed to offer a user-friendly and familiar abstraction for all the developers. We prioritize simplicity over complexity.
+Pi is an opinionated web framework written in Go (Golang). It helps in building robust and scalable applications. This framework is designed to offer a user-friendly and familiar abstraction for all the developers. We prioritize simplicity over complexity.
 
-In this section, we will walk through what Kite is, the problems it solves, and how it can help you build your project.
+In this section, we will walk through what Pi is, the problems it solves, and how it can help you build your project.
 
 
 {% quick-links %}
 
 {% quick-link title="Quick Start" icon="installation" href="/docs/quick-start/introduction" description="Step-by-step guides to setting up your system and installing the library." /%}
 
-{% quick-link title="Examples" icon="plugins" href="https://github.com/kite-dev/kite/tree/main/examples" description="Our guides break down how to perform common tasks in Kite." /%}
+{% quick-link title="Examples" icon="plugins" href="https://github.com/kite-dev/pi/tree/main/examples" description="Our guides break down how to perform common tasks in Pi." /%}
 
 {% /quick-links %}
 

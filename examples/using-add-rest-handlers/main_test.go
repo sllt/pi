@@ -10,11 +10,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 

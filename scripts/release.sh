@@ -1,5 +1,5 @@
 #!/bin/bash
-# Release script for github.com/sllt/kite
+# Release script for github.com/sllt/pi
 # Usage: ./scripts/release.sh [version]
 # Example: ./scripts/release.sh v0.1.0
 
@@ -7,16 +7,16 @@ set -e
 
 VERSION=${1:-v0.1.0}
 
-echo "🚀 Releasing $VERSION for github.com/sllt/kite"
+echo "🚀 Releasing $VERSION for github.com/sllt/pi"
 echo ""
 
 # Step 1: Commit changes (if any)
 if [[ -n $(git status --porcelain) ]]; then
     echo "📝 Committing changes..."
     git add .
-    git commit -m "Rename module to github.com/sllt/kite
+    git commit -m "Rename module to github.com/sllt/pi
 
-- Changed all import paths from gofr.dev to github.com/sllt/kite
+- Changed all import paths from gofr.dev to github.com/sllt/pi
 - Updated go.mod, go.work, and documentation
 - Prepared for initial release $VERSION"
 fi
@@ -27,31 +27,31 @@ git tag -a "$VERSION" -m "Release $VERSION"
 
 # Step 3: Create submodule tags
 SUBMODULES=(
-    "pkg/kite/datasource/arangodb"
-    "pkg/kite/datasource/cassandra"
-    "pkg/kite/datasource/clickhouse"
-    "pkg/kite/datasource/couchbase"
-    "pkg/kite/datasource/dbresolver"
-    "pkg/kite/datasource/dgraph"
-    "pkg/kite/datasource/elasticsearch"
-    "pkg/kite/datasource/file/azure"
-    "pkg/kite/datasource/file/ftp"
-    "pkg/kite/datasource/file/gcs"
-    "pkg/kite/datasource/file/s3"
-    "pkg/kite/datasource/file/sftp"
-    "pkg/kite/datasource/influxdb"
-    "pkg/kite/datasource/kv-store/badger"
-    "pkg/kite/datasource/kv-store/dynamodb"
-    "pkg/kite/datasource/kv-store/nats"
-    "pkg/kite/datasource/mongo"
-    "pkg/kite/datasource/opentsdb"
-    "pkg/kite/datasource/oracle"
-    "pkg/kite/datasource/pubsub/eventhub"
-    "pkg/kite/datasource/pubsub/nats"
-    "pkg/kite/datasource/pubsub/sqs"
-    "pkg/kite/datasource/scylladb"
-    "pkg/kite/datasource/solr"
-    "pkg/kite/datasource/surrealdb"
+    "pkg/pi/datasource/arangodb"
+    "pkg/pi/datasource/cassandra"
+    "pkg/pi/datasource/clickhouse"
+    "pkg/pi/datasource/couchbase"
+    "pkg/pi/datasource/dbresolver"
+    "pkg/pi/datasource/dgraph"
+    "pkg/pi/datasource/elasticsearch"
+    "pkg/pi/datasource/file/azure"
+    "pkg/pi/datasource/file/ftp"
+    "pkg/pi/datasource/file/gcs"
+    "pkg/pi/datasource/file/s3"
+    "pkg/pi/datasource/file/sftp"
+    "pkg/pi/datasource/influxdb"
+    "pkg/pi/datasource/kv-store/badger"
+    "pkg/pi/datasource/kv-store/dynamodb"
+    "pkg/pi/datasource/kv-store/nats"
+    "pkg/pi/datasource/mongo"
+    "pkg/pi/datasource/opentsdb"
+    "pkg/pi/datasource/oracle"
+    "pkg/pi/datasource/pubsub/eventhub"
+    "pkg/pi/datasource/pubsub/nats"
+    "pkg/pi/datasource/pubsub/sqs"
+    "pkg/pi/datasource/scylladb"
+    "pkg/pi/datasource/solr"
+    "pkg/pi/datasource/surrealdb"
 )
 
 echo "🏷️  Creating submodule tags..."
@@ -72,7 +72,7 @@ echo ""
 echo "🔄 To push to GitHub, run:"
 echo ""
 echo "   # Add remote (if not exists)"
-echo "   git remote add origin git@github.com:sllt/kite.git"
+echo "   git remote add origin git@github.com:sllt/pi.git"
 echo ""
 echo "   # Push code and all tags"
 echo "   git push -u origin HEAD"

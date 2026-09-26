@@ -1,9 +1,9 @@
-# Serving Static Files using Kite
+# Serving Static Files using Pi
 
 Often, we are required to serve static content such as a default profile image, a favicon, or a background image for our 
 web application. We want to have a mechanism to serve that static content without the hassle of implementing it from scratch.
 
-Kite provides a default mechanism where if a `static` folder is available in the directory of the application,
+Pi provides a default mechanism where if a `static` folder is available in the directory of the application,
 it automatically provides an endpoint with `/static/<filename>`, here filename refers to the file we want to get static content to be served. 
 
 Example project structure:
@@ -26,17 +26,17 @@ main.go code:
 ```go
 package main
 
-import "github.com/sllt/kite/pkg/kite"
+import "github.com/sllt/pi/pkg/pi"
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 	app.Run()
 }
 ```
 
 Additionally, if we want to serve more static endpoints, we have a dedicated function called `AddStaticFiles()`
 which takes 2 parameters `endpoint` and the `filepath` of the static folder which we want to serve. If the folder 
-contains a `404.html` file, Kite automatically serves it for any missing URL, redirecting all "Not Found" requests 
+contains a `404.html` file, Pi automatically serves it for any missing URL, redirecting all "Not Found" requests
 to this page.
 
 Example project structure:
@@ -66,10 +66,10 @@ main.go file:
 ```go
 package main
 
-import "github.com/sllt/kite/pkg/kite"
+import "github.com/sllt/pi/pkg/pi"
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 	app.AddStaticFiles("public", "./public")
 	app.Run()
 }

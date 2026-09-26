@@ -9,8 +9,8 @@ To connect to `ScyllaDB`, you need to provide the following environment variable
 - `PASSWORD`: The password for the specified user.
 
 ## Setup
-Kite supports pluggable ScyllaDB drivers. It defines an interface that specifies the required methods for interacting
-with ScyllaDB. Any driver implementation that adheres to this interface can be integrated into Kite using the
+Pi supports pluggable ScyllaDB drivers. It defines an interface that specifies the required methods for interacting
+with ScyllaDB. Any driver implementation that adheres to this interface can be integrated into Pi using the
 `app.AddScyllaDB()` method.
 
 ```go
@@ -48,10 +48,10 @@ type ScyllaDB interface {
 ```
 
 
-Import the kite's external driver for ScyllaDB:
+Import the pi's external driver for ScyllaDB:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/scylladb
+go get github.com/sllt/pi/pkg/pi/datasource/scylladb
 ```
 
 ```go
@@ -59,9 +59,9 @@ package main
 
 import (
 	"github.com/gocql/gocql"
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/scylladb"
-	"github.com/sllt/kite/pkg/kite/http"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/scylladb"
+	"github.com/sllt/pi/pkg/pi/http"
 )
 
 type User struct {
@@ -71,7 +71,7 @@ type User struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	client := scylladb.New(scylladb.Config{
 		Host:     app.Config.Get("HOST"),
@@ -89,7 +89,7 @@ func main() {
 	app.Run()
 }
 
-func addUser(c *kite.Context) (any, error) {
+func addUser(c *pi.Context) (any, error) {
 	var newUser User
 	err := c.Bind(&newUser)
 	if err != nil {
@@ -100,7 +100,7 @@ func addUser(c *kite.Context) (any, error) {
 	return newUser, nil
 }
 
-func getUser(c *kite.Context) (any, error) {
+func getUser(c *pi.Context) (any, error) {
 	var user User
 	id := c.PathParam("id")
 

@@ -9,11 +9,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -24,7 +24,7 @@ func Test_WebSocket_Success(t *testing.T) {
 	go main()
 	time.Sleep(100 * time.Millisecond)
 
-	testMessage := "Hello! Kite"
+	testMessage := "Hello! Pi"
 	dialer := &websocket.Dialer{}
 
 	conn, _, err := dialer.Dial(wsURL, nil)

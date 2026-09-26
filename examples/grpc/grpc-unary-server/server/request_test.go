@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestHelloRequestWrapper_Context(t *testing.T) {

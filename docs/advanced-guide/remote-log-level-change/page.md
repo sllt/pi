@@ -1,6 +1,6 @@
 # Remote Log Level Change
 
-Kite makes it easy to adjust the details captured in the application's logs, even while it's running!
+Pi makes it easy to adjust the details captured in the application's logs, even while it's running!
 
 This feature allows users to effortlessly fine-tune logging levels without the need for redeployment, enhancing the monitoring and debugging experience.
 It is facilitated through simple configuration settings.
@@ -23,7 +23,7 @@ REMOTE_LOG_FETCH_INTERVAL=<Interval in seconds> (default: 15)
 ```
 
 - **REMOTE_LOG_URL:** Specifies the URL of the remote log level endpoint.
-- **REMOTE_LOG_FETCH_INTERVAL:** Defines the time interval (in seconds) at which Kite fetches log level configurations from the endpoint.
+- **REMOTE_LOG_FETCH_INTERVAL:** Defines the time interval (in seconds) at which Pi fetches log level configurations from the endpoint.
 
 > [!NOTE]
 > If not provided the default interval between the request to fetch log level is **15 seconds**.
@@ -44,4 +44,4 @@ The remote log level endpoint should return a JSON response in the following for
 - **serviceName:** Identifies the service for which log levels are configured.
 - **logLevel:** The new log level user want to set for the specified service.
 
-Kite parses this response and adjusts log levels based on the provided configurations.
+Pi parses this response and adjusts log levels based on the provided configurations.

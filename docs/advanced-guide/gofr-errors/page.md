@@ -1,12 +1,12 @@
 # Error Handling
 
-Kite provides a structured error handling approach to simplify error management in your applications. 
-The errors package in Kite provides functionality for handling errors in Kite applications. It includes predefined HTTP 
+Pi provides a structured error handling approach to simplify error management in your applications.
+The errors package in Pi provides functionality for handling errors in Pi applications. It includes predefined HTTP
 and database errors, as well as the ability to create custom errors with additional context.
 
 ## Pre-defined HTTP Errors
 
-Kite's `http` package offers several predefined error types to represent common HTTP error scenarios. These errors 
+Pi's `http` package offers several predefined error types to represent common HTTP error scenarios. These errors
 automatically handle HTTP status code selection. These include:
 
 {% table %}
@@ -60,21 +60,21 @@ automatically handle HTTP status code selection. These include:
 {% /table %}
 
 #### Usage:
-To use the predefined HTTP errors, users need to import the Kite http package and can simply call them:
+To use the predefined HTTP errors, users need to import the Pi http package and can simply call them:
 ```go
-import "github.com/sllt/kite/pkg/kite/http"
+import "github.com/sllt/pi/pkg/pi/http"
 
 err := http.ErrorMissingParam{Params: []string{"id"}}
 ```
 
 ## Database Errors
-Database errors in Kite, represented in the `datasource` package, encapsulate errors related to database operations such
+Database errors in Pi, represented in the `datasource` package, encapsulate errors related to database operations such
 as database connection, query failure, availability etc. The `ErrorDB` struct can be used to populate `error` as well as 
 any custom message to it. **Status Code: 500 (Internal Server Error)**
 
 #### Usage:
 ```go
-import "github.com/sllt/kite/pkg/kite/datasource"
+import "github.com/sllt/pi/pkg/pi/datasource"
 
 // Creating a custom error wrapped in  underlying error for database operations
 dbErr := datasource.ErrorDB{Err: err, Message: "error from sql db"}
@@ -87,7 +87,7 @@ dbErr2 := datasource.ErrorDB{Message : "database connection timed out!"}
 ```
 
 ## Custom Errors
-Kite's error structs implements an interface with `Error() string` and `StatusCode() int` methods, users can override the 
+Pi's error structs implements an interface with `Error() string` and `StatusCode() int` methods, users can override the
 status code by implementing it for their custom error.
 
 Users  can optionally define a log level for your error with the `LogLevel() logging.Level` methods

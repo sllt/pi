@@ -8,8 +8,8 @@ To connect to `MongoDB`, you need to provide the following environment variables
   
 
 ## Setup
-Kite supports injecting MongoDB that supports the following interface. Any driver that implements the interface can be added
-using `app.AddMongo()` method, and users can use MongoDB across application with `kite.Context`.
+Pi supports injecting MongoDB that supports the following interface. Any driver that implements the interface can be added
+using `app.AddMongo()` method, and users can use MongoDB across application with `pi.Context`.
 ```go
 type Mongo interface {
 	Find(ctx context.Context, collection string, filter any, results any) error
@@ -38,10 +38,10 @@ type Mongo interface {
 
 Users can easily inject a driver that supports this interface; this provides usability without compromising the extensibility to use multiple databases.
 
-Import the kite's external driver for MongoDB:
+Import the pi's external driver for MongoDB:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/mongo@latest
+go get github.com/sllt/pi/pkg/pi/datasource/mongo@latest
 ```
 
 ### Example
@@ -51,9 +51,9 @@ package main
 import (
 	"time"
 	"go.mongodb.org/mongo-driver/bson"
-	"github.com/sllt/kite/pkg/kite/datasource/mongo"
+	"github.com/sllt/pi/pkg/pi/datasource/mongo"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 type Person struct {
@@ -63,12 +63,12 @@ type Person struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	db := mongo.New(mongo.Config{URI: app.Config.Get("URI"), Database: app.Config.Get("DATABASE"), ConnectionTimeout: app.Config.Get("CONNECTIONTIMEOUT")})
 
-	// inject the mongo into kite to use mongoDB across the application
-	// using kite context
+	// inject the mongo into pi to use mongoDB across the application
+	// using pi context
 	app.AddMongo(db)
 
 	app.POST("/mongo", Insert)
@@ -77,7 +77,7 @@ func main() {
 	app.Run()
 }
 
-func Insert(ctx *kite.Context) (any, error) {
+func Insert(ctx *pi.Context) (any, error) {
 	var p Person
 	err := ctx.Bind(&p)
 	if err != nil {
@@ -92,7 +92,7 @@ func Insert(ctx *kite.Context) (any, error) {
 	return res, nil
 }
 
-func Get(ctx *kite.Context) (any, error) {
+func Get(ctx *pi.Context) (any, error) {
 	var result Person
 
 	p := ctx.PathParam("name")

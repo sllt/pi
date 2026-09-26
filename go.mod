@@ -1,4 +1,4 @@
-module github.com/sllt/kite
+module github.com/sllt/pi
 
 go 1.24.0
 

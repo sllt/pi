@@ -9,16 +9,28 @@ scaled and maintained according to its own requirement.
 
 ## Design choice
 
-In Kite application if a user wants to use the Publisher-Subscriber design, it supports several message brokers,
+In Pi application if a user wants to use the Publisher-Subscriber design, it supports several message brokers,
 including Apache Kafka, Google PubSub, MQTT, NATS JetStream, and Redis Pub/Sub.
 The initialization of the PubSub is done in an IoC container which handles the PubSub client dependency.
 With this, the control lies with the framework and thus promotes modularity, testability, and re-usability.
 Users can do publish and subscribe to multiple topics in a single application, by providing the topic name.
 Users can access the methods of the container to get the Publisher and Subscriber interface to perform subscription
 to get a single message or publish a message on the message broker.
-> Container is part of the Kite Context
+> Container is part of the Pi Context
 
 ## Configuration and Setup
+
+### Handler completion and acknowledgment
+
+The framework automatically calls `Commit()` once only after a handler succeeds and no runtime
+or message cancellation has been observed. Errors and recovered panics are processing failures,
+so they never enter that automatic success path. Handlers receive runtime cancellation even
+when the backend supplies a detached message context.
+
+This is a framework call-count guarantee, not a universal delivery guarantee: `Commit()` cannot
+return an acknowledgment error, Redis Pub/Sub has no durable acknowledgment, MQTT can auto-ack
+in its client, and later Kafka offsets or Event Hubs checkpoints can advance past failed work.
+Retry, idempotency and dead-letter behavior must be designed for the selected backend.
 
 Some of the configurations that are required to configure the PubSub backend that an application is to use
 that are specific for the type of message broker user wants to use.
@@ -283,13 +295,13 @@ To set up NATS JetStream, follow these steps:
 1. Import the external driver for NATS JetStream:
 
 ```bash
-go get github.com/sllt/kite/pkg/kite/datasources/pubsub/nats
+go get github.com/sllt/pi/pkg/pi/datasources/pubsub/nats
 ```
 
 2. Use the `AddPubSub` method to add the NATS JetStream driver to your application:
 
 ```go   
-app := kite.New()
+app := pi.New()
 
 app.AddPubSub(nats.New(nats.Config{
     Server:     "nats://localhost:4222",
@@ -334,14 +346,14 @@ For more information on setting up and using NATS JetStream, refer to the offici
 
 ### Redis Pub/Sub
 
-Redis Pub/Sub is a lightweight messaging system. Kite supports two modes:
+Redis Pub/Sub is a lightweight messaging system. Pi supports two modes:
 1. **Streams Mode** (Default): Uses Redis Streams for persistent messaging with consumer groups and acknowledgments.
 2. **PubSub Mode**: Standard Redis Pub/Sub (fire-and-forget, no persistence).
 
 #### Redis connection
 
 Redis Pub/Sub uses the same Redis connection configuration as the Redis datasource (`REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, TLS, etc.).
-See the config reference: `https://github.com/sllt/kite/docs/references/configs#redis`.
+See the config reference: `https://github.com/sllt/pi/docs/references/configs#redis`.
 
 #### Example `.env`
 
@@ -390,7 +402,7 @@ docker run -d \
 #### Redis configs
 
 The following configs apply specifically to Redis Pub/Sub behavior. For base Redis connection/TLS configs, refer to
-`https://github.com/sllt/kite/docs/references/configs#redis`.
+`https://github.com/sllt/pi/docs/references/configs#redis`.
 {% table %}
 - Name
 - Description
@@ -490,12 +502,12 @@ docker run -d \
 	--tls-ca-cert-file /tls/ca.crt
 ```
 
-> **Note**: Topics are auto-created on first publish. When using Kite migrations with Streams mode, keep `REDIS_DB` and `REDIS_PUBSUB_DB` separate (defaults: 0 and 15). For `REDIS_STREAMS_BLOCK_TIMEOUT`: use 1s-2s for real-time or 10s-30s for batch processing.
+> **Note**: Topics are auto-created on first publish. When using Pi migrations with Streams mode, keep `REDIS_DB` and `REDIS_PUBSUB_DB` separate (defaults: 0 and 15). For `REDIS_STREAMS_BLOCK_TIMEOUT`: use 1s-2s for real-time or 10s-30s for batch processing.
 
 ### Azure Event Hubs
-Kite supports Event Hubs starting kite version v1.22.0.
+Pi supports Event Hubs starting pi version v1.22.0.
 
-While subscribing kite reads from all the partitions of the consumer group provided in the configuration reducing hassle to manage them.
+While subscribing pi reads from all the partitions of the consumer group provided in the configuration reducing hassle to manage them.
 
 #### Setup
 
@@ -504,19 +516,19 @@ Azure Event Hubs is supported as an external PubSub provider such that if you ar
 Import the external driver for `eventhub` using the following command.
 
 ```bash
-go get github.com/sllt/kite/pkg/kite/datasource/pubsub/eventhub
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/eventhub
 ```
 
-Use the `AddPubSub` method of Kite's app to connect
+Use the `AddPubSub` method of Pi's app to connect
 
 **Example**
 ```go
-app := kite.New()
+app := pi.New()
     
     app.AddPubSub(eventhub.New(eventhub.Config{
        ConnectionString:          "Endpoint=sb://kite-dev.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=<key>",
-       ContainerConnectionString: "DefaultEndpointsProtocol=https;AccountName=kitedev;AccountKey=<key>;EndpointSuffix=core.windows.net",
-       StorageServiceURL:         "https://kitedev.windows.net/",
+       ContainerConnectionString: "DefaultEndpointsProtocol=https;AccountName=pidev;AccountKey=<key>;EndpointSuffix=core.windows.net",
+       StorageServiceURL:         "https://pidev.windows.net/",
        StorageContainerName:      "test",
        EventhubName:              "test1",
        ConsumerGroup:             "$Default",
@@ -529,7 +541,7 @@ While subscribing/publishing from Event Hubs make sure to keep the topic-name sa
 
 1. To set up Azure Event Hubs refer the following [documentation](https://learn.microsoft.com/en-us/azure/event-hubs/event-hubs-create).
 
-2. As Kite manages reading from all the partitions it needs to store the information about what has been read and what is left for that Kite uses Azure Container which can be setup from the following [documentation](https://learn.microsoft.com/en-us/azure/storage/blobs/blob-containers-portal).
+2. As Pi manages reading from all the partitions it needs to store the information about what has been read and what is left for that Pi uses Azure Container which can be setup from the following [documentation](https://learn.microsoft.com/en-us/azure/storage/blobs/blob-containers-portal).
 
 ##### Mandatory Configs Configuration Map
 {% table %}
@@ -562,28 +574,28 @@ While subscribing/publishing from Event Hubs make sure to keep the topic-name sa
 
 ### Amazon SQS
 
-Kite supports Amazon Simple Queue Service (SQS) as an external PubSub provider. SQS is a fully managed message queuing service that enables you to decouple and scale microservices, distributed systems, and serverless applications.
+Pi supports Amazon Simple Queue Service (SQS) as an external PubSub provider. SQS is a fully managed message queuing service that enables you to decouple and scale microservices, distributed systems, and serverless applications.
 
 #### Setup
 Import the external driver for `sqs` using the following command.
 
 ```bash
-go get github.com/sllt/kite/pkg/kite/datasource/pubsub/sqs
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/sqs
 ```
 
-Use the `AddPubSub` method of Kite's app to connect.
+Use the `AddPubSub` method of Pi's app to connect.
 
 **Example**
 ```go
 package main
 
 import (
-    "github.com/sllt/kite/pkg/kite"
-    "github.com/sllt/kite/pkg/kite/datasource/pubsub/sqs"
+    "github.com/sllt/pi/pkg/pi"
+    "github.com/sllt/pi/pkg/pi/datasource/pubsub/sqs"
 )
 
 func main() {
-    app := kite.New()
+    app := pi.New()
 
     app.AddPubSub(sqs.New(&sqs.Config{
         Region:          "us-east-1",
@@ -649,7 +661,7 @@ func main() {
 
 {% /table %}
 
-> **Note**: SQS queues must be created before publishing or subscribing. Use AWS CLI, AWS Console, or the `CreateTopic` method in migrations to create queues programmatically. Kite supports Standard Queues by default—FIFO queues are not currently supported. Advanced features like Dead Letter Queues (DLQ) and Broadcast (SNS) can be configured at the infrastructure level.
+> **Note**: SQS queues must be created before publishing or subscribing. Use AWS CLI, AWS Console, or the `CreateTopic` method in migrations to create queues programmatically. Pi supports Standard Queues by default—FIFO queues are not currently supported. Advanced features like Dead Letter Queues (DLQ) and Broadcast (SNS) can be configured at the infrastructure level.
 
 
 ## Subscribing
@@ -662,10 +674,10 @@ and debugging process.
 
 The subscriber handler has the following signature.
 ```go
-func (ctx *kite.Context) error
+func (ctx *pi.Context) error
 ```
 
-`Subscribe` method of Kite App will continuously read a message from the configured `PUBSUB_BACKEND` which
+`Subscribe` method of Pi App will continuously read a message from the configured `PUBSUB_BACKEND` which
 can be `KAFKA`, `GOOGLE`, `MQTT`, `NATS`, `REDIS`, or `AZURE_EVENTHUB`. These can be configured in the configs folder under `.env`
 
 > The returned error determines which messages are to be committed and which ones are to be consumed again.
@@ -673,7 +685,7 @@ can be `KAFKA`, `GOOGLE`, `MQTT`, `NATS`, `REDIS`, or `AZURE_EVENTHUB`. These ca
 ```go
 // First argument is the `topic name` followed by a handler which would process the 
 // published messages continuously and asynchronously.
-app.Subscribe("order-status", func(ctx *kite.Context)error{
+app.Subscribe("order-status", func(ctx *pi.Context)error{
     // Handle the pub-sub message here
 })
 ```
@@ -689,13 +701,13 @@ The context `ctx` provides user with the following methods:
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
-	app.Subscribe("order-status", func(c *kite.Context) error {
+	app.Subscribe("order-status", func(c *pi.Context) error {
 		var orderStatus struct {
 			OrderId string `json:"orderId"`
 			Status  string `json:"status"`
@@ -721,14 +733,14 @@ func main() {
 
 ## Publishing
 The publishing of message is advised to done at the point where the message is being generated.
-To facilitate this, user can access the publishing interface from `kite Context(ctx)` to publish messages.
+To facilitate this, user can access the publishing interface from `pi Context(ctx)` to publish messages.
 
 ```go
 ctx.GetPublisher().Publish(ctx, "topic", msg)
 ```
 
 Users can provide the topic to which the message is to be published.
-Kite also supports multiple topic publishing.
+Pi also supports multiple topic publishing.
 This is beneficial as applications may need to send multiple kinds of messages in multiple topics.
 
 ### Example
@@ -738,18 +750,18 @@ package main
 import (
 	"encoding/json"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.POST("/publish-order", order)
 
 	app.Run()
 }
 
-func order(ctx *kite.Context) (any, error) {
+func order(ctx *pi.Context) (any, error) {
 	type orderStatus struct {
 		OrderId string `json:"orderId"`
 		Status  string `json:"status"`
@@ -773,5 +785,5 @@ func order(ctx *kite.Context) (any, error) {
 }
 ```
 > #### Check out the following examples on how to publish/subscribe to given topics:
-> ##### [Subscribing Topics](https://github.com/kite-dev/kite/blob/main/examples/using-subscriber/main.go)
-> ##### [Publishing Topics](https://github.com/kite-dev/kite/blob/main/examples/using-publisher/main.go)
+> ##### [Subscribing Topics](https://github.com/sllt/pi/blob/master/examples/using-subscriber/main.go)
+> ##### [Publishing Topics](https://github.com/sllt/pi/blob/master/examples/using-publisher/main.go)

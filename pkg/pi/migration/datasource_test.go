@@ -1,0 +1,32 @@
+package migration
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/testutil"
+)
+
+func Test_getMigratorDatastoreNotInitialized(t *testing.T) {
+	logs := testutil.StdoutOutputForFunc(func() {
+		mockContainer, _ := infra.NewMockContainer(t)
+		mockContainer.SQL = nil
+		mockContainer.Redis = nil
+
+		mg := Datasource{}
+
+		mg.rollback(mockContainer, transactionData{})
+
+		lastMigration, err := mg.getLastMigration(mockContainer)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), lastMigration, "TEST Failed \n Last Migration is not 0")
+		require.NoError(t, mg.checkAndCreateMigrationTable(mockContainer), "TEST Failed")
+		assert.Equal(t, transactionData{}, mg.beginTransaction(mockContainer), "TEST Failed")
+		require.NoError(t, mg.commitMigration(mockContainer, transactionData{}), "TEST Failed")
+	})
+
+	assert.Contains(t, logs, "Migration 0 ran successfully", "TEST Failed")
+}

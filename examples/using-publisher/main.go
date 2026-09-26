@@ -3,12 +3,12 @@ package main
 import (
 	"encoding/json"
 
-	"github.com/sllt/kite/examples/using-publisher/migrations"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/examples/using-publisher/migrations"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.Migrate(migrations.All())
 
@@ -18,7 +18,7 @@ func main() {
 	app.Run()
 }
 
-func order(ctx *kite.Context) (any, error) {
+func order(ctx *pi.Context) (any, error) {
 	type orderStatus struct {
 		OrderId string `json:"orderId"`
 		Status  string `json:"status"`
@@ -41,7 +41,7 @@ func order(ctx *kite.Context) (any, error) {
 	return "Published", nil
 }
 
-func product(ctx *kite.Context) (any, error) {
+func product(ctx *pi.Context) (any, error) {
 	type productInfo struct {
 		ProductId string `json:"productId"`
 		Price     string `json:"price"`

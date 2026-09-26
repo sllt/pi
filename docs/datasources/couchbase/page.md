@@ -10,8 +10,8 @@ To connect to `Couchbase`, you need to provide the following environment variabl
 
 ## Setup
 
-Kite supports injecting `Couchbase` that implements the following interface. Any driver that implements the interface can be
-added using the `app.AddCouchbase()` method, and users can use Couchbase across the application with `kite.Context`.
+Pi supports injecting `Couchbase` that implements the following interface. Any driver that implements the interface can be
+added using the `app.AddCouchbase()` method, and users can use Couchbase across the application with `pi.Context`.
 
 ```go
 type Couchbase interface {
@@ -31,15 +31,15 @@ type Couchbase interface {
 
 Users can easily inject a driver that supports this interface, providing usability without compromising the extensibility to use multiple databases.
 Don't forget to serup the Couchbase cluster in Couchbase Web Console first. [Follow for more details](https://docs.couchbase.com/server/current/install/getting-started-docker.html#section_jvt_zvj_42b).
-To begin using Couchbase in your Kite application, you need to import the Couchbase datasource package:
+To begin using Couchbase in your Pi application, you need to import the Couchbase datasource package:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/couchbase@latest
+go get github.com/sllt/pi/pkg/pi/datasource/couchbase@latest
 ```
 
 ### Example
 
-Here is an example of how to use the Couchbase datasource in a Kite application:
+Here is an example of how to use the Couchbase datasource in a Pi application:
 
 ```go
 package main
@@ -48,8 +48,8 @@ import (
     "context"
     "fmt"
     "log"
-    "github.com/sllt/kite/pkg/kite"
-    "github.com/sllt/kite/pkg/kite/datasource/couchbase"
+    "github.com/sllt/pi/pkg/pi"
+    "github.com/sllt/pi/pkg/pi/datasource/couchbase"
 )
 
 type User struct {
@@ -59,8 +59,8 @@ type User struct {
 }
 
 func main() {
-    // Create a new Kite application
-    a := kite.New()
+    // Create a new Pi application
+    a := pi.New()
 
     // Add the Couchbase datasource to the application
     a.AddCouchbase(couchbase.New(&couchbase.Config{
@@ -79,7 +79,7 @@ func main() {
     a.Run()
 }
 
-func getUser(c *kite.Context) (any, error) {
+func getUser(c *pi.Context) (any, error) {
     // Get the user ID from the URL path
     id := c.PathParam("id")
 
@@ -92,7 +92,7 @@ func getUser(c *kite.Context) (any, error) {
     return user, nil
 }
 
-func createUser(c *kite.Context) (any, error) {
+func createUser(c *pi.Context) (any, error) {
     // Get the user from the request body
     var user User
     if err := c.Bind(&user); err != nil {
@@ -107,7 +107,7 @@ func createUser(c *kite.Context) (any, error) {
     return "user created successfully", nil
 }
 
-func deleteUser(c *kite.Context) (any, error) {
+func deleteUser(c *pi.Context) (any, error) {
 	// Get the user ID from the URL path
 	id := c.PathParam("id")
 

@@ -8,16 +8,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/cmd"
-	"github.com/sllt/kite/pkg/kite/cmd/terminal"
-	"github.com/sllt/kite/pkg/kite/infra"
-	"github.com/sllt/kite/pkg/kite/logging"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/cmd"
+	"github.com/sllt/pi/pkg/pi/cmd/terminal"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -71,7 +71,7 @@ func TestCMDRun_SpinnerContextCancelled(t *testing.T) {
 	cancel()
 
 	// add an already canceled context
-	res, err := spinner(&kite.Context{
+	res, err := spinner(&pi.Context{
 		Context:   ctx,
 		Request:   cmd.NewRequest([]string{"command", "spinner"}),
 		Container: nil,
@@ -102,8 +102,8 @@ func TestCMDRun_ProgressContextCancelled(t *testing.T) {
 	container := &infra.Container{
 		Logger: logging.NewMockLogger(logging.ERROR),
 	}
-	
-	res, err := progress(&kite.Context{
+
+	res, err := progress(&pi.Context{
 		Context:       ctx,
 		Request:       cmd.NewRequest([]string{"command", "progress"}),
 		Container:     container,

@@ -1,11 +1,11 @@
 # Add REST Handlers
 
-Kite simplifies the process of implementing CRUD (Create, Read, Update, Delete) operations by enabling the automatic generation of handlers directly from Go structs.
+Pi simplifies the process of implementing CRUD (Create, Read, Update, Delete) operations by enabling the automatic generation of handlers directly from Go structs.
 This feature eliminates the need for writing repetitive boilerplate code, allowing developers to focus on application logic.
 
 ## Default Behavior
 
-If the custom handlers ain't implemented on the struct, Kite provides default handlers for each CRUD operation. These handlers handle basic database interactions:
+If the custom handlers ain't implemented on the struct, Pi provides default handlers for each CRUD operation. These handlers handle basic database interactions:
 
 - **Create**: `/entity` Inserts a new record based on data provided in a JSON request body.
 - **Read**:
@@ -36,7 +36,7 @@ While the default handlers provide basic functionality, user might want to custo
 The AddRESTHandlers feature allows user to override these handlers by implementing methods within the struct itself.
 
 ## Database Table Name
-By default, Kite assumes the struct name in snake-case matches the database table name for querying data. For example, `UserEntity` struct matches `user_entity` database table, `cardConfig` struct matches `card_config` database table, etc.
+By default, Pi assumes the struct name in snake-case matches the database table name for querying data. For example, `UserEntity` struct matches `user_entity` database table, `cardConfig` struct matches `card_config` database table, etc.
 To change table name, you need to implement `TableName` method in the struct:
 ```go
 type userEntity struct {
@@ -52,7 +52,7 @@ func (u *userEntity) TableName() string {
 ```
 
 ## Adding Database Constraints
-By default, Kite assumes to have manual insertion of id for a given struct, but to support SQL constraints like `auto-increment`,
+By default, Pi assumes to have manual insertion of id for a given struct, but to support SQL constraints like `auto-increment`,
 `not-null` user can use the `sql` tag while declaring the struct fields.
 
 ```go
@@ -66,7 +66,7 @@ type user struct {
 
 Now when posting data for the user struct, the `Id` we be auto-incremented and the `Name` will be a not-null field in table.
 
-## Benefits of Adding REST Handlers of Kite
+## Benefits of Adding REST Handlers of Pi
 
 1. Reduced Boilerplate Code: Eliminate repetitive code for CRUD operations, freeing user to focus on core application logic.
 2. Consistency: Ensures consistency in CRUD operations across different entities by using a standardized approach.
@@ -78,8 +78,8 @@ Now when posting data for the user struct, the `Id` we be auto-incremented and t
 package main
 
 import (
-	"github.com/sllt/kite/examples/using-crud-from-struct/migrations"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/examples/using-crud-from-struct/migrations"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 type user struct {
@@ -90,13 +90,13 @@ type user struct {
 }
 
 // GetAll : User can overwrite the specific handlers by implementing them like this
-func (u *user) GetAll(c *kite.Context) (any, error) {
+func (u *user) GetAll(c *pi.Context) (any, error) {
 	return "user GetAll called", nil
 }
 
 func main() {
 	// Create a new application
-	a := kite.New()
+	a := pi.New()
 
 	// Add migrations to run
 	a.Migrate(migrations.All())
@@ -124,14 +124,14 @@ The struct should always be passed by reference in the method `AddRESTHandlers`.
 
 **2. Field Naming Convention**
 
-Kite assumes that struct fields in snake_case match the database column names.
+Pi assumes that struct fields in snake_case match the database column names.
 
 * For example, the `IsEmployed` field in the struct matches the `is_employed` column in the database.
 * Similarly, the `Age` field matches the `age` column.
 
 **3. Primary Key**
 
-The first field of the struct is typically used as the primary key for data operations. However, this behavior can be customized using Kite's features.
+The first field of the struct is typically used as the primary key for data operations. However, this behavior can be customized using Pi's features.
 
 **4. Datatype Conversions**
 
@@ -143,4 +143,4 @@ The first field of the struct is typically used as the primary key for data oper
 | `bool` | `BOOLEAN` or `TINYINT(1)` | Use `BOOLEAN` (supported by most SQL databases like PostgreSQL, MySQL) or `TINYINT(1)` in MySQL (where `0` is false, and `1` is true). |
 | `float32`, `float64` | `FLOAT`, `DOUBLE`, `DECIMAL` | Use `DECIMAL` for precise decimal numbers (e.g., financial data), `FLOAT` or `DOUBLE` for approximate floating-point numbers. |
 | `time.Time` | `DATE`, `TIME`, `DATETIME`, `TIMESTAMP` | Use `DATE` for just the date, `TIME` for the time of day, and `DATETIME` or `TIMESTAMP` for both date and time. |
-> #### Check out the example on how to add REST Handlers in Kite: [Visit GitHub](https://github.com/kite-dev/kite/tree/main/examples/using-add-rest-handlers)
+> #### Check out the example on how to add REST Handlers in Pi: [Visit GitHub](https://github.com/kite-dev/pi/tree/main/examples/using-add-rest-handlers)

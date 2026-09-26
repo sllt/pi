@@ -1,6 +1,6 @@
-# Using WebSocket in Kite
+# Using WebSocket in Pi
 
-This example demonstrates how to create and handle a WebSocket connection using the Kite framework.
+This example demonstrates how to create and handle a WebSocket connection using the Pi framework.
 It covers establishing the connection, receiving messages from the client, and sending responses back to the client in real time.
 
 ---
@@ -11,7 +11,7 @@ The `/ws` endpoint in this example:
 
 * Accepts incoming WebSocket connections.
 * Reads and logs messages sent by the client.
-* Sends a fixed greeting message back to the client (`"Hello! Kite"`).
+* Sends a fixed greeting message back to the client (`"Hello! Pi"`).
 * Returns the received message as part of the response.
 
 This is useful for building **real-time applications** such as chat systems, dashboards, and live notifications.
@@ -23,8 +23,8 @@ This is useful for building **real-time applications** such as chat systems, das
 1. **Clone the repository** and navigate to the example folder:
 
    ```bash
-   git clone https://github.com/kite-dev/kite.git
-   cd kite/examples/using-web-socket
+   git clone https://github.com/kite-dev/pi.git
+   cd pi/examples/using-web-socket
    ```
 
 2. **Start the application**:
@@ -46,12 +46,12 @@ This is useful for building **real-time applications** such as chat systems, das
 ### main.go
 
 ```go
-app := kite.New()
+app := pi.New()
 app.WebSocket("/ws", WSHandler)
 app.Run()
 ```
 
-* Creates a new Kite app.
+* Creates a new Pi app.
 * Registers the `/ws` route for WebSocket connections.
 * Starts the server.
 
@@ -59,7 +59,7 @@ app.Run()
 
 * Binds the incoming WebSocket message to a string.
 * Logs the received message.
-* Sends `"Hello! Kite"` back to the client.
+* Sends `"Hello! Pi"` back to the client.
 * Returns the received message.
 
 ---
@@ -98,6 +98,6 @@ Using [wscat](https://github.com/websockets/wscat):
 npm install -g wscat
 wscat -c ws://localhost:8001/ws
 > Hello from Client
-< Hello! Kite
+< Hello! Pi
 ```
 

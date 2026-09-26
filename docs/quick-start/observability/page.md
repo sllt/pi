@@ -1,18 +1,18 @@
 # Observability
 
-Kite, by default, manages observability in different ways once the server starts:
+Pi, by default, manages observability in different ways once the server starts:
 
 ## Logs
 
 Logs offer real-time information, providing valuable insights and immediate visibility into the ongoing state and activities of the system.
 It helps in identifying errors, debugging and troubleshooting, monitor performance, analyzing application usage, communications etc.
 
-Kite logger allows customizing the log level, which provides flexibility to adjust logs based on specific needs.
+Pi logger allows customizing the log level, which provides flexibility to adjust logs based on specific needs.
 
-Logs are generated only for events equal to or above the specified log level; by default, Kite logs at _INFO_ level.
+Logs are generated only for events equal to or above the specified log level; by default, Pi logs at _INFO_ level.
 Log Level can be changed by setting the environment variable `LOG_LEVEL` value to _WARN,DEBUG,ERROR,NOTICE or FATAL_.
 
-When the Kite server runs, it prints a log for reading configs, database connection, requests, database queries, missing configs, etc.
+When the Pi server runs, it prints a log for reading configs, database connection, requests, database queries, missing configs, etc.
 They contain information such as request's correlation ID, status codes, request time, etc.
 
 {% figure src="/quick-start-logs.png" alt="Pretty Printed Logs" /%}
@@ -27,7 +27,7 @@ Metrics play a pivotal role in fault detection and troubleshooting, offering vis
 
 They are instrumental in measuring and meeting service-level agreements (SLAs) to ensure expected performance and reliability.
 
-Kite publishes metrics to port: _2121_ on _/metrics_ endpoint in Prometheus format.
+Pi publishes metrics to port: _2121_ on _/metrics_ endpoint in Prometheus format.
 
 ### Default Metrics
 
@@ -150,7 +150,7 @@ Kite publishes metrics to port: _2121_ on _/metrics_ endpoint in Prometheus form
 
 For example: When running the application locally, we can access the /metrics endpoint on port 2121 from: {% new-tab-link title="http://localhost:2121/metrics" href="http://localhost:2121/metrics" /%}
 
-Kite also supports creating {% new-tab-link newtab=false title="custom metrics" href="/docs/advanced-guide/publishing-custom-metrics" /%}.
+Pi also supports creating {% new-tab-link newtab=false title="custom metrics" href="/docs/advanced-guide/publishing-custom-metrics" /%}.
 
 ### Disabling the Metrics Server
 
@@ -165,10 +165,10 @@ METRICS_PORT=0
 These metrics can be easily consumed by monitoring systems like {% new-tab-link title="Prometheus" href="https://prometheus.io/" /%}
 and visualized in dashboards using tools like {% new-tab-link title="Grafana" href="https://grafana.com/" /%}.
 
-You can find the dashboard source in the {% new-tab-link title="Kite repository" href="https://github.com/kite-dev/kite/tree/main/examples/http-server/docker/provisioning/dashboards/kite-dashboard" /%}.
+You can find the dashboard source in the {% new-tab-link title="Pi repository" href="https://github.com/kite-dev/pi/tree/main/examples/http-server/docker/provisioning/dashboards/pi-dashboard" /%}.
 
-{% figure src="/metrics-dashboard.png" alt="Grafana Dashboard showing Kite metrics including HTTP request rates,
-response times, etc." caption="Example monitoring dashboard using Kite's built-in metrics" /%}
+{% figure src="/metrics-dashboard.png" alt="Grafana Dashboard showing Pi metrics including HTTP request rates,
+response times, etc." caption="Example monitoring dashboard using Pi's built-in metrics" /%}
 
 
 ## Tracing
@@ -183,27 +183,27 @@ the intricate interactions between components.
 
 
 
-### Automated Tracing in Kite
+### Automated Tracing in Pi
 
-Kite automatically exports traces for all requests and responses. Kite uses
+Pi automatically exports traces for all requests and responses. Pi uses
 {% new-tab-link title="OpenTelemetry" href="https://opentelemetry.io/docs/concepts/what-is-opentelemetry/" /%} , a popular tracing framework, to
 automatically add traces to all requests and responses.
 
 **Automatic Correlation ID Propagation:**
 
-When a request enters your Kite application, Kite automatically generates a correlation-ID `X-Correlation-ID` and adds it
+When a request enters your Pi application, Pi automatically generates a correlation-ID `X-Correlation-ID` and adds it
 to the response headers. This correlation ID is then propagated to all downstream requests. This means that user can track
 a request as it travels through your distributed system by simply looking at the correlation ID in the request headers.
 
 ### Configuration & Usage:
 
-Kite has support for following trace-exporters:
+Pi has support for following trace-exporters:
 #### 1. [Zipkin](https://zipkin.io/):
 
 To see the traces install zipkin image using the following Docker command:
 
 ```bash
-docker run --name kite-zipkin -p 2005:9411 -d openzipkin/zipkin:latest
+docker run --name pi-zipkin -p 2005:9411 -d openzipkin/zipkin:latest
 ```
 
 Add Tracer configs in `.env` file, your .env will be updated to
@@ -230,7 +230,7 @@ LOG_LEVEL=DEBUG
 ```
 
 > [!NOTE]
-> If the value of `TRACER_PORT` is not provided, Kite uses port `9411` by default.
+> If the value of `TRACER_PORT` is not provided, Pi uses port `9411` by default.
 
 Open {% new-tab-link title="zipkin" href="http://localhost:2005/zipkin/" /%} and search by TraceID (correlationID) to see the trace.
 {% figure src="/quick-start-trace.png" alt="Zipkin traces" /%}
@@ -277,29 +277,29 @@ TRACER_RATIO=0.1
 
 
 
-#### 4. [Kite Tracer](https://tracer.github.com/sllt/kite/):
+#### 4. [Pi Tracer](https://tracer.github.com/sllt/pi/):
 
-Kite tracer is Kite's own custom trace exporter as well as collector. Users can search a trace by its TraceID (correlationID)
-in Kite's own tracer service, available anywhere, anytime.
+Pi tracer is Pi's own custom trace exporter as well as collector. Users can search a trace by its TraceID (correlationID)
+in Pi's own tracer service, available anywhere, anytime.
 
-Add Kite Tracer configs in `.env` file, your .env will be updated to
+Add Pi Tracer configs in `.env` file, your .env will be updated to
 ```dotenv
 # ... no change in other env variables
 
 # tracing configs
-TRACE_EXPORTER=kite
+TRACE_EXPORTER=pi
 TRACER_RATIO=0.1
 ```
 
 > [!NOTE]
 > `TRACER_RATIO` refers to the proportion of traces that are exported through sampling. It ranges between 0 and 1. By default, this ratio is set to 1, meaning all traces are exported.
 >
-> Open {% new-tab-link title="kite-tracer" href="https://tracer.github.com/sllt/kite/" /%} and search by TraceID (correlationID) to see the trace.
+> Open {% new-tab-link title="pi-tracer" href="https://tracer.github.com/sllt/pi/" /%} and search by TraceID (correlationID) to see the trace.
 
 
 ### Custom Authentication Headers
 
-Many observability platforms require custom headers for authentication. Kite supports this through the `TRACER_HEADERS` configuration, which accepts comma-separated `key=value` pairs following the OpenTelemetry standard format.
+Many observability platforms require custom headers for authentication. Pi supports this through the `TRACER_HEADERS` configuration, which accepts comma-separated `key=value` pairs following the OpenTelemetry standard format.
 
 #### Usage Examples
 

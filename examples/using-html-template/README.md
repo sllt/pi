@@ -1,6 +1,6 @@
 # Using HTML Template
 
-This Kite example demonstrates the use of html template, Kite supports both static and dynamic html templates.
+This Pi example demonstrates the use of html template, Pi supports both static and dynamic html templates.
 All template files—whether HTML or HTMX—should be placed inside a templates directory located at the root of your project.
 
 
@@ -9,7 +9,7 @@ All template files—whether HTML or HTMX—should be placed inside a templates 
 // path to the static html files
 app.AddStaticFiles("/", "./static")
 
-func listHandler(*kite.Context) (any, error) {
+func listHandler(*pi.Context) (any, error) {
 	// Get data from somewhere
 	data := TodoPageData{
 		PageTitle: "My TODO list",

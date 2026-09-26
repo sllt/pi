@@ -5,7 +5,7 @@ and readiness to handle requests. It involves regularly querying the service to 
 typically by evaluating its responsiveness and ability to perform essential tasks. Health checks play a critical role in ensuring service availability,
 detecting failures, preventing cascading issues, and facilitating effective traffic routing in distributed systems.
 
-## Kite by default registers two endpoints which are:
+## Pi by default registers two endpoints which are:
 
 ### 1. Aliveness - /.well-known/alive
 

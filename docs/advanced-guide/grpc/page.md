@@ -1,11 +1,11 @@
-# gRPC with Kite
+# gRPC with Pi
 
-We have already seen how Kite can help ease the development of HTTP servers, but there are cases where performance is primarily required sacrificing flexibility. In these types of scenarios gRPC protocol comes into picture. {% new-tab-link title="gRPC" href="https://grpc.io/docs/what-is-grpc/introduction/" /%} is an open-source RPC(Remote Procedure Call) framework initially developed by Google.
+We have already seen how Pi can help ease the development of HTTP servers, but there are cases where performance is primarily required sacrificing flexibility. In these types of scenarios gRPC protocol comes into picture. {% new-tab-link title="gRPC" href="https://grpc.io/docs/what-is-grpc/introduction/" /%} is an open-source RPC(Remote Procedure Call) framework initially developed by Google.
 
-Kite streamlines the creation of gRPC servers and clients with unified Kite's context support. 
+Pi streamlines the creation of gRPC servers and clients with unified Pi's context support.
 It provides built-in tracing, metrics, and logging to ensure seamless performance monitoring for both gRPC servers and inter-service gRPC communication. 
-With Kite's context, you can seamlessly define custom metrics and traces across gRPC handlers, ensuring consistent observability and streamlined debugging throughout 
-your system. Additionally, Kite provides a built-in health check for all your services and supports inter-service 
+With Pi's context, you can seamlessly define custom metrics and traces across gRPC handlers, ensuring consistent observability and streamlined debugging throughout
+your system. Additionally, Pi provides a built-in health check for all your services and supports inter-service
 health checks, allowing gRPC services to monitor each other effortlessly.
 
 ## Prerequisites
@@ -95,32 +95,32 @@ protoc \
 
 This command generates two files, `<SERVICE_NAME>.pb.go` and `<SERVICE_NAME>_grpc.pb.go`, containing the necessary code for performing RPC calls.
 
-## Prerequisite: kite-cli must be installed
+## Prerequisite: pi-cli must be installed
 To install the CLI -
 
 ```bash
-go install github.com/sllt/kite/cli/kite@latest
+go install github.com/sllt/pi/cli/pi@latest
 ```
 
-## Generating gRPC Server Handler Template using `kite wrap grpc server`
+## Generating gRPC Server Handler Template using `pi wrap grpc server`
 
-**1. Use the `kite wrap grpc server` Command:**
+**1. Use the `pi wrap grpc server` Command:**
    ```bash
-kite wrap grpc server -proto=./path/your/proto/file
+pi wrap grpc server -proto=./path/your/proto/file
    ```
 
-This command leverages the `kite-cli` to generate a `<SERVICE_NAME>_server.go` file (e.g., `customer_server.go`)
+This command leverages the `pi-cli` to generate a `<SERVICE_NAME>_server.go` file (e.g., `customer_server.go`)
 containing a template for your gRPC server implementation, including context support, in the same directory as
 that of the specified proto file.
 
 **2. Modify the Generated Code:**
 
-- Customize the `<SERVICE_NAME>KiteServer` struct with required dependencies and fields.
+- Customize the `<SERVICE_NAME>PiServer` struct with required dependencies and fields.
 - Implement the `<SERVICE_METHOD>` method to handle incoming requests, as required in this usecase:
   - Bind the request payload using `ctx.Bind(&<SERVICE_REQUEST>)`.
   - Process the request and generate a response.
 
-## Registering the gRPC Service with Kite
+## Registering the gRPC Service with Pi
 
 **1. Import Necessary Packages:**
 
@@ -128,7 +128,7 @@ that of the specified proto file.
 import (
 	"path/to/your/generated-grpc-server/packageName"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 ```
 
@@ -136,9 +136,9 @@ import (
 
 ```go
 func main() {
-    app := kite.New()
+    app := pi.New()
 
-    packageName.Register<SERVICE_NAME>ServerWithKite(app, &<PACKAGE_NAME>.New<SERVICE_NAME>KiteServer())
+    packageName.Register<SERVICE_NAME>ServerWithPi(app, &<PACKAGE_NAME>.New<SERVICE_NAME>PiServer())
 
     app.Run()
 }
@@ -153,7 +153,7 @@ To customize your gRPC server, use `AddGRPCServerOptions()`.
 ### Example: Enabling TLS & other ServerOptions
 ```go
 func main() {
-    app := kite.New()
+    app := pi.New()
 
     // Add TLS credentials and connection timeout in one call
     creds, _ := credentials.NewServerTLSFromFile("server-cert.pem", "server-key.pem")
@@ -163,7 +163,7 @@ func main() {
     	grpc.ConnectionTimeout(10 * time.Second),
     )
 
-    packageName.Register<SERVICE_NAME>ServerWithKite(app, &<PACKAGE_NAME>.New<SERVICE_NAME>KiteServer())
+    packageName.Register<SERVICE_NAME>ServerWithPi(app, &<PACKAGE_NAME>.New<SERVICE_NAME>PiServer())
 
     app.Run()
 }
@@ -176,11 +176,11 @@ Interceptors help in implementing authentication, validation, request transforma
 ### Example: Authentication Interceptor
 ```go
 func main() {
-    app := kite.New()
+    app := pi.New()
 
     app.AddGRPCUnaryInterceptors(authInterceptor)
 
-    packageName.Register<SERVICE_NAME>ServerWithKite(app, &<PACKAGE_NAME>.New<SERVICE_NAME>KiteServer())
+    packageName.Register<SERVICE_NAME>ServerWithPi(app, &<PACKAGE_NAME>.New<SERVICE_NAME>PiServer())
 
     app.Run()
 }
@@ -196,11 +196,11 @@ func authInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, h
 
 ## Adding Custom Stream interceptors
 
-For streaming RPCs (client-stream, server-stream, or bidirectional), Kite allows you to add stream interceptors using `AddGRPCServerStreamInterceptors`. These are useful for handling logic that needs to span the entire lifetime of a stream.
+For streaming RPCs (client-stream, server-stream, or bidirectional), Pi allows you to add stream interceptors using `AddGRPCServerStreamInterceptors`. These are useful for handling logic that needs to span the entire lifetime of a stream.
 
 ```go
 func main() {
-    app := kite.New()
+    app := pi.New()
 
     app.AddGRPCServerStreamInterceptors(streamAuthInterceptor)
 
@@ -222,21 +222,21 @@ func streamAuthInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamServe
 
 For more details on adding additional interceptors and server options, refer to the [official gRPC Go package](https://pkg.go.dev/google.golang.org/grpc#ServerOption).
 
-## Generating gRPC Client using `kite wrap grpc client`
+## Generating gRPC Client using `pi wrap grpc client`
 
-**1. Use the `kite wrap grpc client` Command:**
+**1. Use the `pi wrap grpc client` Command:**
    ```bash
-kite wrap grpc client -proto=./path/your/proto/file
+pi wrap grpc client -proto=./path/your/proto/file
    ```
-This command leverages the `kite-cli` to generate a `<SERVICE_NAME>_client.go` file (e.g., `customer_client.go`). This file must not be modified.
+This command leverages the `pi-cli` to generate a `<SERVICE_NAME>_client.go` file (e.g., `customer_client.go`). This file must not be modified.
 
 **2. Register the connection to your gRPC service inside your <SERVICE_METHOD> and make inter-service calls as follows :**
 
    ```go
 // gRPC Handler with context support
-func <SERVICE_METHOD>(ctx *kite.Context) (*<SERVICE_RESPONSE>, error) {
+func <SERVICE_METHOD>(ctx *pi.Context) (*<SERVICE_RESPONSE>, error) {
 	// Create the gRPC client
-    srv, err := New<SERVICE_NAME>KiteClient("your-grpc-server-host", ctx.Metrics())
+    srv, err := New<SERVICE_NAME>PiClient("your-grpc-server-host", ctx.Metrics())
     if err != nil {
         return nil, err
     }
@@ -256,7 +256,7 @@ func <SERVICE_METHOD>(ctx *kite.Context) (*<SERVICE_RESPONSE>, error) {
 }
 ```
 ## Error Handling and Validation
-Kite's gRPC implementation includes built-in error handling and validation:
+Pi's gRPC implementation includes built-in error handling and validation:
 
 **Port Validation**: Automatically validates that gRPC ports are within valid range (1-65535)
 **Port Availability**: Checks if the specified port is available before starting the server
@@ -271,7 +271,7 @@ GRPC_PORT=9001
 // Or use default port 9000 if not specified
 ```
 ## gRPC Reflection
-Kite supports gRPC reflection for easier debugging and testing. Enable it using the configuration:
+Pi supports gRPC reflection for easier debugging and testing. Enable it using the configuration:
 ```bash
 # In your .env file
 GRPC_ENABLE_REFLECTION=true
@@ -290,7 +290,7 @@ grpcurl -plaintext -d '{"name": "test"}' localhost:9000 YourService/YourMethod
 ```
 
 ## Built-in Metrics
-Kite automatically registers the following gRPC metrics:
+Pi automatically registers the following gRPC metrics:
 
 + **grpc_server_status**: Gauge indicating server status (1=running, 0=stopped)
 + **grpc_server_errors_total**: Counter for total gRPC server errors
@@ -300,15 +300,15 @@ These metrics are automatically available in your metrics endpoint and can be us
 
 ## Customizing gRPC Client with DialOptions
 
-Kite provides flexibility to customize your gRPC client connections using gRPC `DialOptions`. This allows users to configure aspects such as transport security, interceptors, and load balancing policies.
+Pi provides flexibility to customize your gRPC client connections using gRPC `DialOptions`. This allows users to configure aspects such as transport security, interceptors, and load balancing policies.
 You can pass optional parameters while creating your gRPC client to tailor the connection to your needs. Here’s an example of a Unary Interceptor that sets metadata on outgoing requests:
 
 ```go
 func main() {
-    app := kite.New()
+    app := pi.New()
 
     // Create a gRPC client for the service
-    gRPCClient, err := client.New<SERVICE_NAME>KiteClient(
+    gRPCClient, err := client.New<SERVICE_NAME>PiClient(
         app.Config.Get("GRPC_SERVER_HOST"),
         app.Metrics(),
         grpc.WithChainUnaryInterceptor(MetadataUnaryInterceptor),
@@ -328,7 +328,7 @@ func main() {
 
 // MetadataUnaryInterceptor sets a custom metadata value on outgoing requests
 func MetadataUnaryInterceptor(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-    md := metadata.Pairs("client-id", "Kite-Client-123")
+    md := metadata.Pairs("client-id", "Pi-Client-123")
     ctx = metadata.NewOutgoingContext(ctx, md)
 
     err := invoker(ctx, method, req, reply, cc, opts...)
@@ -340,10 +340,10 @@ func MetadataUnaryInterceptor(ctx context.Context, method string, req, reply any
 }
 ```
 
-This interceptor sets a metadata key `client-id` with a value of `Kite-Client-123` for each request. Metadata can be used for authentication, tracing, or custom behaviors.
+This interceptor sets a metadata key `client-id` with a value of `Pi-Client-123` for each request. Metadata can be used for authentication, tracing, or custom behaviors.
 
 ### Using TLS Credentials and Advanced Service Config
-By default, gRPC connections in Kite are made over insecure connections, which is not recommended for production. You can override this behavior using TLS credentials. Additionally, a more comprehensive service configuration can define retry policies and other settings:
+By default, gRPC connections in Pi are made over insecure connections, which is not recommended for production. You can override this behavior using TLS credentials. Additionally, a more comprehensive service configuration can define retry policies and other settings:
 
 ```go
 import (
@@ -351,7 +351,7 @@ import (
     "google.golang.org/grpc/credentials"
 )
 
-// The default serviceConfig in Kite only sets the loadBalancingPolicy to "round_robin".
+// The default serviceConfig in Pi only sets the loadBalancingPolicy to "round_robin".
 const serviceConfig = `{
     "loadBalancingPolicy": "round_robin", 
     "methodConfig": [{
@@ -367,7 +367,7 @@ const serviceConfig = `{
 }`
 
 func main() {
-    app := kite.New()
+    app := pi.New()
 
     creds, err := credentials.NewClientTLSFromFile("path/to/cert.pem", "")
     if err != nil {
@@ -375,7 +375,7 @@ func main() {
         return
     }
 
-    gRPCClient, err := client.New<SERVICE_NAME>KiteClient(
+    gRPCClient, err := client.New<SERVICE_NAME>PiClient(
         app.Config.Get("GRPC_SERVER_HOST"),
         app.Metrics(),
         grpc.WithTransportCredentials(creds),
@@ -402,37 +402,37 @@ In this example:
 ### Further Reading
 For more details on configurable DialOptions, refer to the [official gRPC package for Go](https://pkg.go.dev/google.golang.org/grpc#DialOption).
 
-## HealthChecks in Kite's gRPC Service/Clients
-Health Checks in Kite's gRPC Services
+## HealthChecks in Pi's gRPC Service/Clients
+Health Checks in Pi's gRPC Services
 
-Kite provides built-in health checks for gRPC services, enabling observability, monitoring, and inter-service health verification.
+Pi provides built-in health checks for gRPC services, enabling observability, monitoring, and inter-service health verification.
 
 ### Client Interface
 
 ```go
-type <SERVICE_NAME>KiteClient interface {
-    SayHello(*kite.Context, *HelloRequest, ...grpc.CallOption) (*HelloResponse, error)
+type <SERVICE_NAME>PiClient interface {
+    SayHello(*pi.Context, *HelloRequest, ...grpc.CallOption) (*HelloResponse, error)
     health
 }
 
 type health interface {
-    Check(ctx *kite.Context, in *grpc_health_v1.HealthCheckRequest, opts ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error)
-    Watch(ctx *kite.Context, in *grpc_health_v1.HealthCheckRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[grpc_health_v1.HealthCheckResponse], error)
+    Check(ctx *pi.Context, in *grpc_health_v1.HealthCheckRequest, opts ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error)
+    Watch(ctx *pi.Context, in *grpc_health_v1.HealthCheckRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[grpc_health_v1.HealthCheckResponse], error)
 }
 ```
 
 ### Server Integration
 ```go
-type <SERVICE_NAME>KiteServer struct {
+type <SERVICE_NAME>PiServer struct {
     health *healthServer
 }
 ```
 Supported Methods for HealthCheck :
 ```go
-func (h *healthServer) Check(ctx *kite.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error)
-func (h *healthServer) Watch(ctx *kite.Context, in *grpc_health_v1.HealthCheckRequest, stream grpc_health_v1.Health_WatchServer) error
-func (h *healthServer) SetServingStatus(ctx *kite.Context, service string, status grpc_health_v1.HealthCheckResponse_ServingStatus)
-func (h *healthServer) Shutdown(ctx *kite.Context)
-func (h *healthServer) Resume(ctx *kite.Context)
+func (h *healthServer) Check(ctx *pi.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error)
+func (h *healthServer) Watch(ctx *pi.Context, in *grpc_health_v1.HealthCheckRequest, stream grpc_health_v1.Health_WatchServer) error
+func (h *healthServer) SetServingStatus(ctx *pi.Context, service string, status grpc_health_v1.HealthCheckResponse_ServingStatus)
+func (h *healthServer) Shutdown(ctx *pi.Context)
+func (h *healthServer) Resume(ctx *pi.Context)
 ```
-> ##### Check out the example of setting up a gRPC server/client in Kite: [Visit GitHub](https://github.com/kite-dev/kite/tree/main/examples/grpc)
+> ##### Check out the example of setting up a gRPC server/client in Pi: [Visit GitHub](https://github.com/kite-dev/pi/tree/main/examples/grpc)

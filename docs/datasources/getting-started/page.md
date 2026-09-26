@@ -1,12 +1,12 @@
 # Getting Started
-Kite adopts an interface-driven architecture for datasource integration, providing a consistent way to work with various databases.
+Pi adopts an interface-driven architecture for datasource integration, providing a consistent way to work with various databases.
 Each datasource implements predefined interfaces that define core functionality, enabling you to inject any database client that satisfies these interface contracts.
-Users can inject any client that satisfies the base interface defined by Kite, making it easy to swap out or add new datasources as needed.
+Users can inject any client that satisfies the base interface defined by Pi, making it easy to swap out or add new datasources as needed.
 
 
 Keeping in mind the size of the framework in the final build, it felt counter-productive to keep all the database drivers within
 the framework itself. Keeping only the most used MySQL and Redis within the framework, users can now inject databases
-in the server that satisfies the base interface defined by Kite. This helps in reducing the build size and in turn build time
+in the server that satisfies the base interface defined by Pi. This helps in reducing the build size and in turn build time
 as unnecessary database drivers are not being compiled and added to the build.
 
 > We are planning to provide custom drivers for most common databases, and is in the pipeline for upcoming releases!

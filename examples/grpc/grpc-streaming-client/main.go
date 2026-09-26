@@ -6,15 +6,15 @@ import (
 	"io"
 	"time"
 
-	"github.com/sllt/kite/examples/grpc/grpc-streaming-client/client"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/examples/grpc/grpc-streaming-client/client"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Create a gRPC client for the Chat Streaming service
-	chatClient, err := client.NewChatServiceKiteClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
+	chatClient, err := client.NewChatServicePiClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
 	if err != nil {
 		app.Logger().Errorf("Failed to create Chat client: %v", err)
 	}
@@ -29,10 +29,10 @@ func main() {
 }
 
 type ChatHandler struct {
-	chatClient client.ChatServiceKiteClient
+	chatClient client.ChatServicePiClient
 }
 
-func NewChatHandler(chatClient client.ChatServiceKiteClient) *ChatHandler {
+func NewChatHandler(chatClient client.ChatServicePiClient) *ChatHandler {
 	return &ChatHandler{chatClient: chatClient}
 }
 
@@ -43,7 +43,7 @@ type StreamResponse struct {
 }
 
 // ServerStreamHandler handles server-side streaming with detailed response tracking
-func (c *ChatHandler) ServerStreamHandler(ctx *kite.Context) (any, error) {
+func (c *ChatHandler) ServerStreamHandler(ctx *pi.Context) (any, error) {
 	startTime := time.Now()
 	var responses []StreamResponse
 
@@ -90,7 +90,7 @@ func (c *ChatHandler) ServerStreamHandler(ctx *kite.Context) (any, error) {
 }
 
 // ClientStreamHandler handles client-side streaming with detailed tracking
-func (c *ChatHandler) ClientStreamHandler(ctx *kite.Context) (any, error) {
+func (c *ChatHandler) ClientStreamHandler(ctx *pi.Context) (any, error) {
 	startTime := time.Now()
 	var streamLog []StreamResponse
 
@@ -144,7 +144,7 @@ func (c *ChatHandler) ClientStreamHandler(ctx *kite.Context) (any, error) {
 }
 
 // BiDiStreamHandler handles bidirectional streaming with detailed tracking
-func (c *ChatHandler) BiDiStreamHandler(ctx *kite.Context) (any, error) {
+func (c *ChatHandler) BiDiStreamHandler(ctx *pi.Context) (any, error) {
 	startTime := time.Now()
 	streamLog := make([]StreamResponse, 0)
 
@@ -182,7 +182,7 @@ func (c *ChatHandler) BiDiStreamHandler(ctx *kite.Context) (any, error) {
 }
 
 // receiveBiDiResponses receives messages in a goroutine
-func (c *ChatHandler) receiveBiDiResponses(ctx *kite.Context, stream client.ChatService_BiDiStreamClient, respChan chan<- StreamResponse, errChan chan<- error) {
+func (c *ChatHandler) receiveBiDiResponses(ctx *pi.Context, stream client.ChatService_BiDiStreamClient, respChan chan<- StreamResponse, errChan chan<- error) {
 	for {
 		res, err := stream.Recv()
 		if err != nil {
@@ -204,7 +204,7 @@ func (c *ChatHandler) receiveBiDiResponses(ctx *kite.Context, stream client.Chat
 }
 
 // sendBiDiMessages sends predefined messages
-func (c *ChatHandler) sendBiDiMessages(ctx *kite.Context, stream client.ChatService_BiDiStreamClient, streamLog *[]StreamResponse) ([]string, error) {
+func (c *ChatHandler) sendBiDiMessages(ctx *pi.Context, stream client.ChatService_BiDiStreamClient, streamLog *[]StreamResponse) ([]string, error) {
 	messages := []string{"message 1", "message 2", "message 3"}
 
 	for _, msg := range messages {

@@ -1,30 +1,30 @@
 # Websockets
 
 WebSockets provide a full-duplex communication channel over a single, long-lived connection, making them ideal for 
-real-time applications like chat, notifications, and live updates. Kite provides a convenient way to integrate websockets
-into your application. By leveraging Kite's WebSocket support and customizable upgrader options,
+real-time applications like chat, notifications, and live updates. Pi provides a convenient way to integrate websockets
+into your application. By leveraging Pi's WebSocket support and customizable upgrader options,
 users can efficiently manage real-time communication in your applications.
 
-## Usage in Kite
+## Usage in Pi
 
-Here is a simple example to set up a WebSocket server in Kite:
+Here is a simple example to set up a WebSocket server in Pi:
 
 ```go
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.WebSocket("/ws", WSHandler)
 
 	app.Run()
 }
 
-func WSHandler(ctx *kite.Context) (any, error) {
+func WSHandler(ctx *pi.Context) (any, error) {
 	var message string
 
 	err := ctx.Bind(&message)
@@ -40,8 +40,8 @@ func WSHandler(ctx *kite.Context) (any, error) {
 ```
 
 ## Configuration Options
-Kite allows us to customize the WebSocket upgrader with several options. We can set these options using the 
-`websocket.NewWSUpgrader` function. Here is the list of options we can apply to your websocket upgrader using Kite.
+Pi allows us to customize the WebSocket upgrader with several options. We can set these options using the
+`websocket.NewWSUpgrader` function. Here is the list of options we can apply to your websocket upgrader using Pi.
 
 - `HandshakeTimeout (WithHandshakeTimeout)`: Sets the handshake timeout.
 - `ReadBufferSize (WithReadBufferSize)`: Sets the size of the read buffer.
@@ -53,10 +53,10 @@ Kite allows us to customize the WebSocket upgrader with several options. We can 
 
 ## Writing Messages
 
-Kite provides the `WriteMessageToSocket` method to send messages to the underlying websocket connection in a thread-safe way. The data parameter can be a string, []byte, or any struct that can be marshaled to JSON.
+Pi provides the `WriteMessageToSocket` method to send messages to the underlying websocket connection in a thread-safe way. The data parameter can be a string, []byte, or any struct that can be marshaled to JSON.
 
 ## Example:
-We can configure the Upgrader by creating a chain of option functions provided by Kite.
+We can configure the Upgrader by creating a chain of option functions provided by Pi.
 
 ```go
 package main
@@ -64,12 +64,12 @@ package main
 import (
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/websocket"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/websocket"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	wsUpgrader := websocket.NewWSUpgrader(
 		websocket.WithHandshakeTimeout(5*time.Second), // Set handshake timeout
@@ -86,7 +86,7 @@ func main() {
 	app.Run()
 }
 
-func WSHandler(ctx *kite.Context) (any, error) {
+func WSHandler(ctx *pi.Context) (any, error) {
 	var message string
 
 	err := ctx.Bind(&message)
@@ -97,7 +97,7 @@ func WSHandler(ctx *kite.Context) (any, error) {
 
 	ctx.Logger.Infof("Received message: %s", message)
 
-	err = ctx.WriteMessageToSocket("Hello! Kite")
+	err = ctx.WriteMessageToSocket("Hello! Pi")
 	if err != nil {
 		return nil, err
 	}
@@ -105,11 +105,11 @@ func WSHandler(ctx *kite.Context) (any, error) {
 	return message, nil
 }
 ```
-> #### Check out the example on how to read/write through a WebSocket in Kite: [Visit GitHub](https://github.com/kite-dev/kite/blob/main/examples/using-web-socket/main.go)
+> #### Check out the example on how to read/write through a WebSocket in Pi: [Visit GitHub](https://github.com/kite-dev/pi/blob/main/examples/using-web-socket/main.go)
 
 ## Inter-Service WebSocket Communication
 
-Kite also supports Inter-Service WebSocket Communication, enabling seamless communication between services using WebSocket connections. 
+Pi also supports Inter-Service WebSocket Communication, enabling seamless communication between services using WebSocket connections.
 This feature is particularly useful for microservices architectures where services need to exchange real-time data.
 
 ## Key Methods: 
@@ -134,18 +134,18 @@ This method sends a message to a WebSocket connection associated with a specific
 - `serviceName (string)`: The name of the WebSocket service.
 - `data (any)`: The message to send. It can be a string, []byte, or any struct that can be marshaled to JSON.
 
-## Usage in Kite
+## Usage in Pi
 
 ```go
 package main
 
 import (
 	"time"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Add a WebSocket service
 	err := app.AddWSService("notification-service", "ws://notifications.example.com/ws", nil, true, 5*time.Second)
@@ -155,7 +155,7 @@ func main() {
 	}
 
 	// Example route to send a message to the notification service
-	app.POST("/send-notification", func(ctx *kite.Context) (any, error) {
+	app.POST("/send-notification", func(ctx *pi.Context) (any, error) {
 		message := map[string]string{
 			"title":   "New Message",
 			"content": "You have a new notification!",

@@ -9,8 +9,8 @@ To connect to `ClickHouse`, you need to provide the following environment variab
 
 
 ## Setup
-Kite supports injecting ClickHouse that supports the following interface. Any driver that implements the interface can be added
-using `app.AddClickhouse()` method, and user's can use ClickHouse across application with `kite.Context`.
+Pi supports injecting ClickHouse that supports the following interface. Any driver that implements the interface can be added
+using `app.AddClickhouse()` method, and user's can use ClickHouse across application with `pi.Context`.
 ```go
 type Clickhouse interface {
 	Exec(ctx context.Context, query string, args ...any) error
@@ -22,10 +22,10 @@ type Clickhouse interface {
 User's can easily inject a driver that supports this interface, this provides usability without
 compromising the extensibility to use multiple databases.
 
-Import the kite's external driver for ClickHouse:
+Import the pi's external driver for ClickHouse:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/clickhouse@latest
+go get github.com/sllt/pi/pkg/pi/datasource/clickhouse@latest
 ```
 
 ### Example
@@ -33,8 +33,8 @@ go get github.com/sllt/kite/pkg/kite/datasource/clickhouse@latest
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/clickhouse"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/clickhouse"
 )
 
 type User struct {
@@ -44,7 +44,7 @@ type User struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.AddClickhouse(clickhouse.New(clickhouse.Config{
 		Hosts:    app.Config.Get("HOSTS"),
@@ -59,7 +59,7 @@ func main() {
 	app.Run()
 }
 
-func Post(ctx *kite.Context) (any, error) {
+func Post(ctx *pi.Context) (any, error) {
 	err := ctx.Clickhouse.Exec(ctx, "INSERT INTO users (id, name, age) VALUES (?, ?, ?)", "8f165e2d-feef-416c-95f6-913ce3172e15", "aryan", 10)
 	if err != nil {
 		return nil, err
@@ -68,7 +68,7 @@ func Post(ctx *kite.Context) (any, error) {
 	return "successfully inserted", nil
 }
 
-func Get(ctx *kite.Context) (any, error) {
+func Get(ctx *pi.Context) (any, error) {
 	var user []User
 
 	err := ctx.Clickhouse.Select(ctx, &user, "SELECT * FROM users")

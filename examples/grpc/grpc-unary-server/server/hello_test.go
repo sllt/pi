@@ -11,49 +11,49 @@ import (
 
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/infra"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
-func TestKiteHelloServer_Creation(t *testing.T) {
+func TestPiHelloServer_Creation(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	t.Run("HelloKiteServerCreation", func(t *testing.T) {
-		// Test Kite's HelloKiteServer creation
-		app := kite.New()
-		helloServer := &HelloKiteServer{}
+	t.Run("HelloPiServerCreation", func(t *testing.T) {
+		// Test Pi's HelloPiServer creation
+		app := pi.New()
+		helloServer := &HelloPiServer{}
 
-		assert.NotNil(t, helloServer, "Kite hello server should not be nil")
-		assert.NotNil(t, app, "Kite app should not be nil")
+		assert.NotNil(t, helloServer, "Pi hello server should not be nil")
+		assert.NotNil(t, app, "Pi app should not be nil")
 
-		// Test that it implements the Kite interface
-		var _ HelloServerWithKite = helloServer
+		// Test that it implements the Pi interface
+		var _ HelloServerWithPi = helloServer
 	})
 
 	t.Run("HelloServerWrapperCreation", func(t *testing.T) {
-		// Test Kite's HelloServerWrapper creation
-		app := kite.New()
-		helloServer := &HelloKiteServer{}
+		// Test Pi's HelloServerWrapper creation
+		app := pi.New()
+		helloServer := &HelloPiServer{}
 		wrapper := &HelloServerWrapper{
 			server: helloServer,
 		}
 
-		assert.NotNil(t, wrapper, "Kite hello server wrapper should not be nil")
+		assert.NotNil(t, wrapper, "Pi hello server wrapper should not be nil")
 		assert.Equal(t, helloServer, wrapper.server, "Wrapper should contain the server")
-		assert.NotNil(t, app, "Kite app should not be nil")
+		assert.NotNil(t, app, "Pi app should not be nil")
 	})
 }
 
-func TestKiteHelloServer_Methods(t *testing.T) {
+func TestPiHelloServer_Methods(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	// Test Kite's hello server methods
-	helloServer := &HelloKiteServer{}
+	// Test Pi's hello server methods
+	helloServer := &HelloPiServer{}
 	ctx := createTestContext()
 
 	t.Run("SayHelloMethodExists", func(t *testing.T) {
-		// Test that Kite's SayHello method exists and accepts correct parameters
+		// Test that Pi's SayHello method exists and accepts correct parameters
 		// Create a mock request in the context using the wrapper
 		ctx.Request = &HelloRequestWrapper{
 			HelloRequest: &HelloRequest{
@@ -61,9 +61,9 @@ func TestKiteHelloServer_Methods(t *testing.T) {
 			},
 		}
 
-		// Test Kite's SayHello method signature
+		// Test Pi's SayHello method signature
 		resp, err := helloServer.SayHello(ctx)
-		require.NoError(t, err, "Kite SayHello should not fail")
+		require.NoError(t, err, "Pi SayHello should not fail")
 		assert.NotNil(t, resp, "SayHello response should not be nil")
 
 		// Verify the response type
@@ -73,7 +73,7 @@ func TestKiteHelloServer_Methods(t *testing.T) {
 	})
 
 	t.Run("SayHelloWithEmptyName", func(t *testing.T) {
-		// Test Kite's SayHello with empty name (should default to "World")
+		// Test Pi's SayHello with empty name (should default to "World")
 		ctx.Request = &HelloRequestWrapper{
 			HelloRequest: &HelloRequest{
 				Name: "",
@@ -81,7 +81,7 @@ func TestKiteHelloServer_Methods(t *testing.T) {
 		}
 
 		resp, err := helloServer.SayHello(ctx)
-		require.NoError(t, err, "Kite SayHello with empty name should not fail")
+		require.NoError(t, err, "Pi SayHello with empty name should not fail")
 		assert.NotNil(t, resp, "SayHello response should not be nil")
 
 		helloResp, ok := resp.(*HelloResponse)
@@ -90,13 +90,13 @@ func TestKiteHelloServer_Methods(t *testing.T) {
 	})
 }
 
-func TestKiteHelloServer_ContextIntegration(t *testing.T) {
+func TestPiHelloServer_ContextIntegration(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	helloServer := &HelloKiteServer{}
+	helloServer := &HelloPiServer{}
 
 	t.Run("ContextBinding", func(t *testing.T) {
-		// Test Kite's context binding functionality
+		// Test Pi's context binding functionality
 		ctx := createTestContext()
 		ctx.Request = &HelloRequestWrapper{
 			HelloRequest: &HelloRequest{
@@ -105,7 +105,7 @@ func TestKiteHelloServer_ContextIntegration(t *testing.T) {
 		}
 
 		resp, err := helloServer.SayHello(ctx)
-		require.NoError(t, err, "Kite SayHello should not fail")
+		require.NoError(t, err, "Pi SayHello should not fail")
 		assert.NotNil(t, resp, "SayHello response should not be nil")
 
 		helloResp, ok := resp.(*HelloResponse)
@@ -114,7 +114,7 @@ func TestKiteHelloServer_ContextIntegration(t *testing.T) {
 	})
 
 	t.Run("ContextTypeCompliance", func(t *testing.T) {
-		// Test that Kite's methods expect *kite.Context specifically
+		// Test that Pi's methods expect *pi.Context specifically
 		ctx := createTestContext()
 		ctx.Request = &HelloRequestWrapper{
 			HelloRequest: &HelloRequest{
@@ -122,41 +122,41 @@ func TestKiteHelloServer_ContextIntegration(t *testing.T) {
 			},
 		}
 
-		// Verify the method signature expects *kite.Context
-		var _ func(*kite.Context) (any, error) = helloServer.SayHello
+		// Verify the method signature expects *pi.Context
+		var _ func(*pi.Context) (any, error) = helloServer.SayHello
 
 		// Ensure the call compiles (even if it fails at runtime)
 		_, _ = helloServer.SayHello(ctx)
 	})
 }
 
-func TestKiteHelloServer_Registration(t *testing.T) {
+func TestPiHelloServer_Registration(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	// Test Kite's server registration functionality
-	t.Run("RegisterHelloServerWithKite", func(t *testing.T) {
-		// Test Kite's RegisterHelloServerWithKite function
-		app := kite.New()
-		helloServer := &HelloKiteServer{}
+	// Test Pi's server registration functionality
+	t.Run("RegisterHelloServerWithPi", func(t *testing.T) {
+		// Test Pi's RegisterHelloServerWithPi function
+		app := pi.New()
+		helloServer := &HelloPiServer{}
 
 		// This should not panic and should register the server
 		assert.NotPanics(t, func() {
-			RegisterHelloServerWithKite(app, helloServer)
-		}, "RegisterHelloServerWithKite should not panic")
+			RegisterHelloServerWithPi(app, helloServer)
+		}, "RegisterHelloServerWithPi should not panic")
 	})
 }
 
-func TestKiteHelloServer_HealthIntegration(t *testing.T) {
+func TestPiHelloServer_HealthIntegration(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	// Test Kite's health integration
+	// Test Pi's health integration
 	t.Run("HealthIntegration", func(t *testing.T) {
-		app := kite.New()
+		app := pi.New()
 
-		helloServer := &HelloKiteServer{}
+		helloServer := &HelloPiServer{}
 
 		// Register the server to set up health checks
-		RegisterHelloServerWithKite(app, helloServer)
+		RegisterHelloServerWithPi(app, helloServer)
 
 		// Test that health server is properly integrated
 		healthServer := getOrCreateHealthServer()
@@ -175,21 +175,21 @@ func TestKiteHelloServer_HealthIntegration(t *testing.T) {
 	})
 }
 
-func TestKiteHelloServer_MultipleInstances(t *testing.T) {
+func TestPiHelloServer_MultipleInstances(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	// Test Kite's multiple server instances
+	// Test Pi's multiple server instances
 	t.Run("MultipleHelloServers", func(t *testing.T) {
-		app := kite.New()
+		app := pi.New()
 
-		server1 := &HelloKiteServer{}
-		server2 := &HelloKiteServer{}
+		server1 := &HelloPiServer{}
+		server2 := &HelloPiServer{}
 
-		assert.NotNil(t, server1, "First Kite hello server should not be nil")
-		assert.NotNil(t, server2, "Second Kite hello server should not be nil")
+		assert.NotNil(t, server1, "First Pi hello server should not be nil")
+		assert.NotNil(t, server2, "Second Pi hello server should not be nil")
 		// Check that they are different objects (different memory addresses)
-		assert.True(t, server1 != server2, "Kite hello server instances should be different objects")
-		assert.NotNil(t, app, "Kite app should not be nil")
+		assert.True(t, server1 != server2, "Pi hello server instances should be different objects")
+		assert.NotNil(t, app, "Pi app should not be nil")
 
 		// Test that both can be created (but not registered to avoid duplicate service error)
 		assert.NotNil(t, server1, "First server should be valid")
@@ -197,18 +197,18 @@ func TestKiteHelloServer_MultipleInstances(t *testing.T) {
 	})
 }
 
-func TestNewHelloKiteServer(t *testing.T) {
+func TestNewHelloPiServer(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	t.Run("NewHelloKiteServerCreation", func(t *testing.T) {
-		// Test Kite's NewHelloKiteServer function
-		server := NewHelloKiteServer()
+	t.Run("NewHelloPiServerCreation", func(t *testing.T) {
+		// Test Pi's NewHelloPiServer function
+		server := NewHelloPiServer()
 
-		assert.NotNil(t, server, "NewHelloKiteServer should not return nil")
+		assert.NotNil(t, server, "NewHelloPiServer should not return nil")
 		assert.NotNil(t, server.health, "Health server should be initialized")
 
-		// Test that it implements the Kite interface
-		var _ HelloServerWithKite = server
+		// Test that it implements the Pi interface
+		var _ HelloServerWithPi = server
 	})
 }
 
@@ -282,27 +282,27 @@ func TestHelloServerWrapper_SayHello(t *testing.T) {
 	})
 }
 
-func TestHelloServerWrapper_getKiteContext(t *testing.T) {
+func TestHelloServerWrapper_getPiContext(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	t.Run("getKiteContext", func(t *testing.T) {
+	t.Run("getPiContext", func(t *testing.T) {
 		// Create wrapper
 		wrapper := &HelloServerWrapper{
 			Container: &infra.Container{},
 		}
 
-		// Test getKiteContext method
+		// Test getPiContext method
 		ctx := context.Background()
 		req := &HelloRequestWrapper{
 			HelloRequest: &HelloRequest{Name: "test"},
 		}
 
-		kiteCtx := wrapper.getKiteContext(ctx, req)
+		piCtx := wrapper.getPiContext(ctx, req)
 
-		assert.NotNil(t, kiteCtx, "Kite context should not be nil")
-		assert.Equal(t, ctx, kiteCtx.Context, "Context should match")
-		assert.Equal(t, &infra.Container{}, kiteCtx.Container, "Container should match")
-		assert.Equal(t, req, kiteCtx.Request, "Request should match")
+		assert.NotNil(t, piCtx, "Pi context should not be nil")
+		assert.Equal(t, ctx, piCtx.Context, "Context should match")
+		assert.Equal(t, &infra.Container{}, piCtx.Container, "Container should match")
+		assert.Equal(t, req, piCtx.Request, "Request should match")
 	})
 }
 
@@ -314,16 +314,16 @@ func TestInstrumentedStream(t *testing.T) {
 		mockStream := &mockServerStream{}
 
 		// Create instrumented stream
-		kiteCtx := createTestContext()
+		piCtx := createTestContext()
 		stream := &instrumentedStream{
 			ServerStream: mockStream,
-			ctx:          kiteCtx,
+			ctx:          piCtx,
 			method:       "/Hello/Test",
 		}
 
 		// Test Context method
 		ctx := stream.Context()
-		assert.Equal(t, kiteCtx, ctx, "Context should match Kite context")
+		assert.Equal(t, piCtx, ctx, "Context should match Pi context")
 	})
 
 	t.Run("InstrumentedStreamSendMsg", func(t *testing.T) {
@@ -331,10 +331,10 @@ func TestInstrumentedStream(t *testing.T) {
 		mockStream := &mockServerStream{}
 
 		// Create instrumented stream
-		kiteCtx := createTestContext()
+		piCtx := createTestContext()
 		stream := &instrumentedStream{
 			ServerStream: mockStream,
-			ctx:          kiteCtx,
+			ctx:          piCtx,
 			method:       "/Hello/Test",
 		}
 
@@ -351,10 +351,10 @@ func TestInstrumentedStream(t *testing.T) {
 		mockStream := &mockServerStream{}
 
 		// Create instrumented stream
-		kiteCtx := createTestContext()
+		piCtx := createTestContext()
 		stream := &instrumentedStream{
 			ServerStream: mockStream,
-			ctx:          kiteCtx,
+			ctx:          piCtx,
 			method:       "/Hello/Test",
 		}
 
@@ -370,7 +370,7 @@ func TestInstrumentedStream(t *testing.T) {
 // Mock implementations for testing
 type mockHelloServer struct{}
 
-func (m *mockHelloServer) SayHello(ctx *kite.Context) (any, error) {
+func (m *mockHelloServer) SayHello(ctx *pi.Context) (any, error) {
 	req := &HelloRequest{}
 	err := ctx.Bind(req)
 	if err != nil {
@@ -381,13 +381,13 @@ func (m *mockHelloServer) SayHello(ctx *kite.Context) (any, error) {
 
 type mockHelloServerWithError struct{}
 
-func (m *mockHelloServerWithError) SayHello(ctx *kite.Context) (any, error) {
+func (m *mockHelloServerWithError) SayHello(ctx *pi.Context) (any, error) {
 	return nil, fmt.Errorf("test error")
 }
 
 type mockHelloServerWrongType struct{}
 
-func (m *mockHelloServerWrongType) SayHello(ctx *kite.Context) (any, error) {
+func (m *mockHelloServerWrongType) SayHello(ctx *pi.Context) (any, error) {
 	return "wrong type", nil
 }
 

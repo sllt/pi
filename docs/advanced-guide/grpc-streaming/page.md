@@ -1,13 +1,13 @@
-# gRPC Streaming with Kite
+# gRPC Streaming with Pi
 
-Kite provides comprehensive support for gRPC streaming, enabling efficient real-time communication between services. Streaming is particularly useful for scenarios where you need to send or receive multiple messages over a single connection, such as chat applications, real-time data feeds, or large file transfers.
+Pi provides comprehensive support for gRPC streaming, enabling efficient real-time communication between services. Streaming is particularly useful for scenarios where you need to send or receive multiple messages over a single connection, such as chat applications, real-time data feeds, or large file transfers.
 
-Kite supports three types of gRPC streaming:
+Pi supports three types of gRPC streaming:
 - **Server-side streaming**: The server sends multiple responses to a single client request
 - **Client-side streaming**: The client sends multiple requests and receives a single response
 - **Bidirectional streaming**: Both client and server can send multiple messages independently
 
-All streaming methods in Kite include built-in tracing, metrics, and logging support, ensuring seamless observability for your streaming operations.
+All streaming methods in Pi include built-in tracing, metrics, and logging support, ensuring seamless observability for your streaming operations.
 
 ## Prerequisites
 
@@ -20,12 +20,12 @@ Before implementing gRPC streaming, ensure you have:
    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.2
    export PATH="$PATH:$(go env GOPATH)/bin"
    ```
-3. **kite-cli** installed:
+3. **pi-cli** installed:
    ```bash
-   go install github.com/sllt/kite/cli/kite@latest
+   go install github.com/sllt/pi/cli/pi@latest
    ```
 
-For detailed setup instructions, refer to the [gRPC with Kite documentation](https://github.com/sllt/kite/docs/advanced-guide/grpc).
+For detailed setup instructions, refer to the [gRPC with Pi documentation](https://github.com/sllt/pi/docs/advanced-guide/grpc).
 
 ## Defining Streaming RPCs in Protocol Buffers
 
@@ -57,17 +57,17 @@ service ChatService {
 
 ## Generating gRPC Streaming Server Code
 
-Kite CLI automatically generates streaming-aware server templates. Use the `kite wrap grpc server` command:
+Pi CLI automatically generates streaming-aware server templates. Use the `pi wrap grpc server` command:
 
 ```bash
-kite wrap grpc server -proto=./path/to/your/proto/file
+pi wrap grpc server -proto=./path/to/your/proto/file
 ```
 
 This command generates:
 - `<SERVICE_NAME>_server.go`: Template file with streaming method signatures
-- `<SERVICE_NAME>_kite.go`: Generated wrapper with streaming instrumentation
-- `request_kite.go`: Request wrapper for context binding
-- `health_kite.go`: Health check server integration
+- `<SERVICE_NAME>_pi.go`: Generated wrapper with streaming instrumentation
+- `request_pi.go`: Request wrapper for context binding
+- `health_pi.go`: Health check server integration
 
 ### Server-Side Streaming Implementation
 
@@ -76,7 +76,7 @@ Server-side streaming allows the server to send multiple responses to a single c
 **Example Implementation:**
 
 ```go
-func (s *ChatServiceKiteServer) ServerStream(ctx *kite.Context, stream ChatService_ServerStreamServer) error {
+func (s *ChatServicePiServer) ServerStream(ctx *pi.Context, stream ChatService_ServerStreamServer) error {
     // Bind the initial request
     req := Request{}
     if err := ctx.Bind(&req); err != nil {
@@ -121,7 +121,7 @@ Client-side streaming allows the client to send multiple requests before receivi
 **Example Implementation:**
 
 ```go
-func (s *ChatServiceKiteServer) ClientStream(ctx *kite.Context, stream ChatService_ClientStreamServer) error {
+func (s *ChatServicePiServer) ClientStream(ctx *pi.Context, stream ChatService_ClientStreamServer) error {
     var messageCount int
     var finalMessage strings.Builder
 
@@ -168,7 +168,7 @@ Bidirectional streaming allows both client and server to send messages independe
 **Example Implementation:**
 
 ```go
-func (s *ChatServiceKiteServer) BiDiStream(ctx *kite.Context, stream ChatService_BiDiStreamServer) error {
+func (s *ChatServicePiServer) BiDiStream(ctx *pi.Context, stream ChatService_BiDiStreamServer) error {
     errChan := make(chan error)
 
     // Handle incoming messages in a goroutine
@@ -225,7 +225,7 @@ func (s *ChatServiceKiteServer) BiDiStream(ctx *kite.Context, stream ChatService
 Generate the client code using:
 
 ```bash
-kite wrap grpc client -proto=./path/to/your/proto/file
+pi wrap grpc client -proto=./path/to/your/proto/file
 ```
 
 This generates `<SERVICE_NAME>_client.go` with streaming client interfaces.
@@ -235,7 +235,7 @@ This generates `<SERVICE_NAME>_client.go` with streaming client interfaces.
 **Example Implementation:**
 
 ```go
-func (c *ChatHandler) ServerStreamHandler(ctx *kite.Context) (any, error) {
+func (c *ChatHandler) ServerStreamHandler(ctx *pi.Context) (any, error) {
     // Initiate server stream
     stream, err := c.chatClient.ServerStream(ctx, &client.Request{
         Message: "stream request",
@@ -269,7 +269,7 @@ func (c *ChatHandler) ServerStreamHandler(ctx *kite.Context) (any, error) {
 **Example Implementation:**
 
 ```go
-func (c *ChatHandler) ClientStreamHandler(ctx *kite.Context) (any, error) {
+func (c *ChatHandler) ClientStreamHandler(ctx *pi.Context) (any, error) {
     // Initiate client stream
     stream, err := c.chatClient.ClientStream(ctx)
     if err != nil {
@@ -304,7 +304,7 @@ func (c *ChatHandler) ClientStreamHandler(ctx *kite.Context) (any, error) {
 **Example Implementation:**
 
 ```go
-func (c *ChatHandler) BiDiStreamHandler(ctx *kite.Context) (any, error) {
+func (c *ChatHandler) BiDiStreamHandler(ctx *pi.Context) (any, error) {
     // Initiate bidirectional stream
     stream, err := c.chatClient.BiDiStream(ctx)
     if err != nil {
@@ -366,15 +366,15 @@ Register your streaming service in `main.go` just like unary services:
 package main
 
 import (
-    "github.com/sllt/kite/examples/grpc/grpc-streaming-server/server"
-    "github.com/sllt/kite/pkg/kite"
+    "github.com/sllt/pi/examples/grpc/grpc-streaming-server/server"
+    "github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-    app := kite.New()
+    app := pi.New()
 
     // Register streaming service
-    server.RegisterChatServiceServerWithKite(app, server.NewChatServiceKiteServer())
+    server.RegisterChatServiceServerWithPi(app, server.NewChatServicePiServer())
 
     app.Run()
 }
@@ -382,7 +382,7 @@ func main() {
 
 ## Built-in Observability
 
-Kite automatically provides observability for all streaming operations:
+Pi automatically provides observability for all streaming operations:
 
 ### Metrics
 
@@ -420,7 +420,7 @@ Streaming operations are automatically logged with:
 **Example Error Handling:**
 
 ```go
-func (s *ChatServiceKiteServer) ServerStream(ctx *kite.Context, stream ChatService_ServerStreamServer) error {
+func (s *ChatServicePiServer) ServerStream(ctx *pi.Context, stream ChatService_ServerStreamServer) error {
     req := Request{}
     if err := ctx.Bind(&req); err != nil {
         return status.Errorf(codes.InvalidArgument, "invalid request: %v", err)
@@ -446,11 +446,11 @@ func (s *ChatServiceKiteServer) ServerStream(ctx *kite.Context, stream ChatServi
 
 ## Adding Custom Stream interceptors
 
-For streaming RPCs (client-stream, server-stream, or bidirectional), Kite allows you to add stream interceptors using `AddGRPCServerStreamInterceptors`. These are useful for handling logic that needs to span the entire lifetime of a stream.
+For streaming RPCs (client-stream, server-stream, or bidirectional), Pi allows you to add stream interceptors using `AddGRPCServerStreamInterceptors`. These are useful for handling logic that needs to span the entire lifetime of a stream.
 
 ```go
 func main() {
-    app := kite.New()
+    app := pi.New()
 
     app.AddGRPCServerStreamInterceptors(streamAuthInterceptor)
 
@@ -484,15 +484,15 @@ For more details on adding additional interceptors and server options, refer to 
 
 ## Examples
 
-Complete working examples are available in the Kite repository:
-- **Server Example**: `kite/examples/grpc/grpc-streaming-server`
-- **Client Example**: `kite/examples/grpc/grpc-streaming-client`
+Complete working examples are available in the Pi repository:
+- **Server Example**: `pi/examples/grpc/grpc-streaming-server`
+- **Client Example**: `pi/examples/grpc/grpc-streaming-client`
 
 These examples demonstrate all three types of streaming with detailed error handling and logging.
 
 ## Further Reading
 
-- [gRPC with Kite](https://github.com/sllt/kite/docs/advanced-guide/grpc) - General gRPC documentation
+- [gRPC with Pi](https://github.com/sllt/pi/docs/advanced-guide/grpc) - General gRPC documentation
 - [gRPC Official Documentation](https://grpc.io/docs/what-is-grpc/introduction/) - Learn more about gRPC streaming concepts
-- [Kite Examples](https://github.com/kite-dev/kite/tree/main/examples/grpc) - More gRPC examples
+- [Pi Examples](https://github.com/kite-dev/pi/tree/main/examples/grpc) - More gRPC examples
 

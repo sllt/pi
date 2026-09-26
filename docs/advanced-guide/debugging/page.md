@@ -1,12 +1,12 @@
-# Using `pprof` in Kite Applications
+# Using `pprof` in Pi Applications
 
-In Kite applications, `pprof` profiling is automatically enabled. The profiling endpoints are served on the `METRICS_PORT`, which defaults to `2121` if not specified.
+In Pi applications, `pprof` profiling is automatically enabled. The profiling endpoints are served on the `METRICS_PORT`, which defaults to `2121` if not specified.
 
-This guide explains how to enable and use `pprof` in Kite applications.
+This guide explains how to enable and use `pprof` in Pi applications.
 
 ---
 
-## Enabling `pprof` in Kite
+## Enabling `pprof` in Pi
 
 ### Prerequisites
 Ensure the `METRICS_PORT` is set (default is `2121`):
@@ -14,7 +14,7 @@ Ensure the `METRICS_PORT` is set (default is `2121`):
    METRICS_PORT=2121
    ```
 
-Kite automatically registers the following `pprof` routes:
+Pi automatically registers the following `pprof` routes:
 - `/debug/pprof/cmdline`
 - `/debug/pprof/profile`
 - `/debug/pprof/symbol`
@@ -121,7 +121,7 @@ go tool trace trace.out
    METRICS_PORT=2121
    ```
 
-2. **Run Your Kite Application**:
+2. **Run Your Pi Application**:
    ```bash
    go run main.go
    ```

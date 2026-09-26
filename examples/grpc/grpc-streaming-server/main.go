@@ -1,14 +1,14 @@
 package main
 
 import (
-	"github.com/sllt/kite/examples/grpc/grpc-streaming-server/server"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/examples/grpc/grpc-streaming-server/server"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
-	server.RegisterChatServiceServerWithKite(app, server.NewChatServiceKiteServer())
+	server.RegisterChatServiceServerWithPi(app, server.NewChatServicePiServer())
 
 	app.Run()
 }

@@ -1,18 +1,18 @@
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.WebSocket("/ws", WSHandler)
 
 	app.Run()
 }
 
-func WSHandler(ctx *kite.Context) (any, error) {
+func WSHandler(ctx *pi.Context) (any, error) {
 	var message string
 
 	err := ctx.Bind(&message)
@@ -23,7 +23,7 @@ func WSHandler(ctx *kite.Context) (any, error) {
 
 	ctx.Logger.Infof("Received message: %s", message)
 
-	err = ctx.WriteMessageToSocket("Hello! Kite")
+	err = ctx.WriteMessageToSocket("Hello! Pi")
 	if err != nil {
 		return nil, err
 	}

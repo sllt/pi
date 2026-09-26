@@ -1,4 +1,4 @@
-module github.com/sllt/kite/examples/using-add-filestore
+module github.com/sllt/pi/examples/using-add-filestore
 
 go 1.25
 

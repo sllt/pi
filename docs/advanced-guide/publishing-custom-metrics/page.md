@@ -1,8 +1,8 @@
 # Publishing Custom Metrics
 
-Kite publishes some {% new-tab-link newtab=false title="default metrics" href="/docs/quick-start/observability" /%}.
+Pi publishes some {% new-tab-link newtab=false title="default metrics" href="/docs/quick-start/observability" /%}.
 
-Kite can handle multiple different metrics concurrently, each uniquely identified by its name during initialization.
+Pi can handle multiple different metrics concurrently, each uniquely identified by its name during initialization.
 It supports the following {% new-tab-link title="metrics" href="https://opentelemetry.io/docs/specs/otel/metrics/" /%} types in Prometheus format:
 
 1. `Counter`
@@ -24,16 +24,16 @@ Counter is a {% new-tab-link title="synchronous Instrument" href="https://opente
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	// initialize kite object
-	app := kite.New()
+	// initialize pi object
+	app := pi.New()
 
 	app.Metrics().NewCounter("transaction_success", "used to track the count of successful transactions")
 
-	app.POST("/transaction", func(ctx *kite.Context) (any, error) {
+	app.POST("/transaction", func(ctx *pi.Context) (any, error) {
 		ctx.Metrics().IncrementCounter(ctx, "transaction_success")
 
 		return "Transaction Successful", nil
@@ -54,16 +54,16 @@ Note: If the value is monotonically increasing, use Counter instead.
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	// initialize kite object
-	app := kite.New()
+	// initialize pi object
+	app := pi.New()
 
 	app.Metrics().NewUpDownCounter("total_credit_day_sale", "used to track the total credit sales in a day")
 
-	app.POST("/sale", func(ctx *kite.Context) (any, error) {
+	app.POST("/sale", func(ctx *pi.Context) (any, error) {
 		ctx.Metrics().DeltaUpDownCounter(ctx, "total_credit_day_sale", 1000)
 
 		return "Sale Completed", nil
@@ -84,17 +84,17 @@ report arbitrary values that are likely to be statistically meaningful. It is in
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	// initialize kite object
-	app := kite.New()
+	// initialize pi object
+	app := pi.New()
 
 	app.Metrics().NewHistogram("transaction_time", "used to track the time taken by a transaction",
 		5, 10, 15, 20, 25, 35)
 
-	app.POST("/transaction", func(ctx *kite.Context) (any, error) {
+	app.POST("/transaction", func(ctx *pi.Context) (any, error) {
 		transactionStartTime := time.Now()
 
 		// transaction logic
@@ -120,16 +120,16 @@ Gauge is a {% new-tab-link title="synchronous Instrument" href="https://opentele
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	// initialize kite object
-	app := kite.New()
+	// initialize pi object
+	app := pi.New()
 
 	app.Metrics().NewGauge("product_stock", "used to track the number of products in stock")
 
-	app.POST("/sale", func(ctx *kite.Context) (any, error) {
+	app.POST("/sale", func(ctx *pi.Context) (any, error) {
 		ctx.Metrics().SetGauge("product_stock", 10)
 
 		return "Sale Completed", nil
@@ -141,7 +141,7 @@ func main() {
 
 ## Adding Labels to Custom Metrics
 
-Kite leverages metrics support by enabling labels. Labels are a key feature in metrics that allows us to categorize and filter metrics based on relevant information.
+Pi leverages metrics support by enabling labels. Labels are a key feature in metrics that allows us to categorize and filter metrics based on relevant information.
 
 ### Understanding Labels
 
@@ -161,12 +161,12 @@ This allows for more granular analysis and visualization in Grafana (or any othe
 - Choose meaningful label names that clearly describe the data point.
 - Ensure consistency in label naming conventions across your application.
 
-By effectively using labels in Kite, we can enrich your custom metrics and gain deeper insights into your application's performance and behavior.
+By effectively using labels in Pi, we can enrich your custom metrics and gain deeper insights into your application's performance and behavior.
 
 ### Usage:
 
 Labels are added while populating the data for metrics, by passing them as arguments (comma separated key-value pairs)
-in the Kite's methods (namely: `IncrementCounter`, `DeltaUpDownCounter`, `RecordHistogram`, `SetGauge`).
+in the Pi's methods (namely: `IncrementCounter`, `DeltaUpDownCounter`, `RecordHistogram`, `SetGauge`).
 
 Example: `c.Metrics().IncrementCounter(c, "metric-name", "metric-value", "label-1", "value-1", "label-2", "value-2")`
 
@@ -174,12 +174,12 @@ Example: `c.Metrics().IncrementCounter(c, "metric-name", "metric-value", "label-
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	// Initialize kite object
-	a := kite.New()
+	// Initialize pi object
+	a := pi.New()
 
 	// Add custom metrics
 	a.Metrics().NewUpDownCounter("total_credit_day_sale", "used to track the total credit sales in a day")
@@ -192,7 +192,7 @@ func main() {
 	a.Run()
 }
 
-func SaleHandler(c *kite.Context) (any, error) {
+func SaleHandler(c *pi.Context) (any, error) {
 	// logic to create sales
 
 	c.Metrics().DeltaUpDownCounter(c, "total_credit_day_sale", 10, "sale_type", "credit", "product_type", "beverage") // Here "sale_type" & "product_type" are the labels and "credit" & "beverage" are the values
@@ -200,7 +200,7 @@ func SaleHandler(c *kite.Context) (any, error) {
 	return "Sale Successful", nil
 }
 
-func ReturnHandler(c *kite.Context) (any, error) {
+func ReturnHandler(c *pi.Context) (any, error) {
 	// logic to create a sales return
 
 	c.Metrics().DeltaUpDownCounter(c, "total_credit_day_sale", -5, "sale_type", "credit_return", "product_type", "dairy")
@@ -225,4 +225,4 @@ A permutation of these key-value values provides the metric cardinality.
 Lower the cardinality, faster the query performance and lower the monitoring resource utilization.
 ```
 
-> #### Check out the example on how to publish custom metrics in Kite: [Visit GitHub](https://github.com/kite-dev/kite/blob/main/examples/using-custom-metrics/main.go)
+> #### Check out the example on how to publish custom metrics in Pi: [Visit GitHub](https://github.com/kite-dev/pi/blob/main/examples/using-custom-metrics/main.go)

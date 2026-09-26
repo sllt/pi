@@ -1,12 +1,12 @@
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/infra"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 func main() {
-	a := kite.New()
+	a := pi.New()
 
 	//For Basic Auth
 	//setupBasicAuth(a)
@@ -21,11 +21,11 @@ func main() {
 	a.Run()
 }
 
-func testHandler(_ *kite.Context) (any, error) {
+func testHandler(_ *pi.Context) (any, error) {
 	return "success", nil
 }
 
-func setupBasicAuth(a *kite.App) {
+func setupBasicAuth(a *pi.App) {
 	a.EnableBasicAuthWithValidator(func(c *infra.Container, username, password string) bool {
 		if username == "username" && password == "password" {
 			return true
@@ -41,7 +41,7 @@ func setupBasicAuth(a *kite.App) {
 	})
 }
 
-func setupAPIKeyAuth(a *kite.App) {
+func setupAPIKeyAuth(a *pi.App) {
 	a.EnableAPIKeyAuthWithValidator(func(c *infra.Container, apiKey string) bool {
 		// basic validation based on fixed set of credentials
 		return apiKey == "valid-api-key"

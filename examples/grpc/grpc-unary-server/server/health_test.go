@@ -8,54 +8,54 @@ import (
 	"github.com/stretchr/testify/require"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/infra"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
-// createTestContext creates a test kite.Context
-func createTestContext() *kite.Context {
+// createTestContext creates a test pi.Context
+func createTestContext() *pi.Context {
 	container := &infra.Container{}
-	return &kite.Context{
+	return &pi.Context{
 		Context:   context.Background(),
 		Container: container,
 	}
 }
 
-func TestKiteHealthServer_Creation(t *testing.T) {
+func TestPiHealthServer_Creation(t *testing.T) {
 	t.Run("GetOrCreateHealthServer", func(t *testing.T) {
-		// Test Kite's getOrCreateHealthServer function
+		// Test Pi's getOrCreateHealthServer function
 		healthServer := getOrCreateHealthServer()
-		assert.NotNil(t, healthServer, "Kite health server should not be nil")
+		assert.NotNil(t, healthServer, "Pi health server should not be nil")
 
-		// Test that it implements the Kite interface (not the standard gRPC interface)
-		// The Kite health server has different method signatures
+		// Test that it implements the Pi interface (not the standard gRPC interface)
+		// The Pi health server has different method signatures
 		assert.NotNil(t, healthServer, "Health server should not be nil")
 	})
 
 	t.Run("HealthServerSingleton", func(t *testing.T) {
-		// Test Kite's singleton pattern for health server
+		// Test Pi's singleton pattern for health server
 		healthServer1 := getOrCreateHealthServer()
 		healthServer2 := getOrCreateHealthServer()
 
-		assert.Equal(t, healthServer1, healthServer2, "Kite health server should be singleton")
+		assert.Equal(t, healthServer1, healthServer2, "Pi health server should be singleton")
 	})
 }
 
-func TestKiteHealthServer_Methods(t *testing.T) {
+func TestPiHealthServer_Methods(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	// Test Kite's health server methods
+	// Test Pi's health server methods
 	healthServer := getOrCreateHealthServer()
 	ctx := createTestContext()
 
 	t.Run("CheckMethodExists", func(t *testing.T) {
-		// Test that Kite's Check method exists and accepts correct parameters
+		// Test that Pi's Check method exists and accepts correct parameters
 		req := &healthpb.HealthCheckRequest{
 			Service: "test-service",
 		}
 
-		// Test Kite's Check method signature - this will fail with "unknown service" which is expected
+		// Test Pi's Check method signature - this will fail with "unknown service" which is expected
 		resp, err := healthServer.Check(ctx, req)
 		assert.Error(t, err, "Health check should fail for unknown service")
 		assert.Nil(t, resp, "Health check response should be nil for unknown service")
@@ -63,27 +63,27 @@ func TestKiteHealthServer_Methods(t *testing.T) {
 	})
 
 	t.Run("WatchMethodExists", func(t *testing.T) {
-		// Test that Kite's Watch method exists and accepts correct parameters
+		// Test that Pi's Watch method exists and accepts correct parameters
 		req := &healthpb.HealthCheckRequest{
 			Service: "test-service",
 		}
 
-		// Test Kite's Watch method signature - this will panic with nil stream, but we're testing method existence
+		// Test Pi's Watch method signature - this will panic with nil stream, but we're testing method existence
 		assert.Panics(t, func() {
 			healthServer.Watch(ctx, req, nil)
 		}, "Watch should panic with nil stream, but method should exist")
 	})
 }
 
-func TestKiteHealthServer_SetServingStatus(t *testing.T) {
+func TestPiHealthServer_SetServingStatus(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	// Test Kite's SetServingStatus functionality
+	// Test Pi's SetServingStatus functionality
 	healthServer := getOrCreateHealthServer()
 	ctx := createTestContext()
 
 	t.Run("SetServingStatus", func(t *testing.T) {
-		// Test Kite's SetServingStatus method
+		// Test Pi's SetServingStatus method
 		healthServer.SetServingStatus(ctx, "test-service", healthpb.HealthCheckResponse_SERVING)
 
 		// Verify the status was set
@@ -96,7 +96,7 @@ func TestKiteHealthServer_SetServingStatus(t *testing.T) {
 	})
 
 	t.Run("SetNotServingStatus", func(t *testing.T) {
-		// Test Kite's SetServingStatus with NOT_SERVING
+		// Test Pi's SetServingStatus with NOT_SERVING
 		healthServer.SetServingStatus(ctx, "test-service-not-serving", healthpb.HealthCheckResponse_NOT_SERVING)
 
 		// Verify the status was set
@@ -109,15 +109,15 @@ func TestKiteHealthServer_SetServingStatus(t *testing.T) {
 	})
 }
 
-func TestKiteHealthServer_Shutdown(t *testing.T) {
+func TestPiHealthServer_Shutdown(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	// Test Kite's Shutdown functionality
+	// Test Pi's Shutdown functionality
 	healthServer := getOrCreateHealthServer()
 	ctx := createTestContext()
 
 	t.Run("Shutdown", func(t *testing.T) {
-		// Test Kite's Shutdown method
+		// Test Pi's Shutdown method
 		healthServer.Shutdown(ctx)
 
 		// After shutdown, all services should return NOT_SERVING
@@ -132,15 +132,15 @@ func TestKiteHealthServer_Shutdown(t *testing.T) {
 	})
 }
 
-func TestKiteHealthServer_Resume(t *testing.T) {
+func TestPiHealthServer_Resume(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	// Test Kite's Resume functionality
+	// Test Pi's Resume functionality
 	healthServer := getOrCreateHealthServer()
 	ctx := createTestContext()
 
 	t.Run("Resume", func(t *testing.T) {
-		// Test Kite's Resume method
+		// Test Pi's Resume method
 		healthServer.Resume(ctx)
 
 		// After resume, services should return to their previous status
@@ -155,16 +155,16 @@ func TestKiteHealthServer_Resume(t *testing.T) {
 	})
 }
 
-func TestKiteHealthServer_MultipleInstances(t *testing.T) {
+func TestPiHealthServer_MultipleInstances(t *testing.T) {
 	_ = testutil.NewServerConfigs(t)
 
-	// Test Kite's singleton pattern
+	// Test Pi's singleton pattern
 	t.Run("SingletonPattern", func(t *testing.T) {
 		healthServer1 := getOrCreateHealthServer()
 		healthServer2 := getOrCreateHealthServer()
 		ctx := createTestContext()
 
-		assert.Equal(t, healthServer1, healthServer2, "Kite health server should be singleton")
+		assert.Equal(t, healthServer1, healthServer2, "Pi health server should be singleton")
 
 		// Test that operations on one affect the other
 		healthServer1.SetServingStatus(ctx, "singleton-test", healthpb.HealthCheckResponse_SERVING)

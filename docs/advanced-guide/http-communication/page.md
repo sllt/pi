@@ -1,6 +1,6 @@
 # Inter-Service HTTP Calls
 
-Kite promotes microservice architecture and to facilitate the same, it provides the support to initialize HTTP services
+Pi promotes microservice architecture and to facilitate the same, it provides the support to initialize HTTP services
 at application level using `AddHTTPService()` method.
 
 Support for inter-service HTTP calls provide the following benefits:
@@ -13,7 +13,7 @@ Support for inter-service HTTP calls provide the following benefits:
 
 ### Registering a simple HTTP Service
 
-Kite allows registering a new HTTP service using the application method `AddHTTPService()`.
+Pi allows registering a new HTTP service using the application method `AddHTTPService()`.
 It takes in a service name and service address argument to register the dependent service at application level.
 Registration of multiple dependent services is quite easier, which is a common use case in a microservice architecture.
 
@@ -35,12 +35,12 @@ app.AddHTTPService(<service_name>, <service_address>)
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
 	// Create a new application
-	app := kite.New()
+	app := pi.New()
 
 	// register a payment service which is hosted at http://localhost:9000
 	app.AddHTTPService("payment", "http://localhost:9000")
@@ -54,7 +54,7 @@ func main() {
 
 ### Accessing HTTP Service in handler
 
-The HTTP service client is accessible anywhere from `kite.Context` that gets passed on from the handler.
+The HTTP service client is accessible anywhere from `pi.Context` that gets passed on from the handler.
 Using the `GetHTTPService` method with the service name that was given at the time of registering the service,
 the client can be retrieved as shown below:
 
@@ -88,7 +88,7 @@ The HTTP service client provides methods for making requests to downstream servi
 - `DeleteWithHeaders(ctx, path, body, headers)`
 
 ```go
-func Customer(ctx *kite.Context) (any, error) {
+func Customer(ctx *pi.Context) (any, error) {
 	// Get the payment service client
 	paymentSvc := ctx.GetHTTPService("payment")
 
@@ -109,7 +109,7 @@ func Customer(ctx *kite.Context) (any, error) {
 }
 
 // For microservice patterns involving authentication (ex: JWT Token Forwarding), use WithHeaders methods to forward custom headers.
-func GatewayHandler(ctx *kite.Context) (any, error) {
+func GatewayHandler(ctx *pi.Context) (any, error) {
 	authInfo := ctx.GetAuthInfo()
 	claims := authInfo.GetClaims()
 
@@ -138,7 +138,7 @@ func GatewayHandler(ctx *kite.Context) (any, error) {
 
 ### Additional Configurational Options
 
-Kite provides its user with additional configurational options while registering HTTP service for communication. These are:
+Pi provides its user with additional configurational options while registering HTTP service for communication. These are:
 
 - **ConnectionPoolConfig** - This option allows the user to configure HTTP connection pool settings to optimize performance for high-frequency requests. The default Go HTTP client has `MaxIdleConnsPerHost: 2`, which is often insufficient for microservices making frequent requests to the same host. This configuration allows customizing:
   - `MaxIdleConns`: Maximum idle connections across all hosts. If not explicitly set (0), a default of 100 will be used.
@@ -150,7 +150,7 @@ Kite provides its user with additional configurational options while registering
 - **APIKeyConfig** - This option allows the user to set the `API-Key` Based authentication as the default auth for downstream HTTP Service.
 - **BasicAuthConfig** - This option allows the user to set basic auth (username and password) as the default auth for downstream HTTP Service.
 
-**Important:** The password must be base64 encoded in your configuration/environment variables. Kite will decode it internally before creating the Authorization header.
+**Important:** The password must be base64 encoded in your configuration/environment variables. Pi will decode it internally before creating the Authorization header.
 
 
 **Example:**
@@ -161,14 +161,14 @@ echo -n "your-password" | base64
 ```
 
 - **OAuthConfig** - This option allows the user to add `OAuth` as default auth for downstream HTTP Service.
-- **CircuitBreakerConfig** - This option allows the user to configure the Kite Circuit Breaker's `threshold` and `interval` for the failing downstream HTTP Service calls. If the failing calls exceeds the threshold the circuit breaker will automatically be enabled.
+- **CircuitBreakerConfig** - This option allows the user to configure the Pi Circuit Breaker's `threshold` and `interval` for the failing downstream HTTP Service calls. If the failing calls exceeds the threshold the circuit breaker will automatically be enabled.
 - **DefaultHeaders** - This option allows the user to set some default headers that will be propagated to the downstream HTTP Service every time it is being called.
 - **HealthConfig** - This option allows the user to add the `HealthEndpoint` along with `Timeout` to enable and perform the timely health checks for downstream HTTP Service.
 - **RetryConfig** - This option allows the user to add the maximum number of retry count before returning error if any downstream HTTP Service fails. Retries are triggered for network errors and status codes **> 500** (e.g., 503 Service Unavailable). HTTP 500 is not retried.
 - **RateLimiterConfig** -  This option allows the user to configure rate limiting for downstream service calls using token bucket algorithm. It controls the request rate to prevent overwhelming dependent services and supports both in-memory and Redis-based implementations.
 
 **Rate Limiter Store: Customization**
-Kite allows you to use a custom rate limiter store by implementing the RateLimiterStore interface. This enables integration with any backend (e.g., Redis, database, or custom logic)
+Pi allows you to use a custom rate limiter store by implementing the RateLimiterStore interface. This enables integration with any backend (e.g., Redis, database, or custom logic)
 
 **Interface:**
 
@@ -230,7 +230,7 @@ a.AddHTTPService("cat-facts", "https://catfact.ninja",
 
 ## Metrics
 
-Kite publishes the following metrics for HTTP service communication:
+Pi publishes the following metrics for HTTP service communication:
 
 - `app_http_retry_count`: Total number of retry events. (labels: `service`)
 - `app_http_circuit_breaker_state`: Current state of the circuit breaker (0 for Closed, 1 for Open). (labels: `service`)

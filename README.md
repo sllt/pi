@@ -1,4 +1,10 @@
-# Kite
+# v0.2.4 candidate
+
+This isolated candidate contains the Pi rename and runtime correctness fixes. It retains
+the v0.2.3 migration API; Migration v2 remains in the main development workspace for v0.3.0.
+See [release notes](docs/releases/v0.2.4.zh-CN.md). This local branch is not a published tag.
+
+# Pi
 
 一个为微服务开发而设计的 Go 语言框架。
 
@@ -25,7 +31,7 @@
 ### 安装
 
 ```bash
-go get github.com/sllt/kite
+go get github.com/sllt/pi
 ```
 
 ### 简单示例
@@ -33,12 +39,12 @@ go get github.com/sllt/kite
 ```go
 package main
 
-import "github.com/sllt/kite/pkg/kite"
+import "github.com/sllt/pi/pkg/pi"
 
 func main() {
-    app := kite.New()
+    app := pi.New()
 
-    app.GET("/greet", func(ctx *kite.Context) (any, error) {
+    app.GET("/greet", func(ctx *pi.Context) (any, error) {
         return "Hello World!", nil
     })
 
@@ -61,13 +67,13 @@ package main
 
 import (
     "fmt"
-    "github.com/sllt/kite/pkg/kite"
+    "github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-    app := kite.New()
+    app := pi.New()
 
-    app.GET("/redis", func(c *kite.Context) (any, error) {
+    app.GET("/redis", func(c *pi.Context) (any, error) {
         val, err := c.Redis.Get(c, "key").Result()
         if err != nil {
             return nil, err
@@ -75,7 +81,7 @@ func main() {
         return val, nil
     })
 
-    app.GET("/sql", func(c *kite.Context) (any, error) {
+    app.GET("/sql", func(c *pi.Context) (any, error) {
         var result int
         err := c.SQL.QueryRowContext(c, "SELECT 2+2").Scan(&result)
         if err != nil {
@@ -90,7 +96,7 @@ func main() {
 
 ## 支持的数据源
 
-Kite 支持广泛的数据存储和服务：
+Pi 支持广泛的数据存储和服务：
 
 | 类别 | 数据源 |
 |------|--------|
@@ -108,8 +114,8 @@ Kite 支持广泛的数据存储和服务：
 ## 项目结构
 
 ```
-kite/
-├── pkg/kite/              # 核心框架代码
+pi/
+├── pkg/pi/              # 核心框架代码
 │   ├── datasource/        # 数据源连接器
 │   ├── metrics/           # 指标收集
 │   └── ...
@@ -123,7 +129,7 @@ kite/
 
 ## 文档
 
-- [GoDoc](https://pkg.go.dev/github.com/sllt/kite) - API 参考文档
+- [GoDoc](https://pkg.go.dev/github.com/sllt/pi) - API 参考文档
 - [示例目录](examples/) - 更多可运行示例
 
 ## 许可证

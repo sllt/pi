@@ -1,9 +1,9 @@
 # Dealing with SQL
 
-Kite simplifies the process of connecting to SQL databases where one needs to add respective configs in .env,
+Pi simplifies the process of connecting to SQL databases where one needs to add respective configs in .env,
 which allows connecting to different SQL dialects(MySQL, PostgreSQL, SQLite) without going into complexity of configuring connections.
 
-With Kite, connecting to different SQL databases is as straightforward as setting the DB_DIALECT environment variable to the respective dialect.
+With Pi, connecting to different SQL databases is as straightforward as setting the DB_DIALECT environment variable to the respective dialect.
 
 ## Usage for PostgreSQL and MySQL
 To connect with PostgreSQL, set `DB_DIALECT` to `postgres`. Similarly, To connect with MySQL, simply set `DB_DIALECT` to `mysql`.
@@ -36,4 +36,4 @@ Add the following configs in `.env` file.
 DB_MAX_IDLE_CONNECTION=5 // Default 2
 DB_MAX_OPEN_CONNECTION=5 // Default unlimited
 ```
-> ##### Check out the example on how to add configuration for SQL in Kite: [Visit GitHub](https://github.com/kite-dev/kite/blob/main/examples/http-server/configs/.env)
+> ##### Check out the example on how to add configuration for SQL in Pi: [Visit GitHub](https://github.com/kite-dev/pi/blob/main/examples/http-server/configs/.env)

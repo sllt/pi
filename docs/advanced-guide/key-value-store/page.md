@@ -3,10 +3,10 @@
 A key-value store is a type of NoSQL database that uses a simple data model: each item is stored as a pair consisting of a unique key and a value.
 This simplicity offers high performance and scalability, making key-value stores ideal for applications requiring fast and efficient data retrieval and storage.
 
-Kite supports multiple key-value stores including BadgerDB, NATS-KV, and DynamoDB. Support for other key-value stores will be added in the future.
+Pi supports multiple key-value stores including BadgerDB, NATS-KV, and DynamoDB. Support for other key-value stores will be added in the future.
 
 Keeping in mind the size of the application in the final build, it felt counter-productive to keep the drivers within
-the framework itself. Kite provide the following functionalities for its key-value store.
+the framework itself. Pi provide the following functionalities for its key-value store.
 
 ```go
 type KVStore interface {
@@ -17,16 +17,16 @@ type KVStore interface {
 ```
 
 ## BadgerDB
-Kite supports injecting BadgerDB that supports the following interface. Any driver that implements the interface can be added
-using `app.AddKVStore()` method, and user's can use BadgerDB across application with `kite.Context`.
+Pi supports injecting BadgerDB that supports the following interface. Any driver that implements the interface can be added
+using `app.AddKVStore()` method, and user's can use BadgerDB across application with `pi.Context`.
 
 User's can easily inject a driver that supports this interface, this provides usability without
 compromising the extensibility to use multiple databases.
 
-Import the kite's external driver for BadgerDB:
+Import the pi's external driver for BadgerDB:
 
 ```go
-go get github.com/sllt/kite/pkg/kite/datasource/kv-store/badger
+go get github.com/sllt/pi/pkg/pi/datasource/kv-store/badger
 ```
 
 ### Example
@@ -36,8 +36,8 @@ package main
 import (
 	"fmt"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/kv-store/badger"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/kv-store/badger"
 )
 
 type User struct {
@@ -47,7 +47,7 @@ type User struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.AddKVStore(badger.New(badger.Configs{DirPath: "badger-example"}))
 
@@ -58,8 +58,8 @@ func main() {
 	app.Run()
 }
 
-func Post(ctx *kite.Context) (any, error) {
-	err := ctx.KVStore.Set(ctx, "name", "kite")
+func Post(ctx *pi.Context) (any, error) {
+	err := ctx.KVStore.Set(ctx, "name", "pi")
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +67,7 @@ func Post(ctx *kite.Context) (any, error) {
 	return "Insertion to Key Value Store Successful", nil
 }
 
-func Get(ctx *kite.Context) (any, error) {
+func Get(ctx *pi.Context) (any, error) {
 	value, err := ctx.KVStore.Get(ctx, "name")
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func Get(ctx *kite.Context) (any, error) {
 	return value, nil
 }
 
-func Delete(ctx *kite.Context) (any, error) {
+func Delete(ctx *pi.Context) (any, error) {
 	err := ctx.KVStore.Delete(ctx, "name")
 	if err != nil {
 		return nil, err
@@ -86,16 +86,16 @@ func Delete(ctx *kite.Context) (any, error) {
 }
 ```
 ## NATS-KV
-Kite supports injecting NATS-KV that supports the above KVStore interface. Any driver that implements the interface can be added
-using `app.AddKVStore()` method, and user's can use NATS-KV across application with `kite.Context`.
+Pi supports injecting NATS-KV that supports the above KVStore interface. Any driver that implements the interface can be added
+using `app.AddKVStore()` method, and user's can use NATS-KV across application with `pi.Context`.
 
 User's can easily inject a driver that supports this interface, this provides usability without
 compromising the extensibility to use multiple databases.
 
-Import the kite's external driver for NATS-KV:
+Import the pi's external driver for NATS-KV:
 
 ```go
-go get github.com/sllt/kite/pkg/kite/datasource/kv-store/nats
+go get github.com/sllt/pi/pkg/pi/datasource/kv-store/nats
 ```
 ### Example
 ```go
@@ -107,9 +107,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/kv-store/nats"
-	"github.com/sllt/kite/pkg/kite/http"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/kv-store/nats"
+	"github.com/sllt/pi/pkg/pi/http"
 )
 
 type Person struct {
@@ -120,7 +120,7 @@ type Person struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.AddKVStore(nats.New(nats.Configs{
 		Server: "nats://localhost:4222",
@@ -135,7 +135,7 @@ func main() {
 	app.Run()
 }
 
-func CreatePerson(ctx *kite.Context) (any, error) {
+func CreatePerson(ctx *pi.Context) (any, error) {
 	var person Person
 	if err := ctx.Bind(&person); err != nil {
 		return nil, http.ErrorInvalidParam{Params: []string{"body"}}
@@ -154,7 +154,7 @@ func CreatePerson(ctx *kite.Context) (any, error) {
 	return person, nil
 }
 
-func GetPerson(ctx *kite.Context) (any, error) {
+func GetPerson(ctx *pi.Context) (any, error) {
 	id := ctx.PathParam("id")
 	if id == "" {
 		return nil, http.ErrorInvalidParam{Params: []string{"id"}}
@@ -173,7 +173,7 @@ func GetPerson(ctx *kite.Context) (any, error) {
 	return person, nil
 }
 
-func UpdatePerson(ctx *kite.Context) (any, error) {
+func UpdatePerson(ctx *pi.Context) (any, error) {
 	id := ctx.PathParam("id")
 	if id == "" {
 		return nil, http.ErrorInvalidParam{Params: []string{"id"}}
@@ -197,7 +197,7 @@ func UpdatePerson(ctx *kite.Context) (any, error) {
 	return person, nil
 }
 
-func DeletePerson(ctx *kite.Context) (any, error) {
+func DeletePerson(ctx *pi.Context) (any, error) {
 	id := ctx.PathParam("id")
 	if id == "" {
 		return nil, http.ErrorInvalidParam{Params: []string{"id"}}
@@ -213,14 +213,14 @@ func DeletePerson(ctx *kite.Context) (any, error) {
 
 ## DynamoDB
 
-Kite supports injecting DynamoDB as a key-value store that implements the standard KVStore interface. Any driver that implements the interface can be added using `app.AddKVStore()` method, and users can use DynamoDB across application with `kite.Context`.
+Pi supports injecting DynamoDB as a key-value store that implements the standard KVStore interface. Any driver that implements the interface can be added using `app.AddKVStore()` method, and users can use DynamoDB across application with `pi.Context`.
 
 DynamoDB is a fully managed NoSQL database service that provides fast and predictable performance with seamless scalability. It's ideal for applications that need consistent, single-digit millisecond latency at any scale.
 
-Import the kite's external driver for DynamoDB:
+Import the pi's external driver for DynamoDB:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/kv-store/dynamodb@latest
+go get github.com/sllt/pi/pkg/pi/datasource/kv-store/dynamodb@latest
 ```
 
 ### Configuration
@@ -244,7 +244,7 @@ docker run --name dynamodb-local -d -p 8000:8000 amazon/dynamodb-local
 
 # Create a table
 aws dynamodb create-table \
-    --table-name kite-kv-store \
+    --table-name pi-kv-store \
     --attribute-definitions AttributeName=pk,AttributeType=S \
     --key-schema AttributeName=pk,KeyType=HASH \
     --billing-mode PAY_PER_REQUEST \
@@ -273,8 +273,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/kv-store/dynamodb"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/kv-store/dynamodb"
 )
 
 type User struct {
@@ -285,11 +285,11 @@ type User struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Create DynamoDB client with configuration
 	db := dynamodb.New(dynamodb.Configs{
-		Table:            "kite-kv-store",
+		Table:            "pi-kv-store",
 		Region:           "us-east-1",
 		Endpoint:         "http://localhost:8000", // For local DynamoDB
 		PartitionKeyName: "pk",
@@ -298,7 +298,7 @@ func main() {
 	// Connect to DynamoDB
 	db.Connect()
 
-	// Inject the DynamoDB into kite
+	// Inject the DynamoDB into pi
 	app.AddKVStore(db)
 
 	app.POST("/user", CreateUser)
@@ -309,7 +309,7 @@ func main() {
 	app.Run()
 }
 
-func CreateUser(ctx *kite.Context) (any, error) {
+func CreateUser(ctx *pi.Context) (any, error) {
 	var user User
 	if err := ctx.Bind(&user); err != nil {
 		return nil, err
@@ -332,7 +332,7 @@ func CreateUser(ctx *kite.Context) (any, error) {
 	return user, nil
 }
 
-func GetUser(ctx *kite.Context) (any, error) {
+func GetUser(ctx *pi.Context) (any, error) {
 	id := ctx.PathParam("id")
 	if id == "" {
 		return nil, fmt.Errorf("user ID is required")
@@ -353,7 +353,7 @@ func GetUser(ctx *kite.Context) (any, error) {
 	return user, nil
 }
 
-func UpdateUser(ctx *kite.Context) (any, error) {
+func UpdateUser(ctx *pi.Context) (any, error) {
 	id := ctx.PathParam("id")
 	if id == "" {
 		return nil, fmt.Errorf("user ID is required")
@@ -380,7 +380,7 @@ func UpdateUser(ctx *kite.Context) (any, error) {
 	return user, nil
 }
 
-func DeleteUser(ctx *kite.Context) (any, error) {
+func DeleteUser(ctx *pi.Context) (any, error) {
 	id := ctx.PathParam("id")
 	if id == "" {
 		return nil, fmt.Errorf("user ID is required")
@@ -401,7 +401,7 @@ For production use, remove the `Endpoint` field to connect to real AWS DynamoDB:
 
 ```go
 db := dynamodb.New(dynamodb.Configs{
-    Table:            "kite-kv-store",
+    Table:            "pi-kv-store",
     Region:           "us-east-1",
     // Endpoint: "", // Remove this for production
     PartitionKeyName: "pk",

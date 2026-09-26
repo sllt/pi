@@ -5,7 +5,7 @@
 
 - Prior familiarity with Golang syntax is essential. {% new-tab-link title="Golang Tour" href="https://tour.golang.org/" /%} is highly recommended as it has an excellent guided tour.
 
-## Write your first Kite API
+## Write your first Pi API
 
 Let's start by initializing the {% new-tab-link title="go module" href="https://go.dev/ref/mod" /%} by using the following command.
 
@@ -13,26 +13,26 @@ Let's start by initializing the {% new-tab-link title="go module" href="https://
 go mod init github.com/example
 ```
 
-Add {% new-tab-link title="kite" href="https://github.com/kite-dev/kite" /%} package to the project using the following command.
+Add {% new-tab-link title="pi" href="https://github.com/kite-dev/pi" /%} package to the project using the following command.
 
 ```bash
-go get github.com/sllt/kite
+go get github.com/sllt/pi
 ```
 
-This code snippet showcases the creation of a simple Kite application that defines a route and serves a response. 
+This code snippet showcases the creation of a simple Pi application that defines a route and serves a response.
 You can add this code to your main.go file.
 
 ```go
 package main
 
-import "github.com/sllt/kite/pkg/kite"
+import "github.com/sllt/pi/pkg/pi"
 
 func main() {
-	// initialize kite object
-	app := kite.New()
+	// initialize pi object
+	app := pi.New()
 
 	// register route greet
-	app.GET("/greet", func(ctx *kite.Context) (any, error) {
+	app.GET("/greet", func(ctx *pi.Context) (any, error) {
 		return "Hello World!", nil
 	})
 
@@ -46,7 +46,7 @@ Before starting the server, run the following command in your terminal to ensure
 
 `go mod tidy`
 
-Once the dependencies are synchronized, start the Kite server using the following command:
+Once the dependencies are synchronized, start the Pi server using the following command:
 
 `go run main.go`
 
@@ -60,11 +60,11 @@ This would start the server at 8000 port, `/greet` endpoint can be accessed from
 
 The `hello-world` server involves three essential steps:
 
-1. **Creating Kite Server:**
+1. **Creating Pi Server:**
 
-   When `kite.New()` is called, it initializes the framework and handles various setup tasks like initializing logger, metrics, datasources, etc., based on the configs.
+   When `pi.New()` is called, it initializes the framework and handles various setup tasks like initializing logger, metrics, datasources, etc., based on the configs.
 
-   _This single line is a standard part of all Kite servers._
+   _This single line is a standard part of all Pi servers._
 
 2. **Attaching a Handler to a Path:**
 
@@ -73,10 +73,10 @@ The `hello-world` server involves three essential steps:
    **Good To Know**
 
 > In Go, functions are first-class citizens, allowing easy handler definition and reference.
-> HTTP Handler functions should follow the `func(ctx *kite.Context) (any, error)` signature.
+> HTTP Handler functions should follow the `func(ctx *pi.Context) (any, error)` signature.
 > They take a context as input, returning two values: the response data and an error (set to `nil` when there is no error).
 
-Kite {% new-tab-link  newtab=false title="context" href="/docs/references/context" /%} `ctx *kite.Context` serves as a wrapper for requests, responses, and dependencies, providing various functionalities.
+Pi {% new-tab-link  newtab=false title="context" href="/docs/references/context" /%} `ctx *pi.Context` serves as a wrapper for requests, responses, and dependencies, providing various functionalities.
 
 3. **Starting the server**
 

@@ -10,13 +10,13 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource"
 )
 
 func main() {
 	// Create a new application
-	a := kite.New()
+	a := pi.New()
 
 	//HTTP service with default health check endpoint
 	a.AddHTTPService("anotherService", "http://localhost:9000")
@@ -32,7 +32,7 @@ func main() {
 	a.Run()
 }
 
-func HelloHandler(c *kite.Context) (any, error) {
+func HelloHandler(c *pi.Context) (any, error) {
 	name := c.Param("name")
 	if name == "" {
 		c.Log("Name came empty")
@@ -42,11 +42,11 @@ func HelloHandler(c *kite.Context) (any, error) {
 	return fmt.Sprintf("Hello %s!", name), nil
 }
 
-func ErrorHandler(c *kite.Context) (any, error) {
+func ErrorHandler(c *pi.Context) (any, error) {
 	return nil, errors.New("some error occurred")
 }
 
-func RedisHandler(c *kite.Context) (any, error) {
+func RedisHandler(c *pi.Context) (any, error) {
 	val, err := c.Redis.Get(c, "test").Result()
 	if err != nil && err != redis.Nil { // If key is not found, we are not considering this an error and returning "".
 		return nil, datasource.ErrorDB{Err: err, Message: "error from redis db"}
@@ -55,7 +55,7 @@ func RedisHandler(c *kite.Context) (any, error) {
 	return val, nil
 }
 
-func TraceHandler(c *kite.Context) (any, error) {
+func TraceHandler(c *pi.Context) (any, error) {
 	defer c.Trace("traceHandler").End()
 
 	span2 := c.Trace("some-sample-work")
@@ -99,7 +99,7 @@ func TraceHandler(c *kite.Context) (any, error) {
 	return data.Data, nil
 }
 
-func MysqlHandler(c *kite.Context) (any, error) {
+func MysqlHandler(c *pi.Context) (any, error) {
 	var value int
 	err := c.SQL.QueryRowContext(c, "select 2+2").Scan(&value)
 	if err != nil {

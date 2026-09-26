@@ -1,6 +1,6 @@
 # CMD Example
 
-This Kite example demonstrates a simple CMD application.
+This Pi example demonstrates a simple CMD application.
 
 ### To run the example use the command below:
 ```console

@@ -12,11 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -48,7 +48,7 @@ func Test_ListHandler(t *testing.T) {
 	// Validate key HTML elements using strings.Contains
 	assert.Contains(t, bodyStr, "<h2>My TODO list</h2>", "Header text missing")
 
-	expectedItems := "<li>Expand on Kite documentation </li> <li class=\"done\">" +
+	expectedItems := "<li>Expand on Pi documentation </li> <li class=\"done\">" +
 		"Add more examples</li> <li>Write some articles</li>"
 
 	assert.Contains(t, bodyStr, expectedItems, "Missing TODO items")

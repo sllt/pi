@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/sllt/pi/pkg/pi/migration"
 	"github.com/stretchr/testify/assert"
-	"github.com/sllt/kite/pkg/kite/migration"
 )
 
 // MockPubSub implements the PubSub interface for testing

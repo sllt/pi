@@ -6,7 +6,7 @@ To connect to `Dgraph`, you need to provide the following environment variables 
 - `PORT`: The port number.
 
 ## Setup
-Kite supports injecting Dgraph with an interface that defines the necessary methods for interacting with the Dgraph
+Pi supports injecting Dgraph with an interface that defines the necessary methods for interacting with the Dgraph
 database. Any driver that implements the following interface can be added using the app.AddDgraph() method.
 
 ```go
@@ -47,10 +47,10 @@ type Dgraph interface {
 Users can easily inject a driver that supports this interface, allowing for flexibility without compromising usability.
 This structure supports both queries and mutations in Dgraph.
 
-Import the kite's external driver for DGraph:
+Import the pi's external driver for DGraph:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/dgraph@latest
+go get github.com/sllt/pi/pkg/pi/datasource/dgraph@latest
 ```
 
 ### Example
@@ -63,13 +63,13 @@ import (
 	"fmt"
 	"github.com/dgraph-io/dgo/v210/protos/api"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/dgraph"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/dgraph"
 )
 
 func main() {
 	// Create a new application
-	app := kite.New()
+	app := pi.New()
 
 	db := dgraph.New(dgraph.Config{
 		Host: app.Config.Get("HOST"),
@@ -88,13 +88,13 @@ func main() {
 }
 
 // DGraphInsertHandler handles POST requests to insert data into Dgraph
-func DGraphInsertHandler(c *kite.Context) (any, error) {
+func DGraphInsertHandler(c *pi.Context) (any, error) {
 	// Example mutation data to insert into Dgraph
 	mutationData := `
 		{
 			"set": [
 				{
-					"name": "Kite Dev"
+					"name": "Pi Dev"
 				},
 				{
 					"name": "James Doe"
@@ -119,7 +119,7 @@ func DGraphInsertHandler(c *kite.Context) (any, error) {
 }
 
 // DGraphQueryHandler handles GET requests to fetch data from Dgraph
-func DGraphQueryHandler(c *kite.Context) (any, error) {
+func DGraphQueryHandler(c *pi.Context) (any, error) {
 	// A simple query to fetch all persons with a name in Dgraph
 	response, err := c.DGraph.Query(c, "{ persons(func: has(name)) { uid name } }")
 	if err != nil {

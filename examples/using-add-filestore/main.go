@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/file"
-	"github.com/sllt/kite/pkg/kite/datasource/file/ftp"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/file"
+	"github.com/sllt/pi/pkg/pi/datasource/file/ftp"
 )
 
 type FileServerType int
@@ -18,7 +18,7 @@ const (
 )
 
 func main() {
-	app := kite.NewCMD()
+	app := pi.NewCMD()
 
 	fileSystemProvider := configureFileServer(app)
 
@@ -33,13 +33,13 @@ func main() {
 	app.Run()
 }
 
-func pwdCommandHandler(c *kite.Context) (any, error) {
+func pwdCommandHandler(c *pi.Context) (any, error) {
 	workingDirectory, err := c.File.Getwd()
 
 	return workingDirectory, err
 }
 
-func lsCommandHandler(c *kite.Context) (any, error) {
+func lsCommandHandler(c *pi.Context) (any, error) {
 	path := c.Param("path")
 
 	files, err := c.File.ReadDir(path)
@@ -52,7 +52,7 @@ func lsCommandHandler(c *kite.Context) (any, error) {
 	return "", err
 }
 
-func grepCommandHandler(c *kite.Context) (any, error) {
+func grepCommandHandler(c *pi.Context) (any, error) {
 	keyword := c.Param("keyword")
 	path := c.Param("path")
 
@@ -67,7 +67,7 @@ func grepCommandHandler(c *kite.Context) (any, error) {
 	return "", err
 }
 
-func createFileCommandHandler(c *kite.Context) (any, error) {
+func createFileCommandHandler(c *pi.Context) (any, error) {
 	fileName := c.Param("filename")
 
 	_, err := c.File.Create(fileName)
@@ -78,7 +78,7 @@ func createFileCommandHandler(c *kite.Context) (any, error) {
 	return fmt.Sprintln("Successfully created file:", fileName), nil
 }
 
-func rmCommandHandler(c *kite.Context) (any, error) {
+func rmCommandHandler(c *pi.Context) (any, error) {
 	fileName := c.Param("filename")
 
 	err := c.File.Remove(fileName)
@@ -90,7 +90,7 @@ func rmCommandHandler(c *kite.Context) (any, error) {
 }
 
 // This can be a common function to configure both FTP and SFTP server.
-func configureFileServer(app *kite.App) file.FileSystemProvider {
+func configureFileServer(app *pi.App) file.FileSystemProvider {
 	port, _ := strconv.Atoi(app.Config.Get("PORT"))
 
 	return ftp.New(&ftp.Config{

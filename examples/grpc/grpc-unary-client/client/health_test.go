@@ -9,30 +9,30 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
-func TestKiteHealthClientWrapper_Creation(t *testing.T) {
-	t.Setenv("KITE_TELEMETRY", "false")
+func TestPiHealthClientWrapper_Creation(t *testing.T) {
+	t.Setenv("PI_TELEMETRY", "false")
 
 	configs := testutil.NewServerConfigs(t)
 
 	t.Run("NewHealthClient", func(t *testing.T) {
-		// Test Kite's NewHealthClient function
+		// Test Pi's NewHealthClient function
 		conn, err := grpc.Dial(configs.GRPCHost, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		require.NoError(t, err, "Connection creation should not fail immediately")
 		defer conn.Close()
 
 		healthClient := NewHealthClient(conn)
-		assert.NotNil(t, healthClient, "Kite health client should not be nil")
+		assert.NotNil(t, healthClient, "Pi health client should not be nil")
 
-		// Test that it implements the Kite interface
+		// Test that it implements the Pi interface
 		var _ HealthClient = healthClient
 	})
 
 	t.Run("HealthClientWrapperInterface", func(t *testing.T) {
-		// Test Kite's interface compliance
+		// Test Pi's interface compliance
 		conn, err := grpc.Dial(configs.GRPCHost, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		require.NoError(t, err, "Connection creation should not fail immediately")
 		defer conn.Close()
@@ -42,19 +42,19 @@ func TestKiteHealthClientWrapper_Creation(t *testing.T) {
 		// Test HealthClient interface compliance
 		var _ HealthClient = healthClient
 
-		// Test that wrapper has the correct Kite type
+		// Test that wrapper has the correct Pi type
 		wrapper, ok := healthClient.(*HealthClientWrapper)
-		assert.True(t, ok, "Should be able to cast to Kite HealthClientWrapper")
+		assert.True(t, ok, "Should be able to cast to Pi HealthClientWrapper")
 		assert.NotNil(t, wrapper.client, "Underlying health client should not be nil")
 	})
 }
 
-func TestKiteHealthClientWrapper_Methods(t *testing.T) {
-	t.Setenv("KITE_TELEMETRY", "false")
+func TestPiHealthClientWrapper_Methods(t *testing.T) {
+	t.Setenv("PI_TELEMETRY", "false")
 
 	configs := testutil.NewServerConfigs(t)
 
-	// Test Kite's wrapper methods without actual gRPC calls
+	// Test Pi's wrapper methods without actual gRPC calls
 	conn, err := grpc.Dial(configs.GRPCHost, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err, "Connection creation should not fail immediately")
 	defer conn.Close()
@@ -63,34 +63,34 @@ func TestKiteHealthClientWrapper_Methods(t *testing.T) {
 	ctx := createTestContext()
 
 	t.Run("CheckMethodExists", func(t *testing.T) {
-		// Test that Kite's Check method exists and accepts correct parameters
+		// Test that Pi's Check method exists and accepts correct parameters
 		req := &healthpb.HealthCheckRequest{
 			Service: "test-service",
 		}
 
-		// This will fail due to connection, but we're testing Kite's method signature
+		// This will fail due to connection, but we're testing Pi's method signature
 		_, err := healthClient.Check(ctx, req)
 		assert.Error(t, err, "Should fail with invalid connection, but method should exist")
 	})
 
 	t.Run("WatchMethodExists", func(t *testing.T) {
-		// Test that Kite's Watch method exists and accepts correct parameters
+		// Test that Pi's Watch method exists and accepts correct parameters
 		req := &healthpb.HealthCheckRequest{
 			Service: "test-service",
 		}
 
-		// This will fail due to connection, but we're testing Kite's method signature
+		// This will fail due to connection, but we're testing Pi's method signature
 		_, err := healthClient.Watch(ctx, req)
 		assert.Error(t, err, "Should fail with invalid connection, but method should exist")
 	})
 }
 
-func TestKiteHealthClientWrapper_ContextIntegration(t *testing.T) {
-	t.Setenv("KITE_TELEMETRY", "false")
+func TestPiHealthClientWrapper_ContextIntegration(t *testing.T) {
+	t.Setenv("PI_TELEMETRY", "false")
 
 	configs := testutil.NewServerConfigs(t)
 
-	// Test Kite's context integration
+	// Test Pi's context integration
 	conn, err := grpc.Dial(configs.GRPCHost, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err, "Connection creation should not fail immediately")
 	defer conn.Close()
@@ -98,30 +98,30 @@ func TestKiteHealthClientWrapper_ContextIntegration(t *testing.T) {
 	healthClient := NewHealthClient(conn)
 
 	t.Run("ContextParameter", func(t *testing.T) {
-		// Test that Kite's methods accept *kite.Context
+		// Test that Pi's methods accept *pi.Context
 		ctx := createTestContext()
 		req := &healthpb.HealthCheckRequest{
 			Service: "test-service",
 		}
 
-		// Test that the method signature is correct for Kite context
+		// Test that the method signature is correct for Pi context
 		_, err := healthClient.Check(ctx, req)
 		assert.Error(t, err, "Should fail with invalid connection")
 
 		// Test that context is properly passed (even though call fails)
-		assert.NotNil(t, ctx, "Kite context should not be nil")
+		assert.NotNil(t, ctx, "Pi context should not be nil")
 	})
 
 	t.Run("ContextTypeCompliance", func(t *testing.T) {
-		// Test that Kite's methods expect *kite.Context specifically
+		// Test that Pi's methods expect *pi.Context specifically
 		ctx := createTestContext()
 		req := &healthpb.HealthCheckRequest{
 			Service: "test-service",
 		}
 
-		// Verify the method signature expects *kite.Context
-		var _ func(*kite.Context, *healthpb.HealthCheckRequest, ...grpc.CallOption) (*healthpb.HealthCheckResponse, error) = healthClient.Check
-		var _ func(*kite.Context, *healthpb.HealthCheckRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[healthpb.HealthCheckResponse], error) = healthClient.Watch
+		// Verify the method signature expects *pi.Context
+		var _ func(*pi.Context, *healthpb.HealthCheckRequest, ...grpc.CallOption) (*healthpb.HealthCheckResponse, error) = healthClient.Check
+		var _ func(*pi.Context, *healthpb.HealthCheckRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[healthpb.HealthCheckResponse], error) = healthClient.Watch
 
 		// Ensure the call compiles (even if it fails at runtime)
 		_, _ = healthClient.Check(ctx, req)
@@ -129,12 +129,12 @@ func TestKiteHealthClientWrapper_ContextIntegration(t *testing.T) {
 	})
 }
 
-func TestKiteHealthClientWrapper_ErrorHandling(t *testing.T) {
-	t.Setenv("KITE_TELEMETRY", "false")
+func TestPiHealthClientWrapper_ErrorHandling(t *testing.T) {
+	t.Setenv("PI_TELEMETRY", "false")
 
-	// Test Kite's error handling patterns
+	// Test Pi's error handling patterns
 	t.Run("InvalidConnectionHandling", func(t *testing.T) {
-		// Test Kite's handling of invalid connections
+		// Test Pi's handling of invalid connections
 		conn, err := grpc.Dial("invalid:address", grpc.WithTransportCredentials(insecure.NewCredentials()))
 		require.NoError(t, err, "Connection creation should not fail immediately")
 		defer conn.Close()
@@ -146,8 +146,8 @@ func TestKiteHealthClientWrapper_ErrorHandling(t *testing.T) {
 			Service: "test-service",
 		}
 
-		// Test Kite's error handling
+		// Test Pi's error handling
 		_, err = healthClient.Check(ctx, req)
-		assert.Error(t, err, "Kite should handle invalid connection errors")
+		assert.Error(t, err, "Pi should handle invalid connection errors")
 	})
 }

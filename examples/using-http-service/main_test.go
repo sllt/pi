@@ -15,18 +15,18 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/infra"
-	kiteHTTP "github.com/sllt/kite/pkg/kite/http"
-	"github.com/sllt/kite/pkg/kite/logging"
-	"github.com/sllt/kite/pkg/kite/service"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi"
+	piHTTP "github.com/sllt/pi/pkg/pi/http"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/service"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 var port int
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -81,11 +81,11 @@ func Test_main(t *testing.T) {
 func TestHTTPHandlerURLError(t *testing.T) {
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet,
 		fmt.Sprint("http://localhost:", port, "/handle"), bytes.NewBuffer([]byte(`{"key":"value"}`)))
-	kiteReq := kiteHTTP.NewRequest(req)
+	piReq := piHTTP.NewRequest(req)
 
 	mockContainer, mocks := infra.NewMockContainer(t)
 
-	ctx := &kite.Context{Context: context.Background(), Request: kiteReq, Container: mockContainer}
+	ctx := &pi.Context{Context: context.Background(), Request: piReq, Container: mockContainer}
 
 	ctx.Container.Services = map[string]service.HTTP{"cat-facts": service.NewHTTPService("http://invalid", ctx.Logger, mockContainer.Metrics())}
 
@@ -111,10 +111,10 @@ func TestHTTPHandlerResponseUnmarshalError(t *testing.T) {
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprint("http://localhost:", port, "/handle"), bytes.NewBuffer([]byte(`{"key":"value"}`)))
 
-	kiteReq := kiteHTTP.NewRequest(req)
+	piReq := piHTTP.NewRequest(req)
 
-	ctx := &kite.Context{Context: context.Background(),
-		Request: kiteReq, Container: &infra.Container{Logger: logger}}
+	ctx := &pi.Context{Context: context.Background(),
+		Request: piReq, Container: &infra.Container{Logger: logger}}
 
 	ctx.Container.Services = map[string]service.HTTP{"cat-facts": service.NewHTTPService(server.URL, ctx.Logger, nil)}
 

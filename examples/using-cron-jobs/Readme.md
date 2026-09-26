@@ -1,6 +1,6 @@
-# Using Cron Jobs in Kite
+# Using Cron Jobs in Pi
 
-This example demonstrates how to schedule and run background jobs using the **Kite** framework’s built-in Cron Job support.
+This example demonstrates how to schedule and run background jobs using the **Pi** framework’s built-in Cron Job support.
 
 ---
 
@@ -20,8 +20,8 @@ In this example, we:
 1. **Clone the repository** and navigate to this example:
 
    ```bash
-   git clone https://github.com/kite-dev/kite.git
-   cd kite/examples/using-cron-jobs
+   git clone https://github.com/kite-dev/pi.git
+   cd pi/examples/using-cron-jobs
    ```
 
 2. **Run the application**:

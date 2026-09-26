@@ -1,8 +1,8 @@
 package main
 
 import (
+	"github.com/sllt/pi/pkg/pi/testutil"
 	"github.com/stretchr/testify/assert"
-	"github.com/sllt/kite/pkg/kite/testutil"
 	"net/http"
 	"testing"
 	"time"
@@ -80,11 +80,11 @@ func Test_setupAPIKeyAuthSuccess(t *testing.T) {
 //func Test_setupBasicAuthSuccess(t *testing.T) {
 //	serverConfigs := testutil.NewServerConfigs(t)
 //
-//	app := kite.New()
+//	app := pi.New()
 //
 //	setupBasicAuth(app)
 //
-//	app.GET("/basic-auth-success", func(_ *kite.Context) (any, error) {
+//	app.GET("/basic-auth-success", func(_ *pi.Context) (any, error) {
 //		return "success", nil
 //	})
 //
@@ -116,11 +116,11 @@ func Test_setupAPIKeyAuthSuccess(t *testing.T) {
 //func Test_setupBasicAuthFailed(t *testing.T) {
 //	serverConfigs := testutil.NewServerConfigs(t)
 //
-//	app := kite.New()
+//	app := pi.New()
 //
 //	setupBasicAuth(app)
 //
-//	app.GET("/basic-auth-failure", func(_ *kite.Context) (any, error) {
+//	app.GET("/basic-auth-failure", func(_ *pi.Context) (any, error) {
 //		return "success", nil
 //	})
 //

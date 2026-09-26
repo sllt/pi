@@ -7,7 +7,7 @@ import (
 	"github.com/go-redis/redismock/v9"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sllt/kite/pkg/kite/migration"
+	"github.com/sllt/pi/pkg/pi/migration"
 )
 
 func TestAddEmployeeInRedis(t *testing.T) {

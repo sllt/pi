@@ -1,6 +1,6 @@
 # Elasticsearch Migrations
 
-Elasticsearch migrations in **Kite** let you manage index schemas, mappings, settings and data in a *version-controlled* manner.
+Elasticsearch migrations in **Pi** let you manage index schemas, mappings, settings and data in a *version-controlled* manner.
 This guide explains how to implement and operate these migrations without breaking production.
 
 ## Overview
@@ -16,7 +16,7 @@ Elasticsearch migrations help you:
 
 ## Migration Tracking
 
-Kite automatically creates a `kite_migrations` index in Elasticsearch to track applied migrations.
+Pi automatically creates a `kite_migrations` index in Elasticsearch to track applied migrations.
 The index stores:
 
 - Migration version (timestamp)
@@ -32,13 +32,13 @@ package main
 
 import (
 	"context"
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/elasticsearch"
-	"github.com/sllt/kite/pkg/kite/migration"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/elasticsearch"
+	"github.com/sllt/pi/pkg/pi/migration"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Configure Elasticsearch
 	esClient := elasticsearch.New(elasticsearch.Config{
@@ -462,13 +462,13 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/elasticsearch"
-	"github.com/sllt/kite/pkg/kite/migration"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/elasticsearch"
+	"github.com/sllt/pi/pkg/pi/migration"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Configure Elasticsearch
 	esURL := os.Getenv("ELASTICSEARCH_URL")
@@ -545,7 +545,7 @@ func main() {
 	app.Run()
 }
 
-func getUsersHandler(ctx *kite.Context) (any, error) {
+func getUsersHandler(ctx *pi.Context) (any, error) {
 	query := map[string]any{
 		"query": map[string]any{"match_all": map[string]any{}},
 		"size":  10,
@@ -562,5 +562,5 @@ func getUsersHandler(ctx *kite.Context) (any, error) {
 }
 ```
 
-**Enjoy consistent, version-controlled Elasticsearch migrations with Kite!**
+**Enjoy consistent, version-controlled Elasticsearch migrations with Pi!**
 

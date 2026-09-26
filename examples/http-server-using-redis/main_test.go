@@ -13,17 +13,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/config"
-	"github.com/sllt/kite/pkg/kite/infra"
-	"github.com/sllt/kite/pkg/kite/datasource/redis"
-	kiteHTTP "github.com/sllt/kite/pkg/kite/http"
-	"github.com/sllt/kite/pkg/kite/logging"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/config"
+	"github.com/sllt/pi/pkg/pi/datasource/redis"
+	piHTTP "github.com/sllt/pi/pkg/pi/http"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -40,7 +40,7 @@ func TestHTTPServerUsingRedis(t *testing.T) {
 		path       string
 		statusCode int
 	}{
-		{"post handler", http.MethodPost, []byte(`{"key1":"Kite"}`), "/redis",
+		{"post handler", http.MethodPost, []byte(`{"key1":"Pi"}`), "/redis",
 			http.StatusCreated},
 		{"post invalid body", http.MethodPost, []byte(`{key:abc}`), "/redis",
 			http.StatusInternalServerError},
@@ -65,7 +65,7 @@ func TestHTTPServerUsingRedis(t *testing.T) {
 func TestRedisSetHandler(t *testing.T) {
 	configs := testutil.NewServerConfigs(t)
 
-	a := kite.New()
+	a := pi.New()
 	logger := logging.NewLogger(logging.DEBUG)
 	redisClient, mock := redismock.NewClientMock()
 
@@ -76,10 +76,10 @@ func TestRedisSetHandler(t *testing.T) {
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("http://localhost:%d/handle", configs.HTTPPort), bytes.NewBuffer([]byte(`{"key":"value"}`)))
 	req.Header.Set("content-type", "application/json")
-	kiteReq := kiteHTTP.NewRequest(req)
+	piReq := piHTTP.NewRequest(req)
 
-	ctx := &kite.Context{Context: context.Background(),
-		Request: kiteReq, Container: &infra.Container{Logger: logger, Redis: rc}}
+	ctx := &pi.Context{Context: context.Background(),
+		Request: piReq, Container: &infra.Container{Logger: logger, Redis: rc}}
 
 	resp, err := RedisSetHandler(ctx)
 
@@ -90,7 +90,7 @@ func TestRedisSetHandler(t *testing.T) {
 func TestRedisPipelineHandler(t *testing.T) {
 	configs := testutil.NewServerConfigs(t)
 
-	a := kite.New()
+	a := pi.New()
 	logger := logging.NewLogger(logging.DEBUG)
 	redisClient, mock := redismock.NewClientMock()
 
@@ -103,10 +103,10 @@ func TestRedisPipelineHandler(t *testing.T) {
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprint("http://localhost:", configs.HTTPHost, "/handle"), bytes.NewBuffer([]byte(`{"key":"value"}`)))
 	req.Header.Set("content-type", "application/json")
 
-	kiteReq := kiteHTTP.NewRequest(req)
+	piReq := piHTTP.NewRequest(req)
 
-	ctx := &kite.Context{Context: context.Background(),
-		Request: kiteReq, Container: &infra.Container{Logger: logger, Redis: rc}}
+	ctx := &pi.Context{Context: context.Background(),
+		Request: piReq, Container: &infra.Container{Logger: logger, Redis: rc}}
 
 	resp, err := RedisPipelineHandler(ctx)
 

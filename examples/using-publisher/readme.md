@@ -1,6 +1,6 @@
 # Publisher Example
 
-This Kite example demonstrates a simple Publisher that publishes to the given topic when an HTTP request is made to it's
+This Pi example demonstrates a simple Publisher that publishes to the given topic when an HTTP request is made to it's
 matching route.
 
 ### To run the example follow the below steps:

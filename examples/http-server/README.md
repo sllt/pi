@@ -1,12 +1,12 @@
 # HTTP Server Example
 
-This Kite example demonstrates a simple HTTP server which supports Redis and MySQL as datasources.
+This Pi example demonstrates a simple HTTP server which supports Redis and MySQL as datasources.
 
 ### To run the example, follow the steps below:
 
 #### 1. Run with Docker Compose (recommended)
 
-From the project root (`/kite`):
+From the project root (`/pi`):
 
 ```console
 docker compose -f examples/http-server/docker/docker-compose.yml up -d
@@ -23,7 +23,7 @@ docker compose -f examples/http-server/docker/docker-compose.yml up -d
 
 ##### Build the Docker image
 
-From the project root (`/kite`):
+From the project root (`/pi`):
 
 ```console
 docker build -f examples/http-server/Dockerfile -t http-server:latest .
@@ -51,7 +51,7 @@ docker run -p 9000:9000 --name http-server http-server:latest
 To test the example, follow these steps:
 
 1. Open your browser and navigate to `http://localhost:9000/hello`.
-2. To view the Kite trace, open `https://tracer.github.com/sllt/kite` and paste the traceid.
+2. To view the Pi trace, open `https://tracer.github.com/sllt/pi` and paste the traceid.
 3. To access the Grafana Dashboard, open `http://localhost:3000`. The dashboard UI will be displayed. Use the default admin credentials to log in:
     - Username: `admin`
     - Password: `password`

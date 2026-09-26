@@ -7,11 +7,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func TestServer_SayHello(t *testing.T) {
-	s := HelloKiteServer{}
+	s := HelloPiServer{}
 
 	tests := []struct {
 		input string
@@ -30,7 +30,7 @@ func TestServer_SayHello(t *testing.T) {
 			req,
 		}
 
-		ctx := &kite.Context{
+		ctx := &pi.Context{
 			Request: request,
 		}
 

@@ -1,12 +1,12 @@
 version: '3.8'
 
 services:
-  kite-http-server:
+  pi-http-server:
     build:
       context: ../../../           # project root (so go.mod and go.sum are included)
       dockerfile: examples/http-server/Dockerfile
     environment:
-      TRACE_EXPORTER: kite
+      TRACE_EXPORTER: pi
       TRACER_RATIO: 0.1
       REDIS_HOST: redisdb
       REDIS_PORT: 2002
@@ -25,14 +25,14 @@ services:
       - grafana
       - prometheus
     networks:
-      - kite-network
+      - pi-network
 
   redisdb:
     image: redis:7.0.5
     ports:
       - "2002:6379"
     networks:
-      - kite-network
+      - pi-network
 
   mysqldb:
     image: mysql:8.0.30
@@ -42,7 +42,7 @@ services:
     ports:
       - "2001:3306"
     networks:
-      - kite-network
+      - pi-network
 
   grafana:
     image: grafana/grafana:latest
@@ -54,7 +54,7 @@ services:
     volumes:
       - ./provisioning:/etc/grafana/provisioning
     networks:
-      - kite-network
+      - pi-network
 
   prometheus:
     image: prom/prometheus:latest
@@ -63,7 +63,7 @@ services:
     volumes:
       - ./prometheus:/etc/prometheus
     networks:
-      - kite-network
+      - pi-network
 
 networks:
-  kite-network:
+  pi-network:

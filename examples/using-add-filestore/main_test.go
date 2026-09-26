@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/cmd"
-	"github.com/sllt/kite/pkg/kite/infra"
-	"github.com/sllt/kite/pkg/kite/datasource/file"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/cmd"
+	"github.com/sllt/pi/pkg/pi/datasource/file"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 type mockFileInfo struct {
@@ -29,8 +29,8 @@ func (mockFileInfo) ModTime() time.Time { return time.Now() }
 func (mockFileInfo) IsDir() bool        { return false }
 func (mockFileInfo) Sys() any           { return nil }
 
-func getContext(request kite.Request, fileMock file.FileSystem) *kite.Context {
-	return &kite.Context{
+func getContext(request pi.Request, fileMock file.FileSystem) *pi.Context {
+	return &pi.Context{
 		Context:   context.Background(),
 		Request:   request,
 		Container: &infra.Container{File: fileMock},

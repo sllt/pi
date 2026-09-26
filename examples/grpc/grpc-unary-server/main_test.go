@@ -11,12 +11,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/sllt/kite/examples/grpc/grpc-unary-server/server"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/examples/grpc/grpc-unary-server/server"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -38,7 +38,7 @@ func TestIntegration_UnaryServer(t *testing.T) {
 		name     string
 		expected string
 	}{
-		{"hello with name", "kite", "Hello kite!"},
+		{"hello with name", "pi", "Hello pi!"},
 		{"hello with empty name", "", "Hello World!"},
 		{"hello with special chars", "!@#$%^&*", "Hello !@#$%^&*!"},
 		{"hello with unicode", "你好世界", "Hello 你好世界!"},

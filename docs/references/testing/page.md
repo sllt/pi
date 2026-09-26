@@ -1,24 +1,24 @@
-# Testing REST APIs with Kite
+# Testing REST APIs with Pi
 
-Testing REST APIs ensures that your endpoints function correctly under various conditions. This guide demonstrates how to write tests for Kite-based REST APIs.
+Testing REST APIs ensures that your endpoints function correctly under various conditions. This guide demonstrates how to write tests for Pi-based REST APIs.
 
-## Mocking Databases in Kite
+## Mocking Databases in Pi
 
-Mocking databases allows for isolated testing by simulating various scenarios. Kite's built-in mock container supports, not only SQL databases, but also extends to other data stores, including Redis, Cassandra, Key-Value stores, MongoDB, and ClickHouse.
+Mocking databases allows for isolated testing by simulating various scenarios. Pi's built-in mock container supports, not only SQL databases, but also extends to other data stores, including Redis, Cassandra, Key-Value stores, MongoDB, and ClickHouse.
 
-## Example of Unit Testing a REST API Using Kite
+## Example of Unit Testing a REST API Using Pi
 
 Below is an example of how to test, say the `Add` method of a handler that interacts with a SQL database.
 
-Here’s an `Add` function for adding a book to the database using Kite:
+Here’s an `Add` function for adding a book to the database using Pi:
 
 ```go
 // main.go
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/http"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/http"
 )
 
 type Book struct {
@@ -27,7 +27,7 @@ type Book struct {
 	Title string `json:"title"`
 }
 
-func Add(ctx *kite.Context) (any, error) {
+func Add(ctx *pi.Context) (any, error) {
 	var book Book
 
 	if err := ctx.Bind(&book); err != nil {
@@ -50,8 +50,8 @@ func Add(ctx *kite.Context) (any, error) {
 }
 
 func main() {
-	// initialize kite object
-	app := kite.New()
+	// initialize pi object
+	app := pi.New()
 
 	app.POST("/book", Add)
 
@@ -61,7 +61,7 @@ func main() {
 
 ```
 
-Here’s how to write tests using Kite:
+Here’s how to write tests using Pi:
 
 ```go
 // main_test.go
@@ -79,13 +79,13 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/infra"
-	kiteHttp "github.com/sllt/kite/pkg/kite/http"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/infra"
+	piHttp "github.com/sllt/pi/pkg/pi/http"
 )
 
 func TestAdd(t *testing.T) {
-	type kiteResponse struct {
+	type piResponse struct {
 		result any
 		err    error
 	}
@@ -96,7 +96,7 @@ func TestAdd(t *testing.T) {
 	// similar to the SQL example demonstrated here.
 	mockContainer, mock := infra.NewMockContainer(t)
 
-	ctx := &kite.Context{
+	ctx := &pi.Context{
 		Context:   context.Background(),
 		Request:   nil,
 		Container: mockContainer,
@@ -113,9 +113,9 @@ func TestAdd(t *testing.T) {
 			requestBody: `title":"Book Title","isbn":12345}`,
 			mockExpect: func() {
 			},
-			expectedResponse: kiteResponse{
+			expectedResponse: piResponse{
 				nil,
-				kiteHttp.ErrorInvalidParam{Params: []string{"body"}}},
+				piHttp.ErrorInvalidParam{Params: []string{"body"}}},
 		},
 		{
 			name:        "Successful Insertion",
@@ -126,7 +126,7 @@ func TestAdd(t *testing.T) {
 					WithArgs("Book Title", 12345).
 					WillReturnResult(sqlmock.NewResult(12, 1))
 			},
-			expectedResponse: kiteResponse{
+			expectedResponse: piResponse{
 				int64(12),
 				nil,
 			},
@@ -140,7 +140,7 @@ func TestAdd(t *testing.T) {
 					WithArgs("Book Title", 12345).
 					WillReturnError(sql.ErrConnDone)
 			},
-			expectedResponse: kiteResponse{
+			expectedResponse: piResponse{
 				nil,
 				sql.ErrConnDone},
 		},
@@ -153,7 +153,7 @@ func TestAdd(t *testing.T) {
 					WithArgs("Book Title", 12345).
 					WillReturnError(errors.New("mocked result error"))
 			},
-			expectedResponse: kiteResponse{
+			expectedResponse: piResponse{
 				nil,
 				errors.New("mocked result error")},
 		},
@@ -173,13 +173,13 @@ func TestAdd(t *testing.T) {
 
 			req.Header.Set("Content-Type", "application/json")
 
-			request := kiteHttp.NewRequest(req)
+			request := piHttp.NewRequest(req)
 
 			ctx.Request = request
 
 			val, err := Add(ctx)
 
-			response := kiteResponse{val, err}
+			response := piResponse{val, err}
 
 			assert.Equal(t, tt.expectedResponse, response, "TEST[%d], Failed.\n%s", i, tt.name)
 		})
@@ -194,7 +194,7 @@ When you register multiple services with `WithMockHTTPService`, each service get
 
 ### Important Notes
 
-- **Context Matching**: Always use the exact context from your `kite.Context` (`ctx.Context`) in expectations. gomock compares contexts by reference, not value, so using `t.Context()` or `context.Background()` will fail.
+- **Context Matching**: Always use the exact context from your `pi.Context` (`ctx.Context`) in expectations. gomock compares contexts by reference, not value, so using `t.Context()` or `context.Background()` will fail.
 - **Service Registration**: `WithMockHTTPService("serviceName")` registers the service with the specified name. Each service gets its own separate mock instance.
 - **Multiple Services**: Use `mocks.HTTPServices["serviceName"]` to access and set different expectations for each service. Each service has its own mock instance, so expectations are independent.
 - **Tests will fail** if the mocked HTTPService is not called as expected or if the context doesn't match.
@@ -213,15 +213,15 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/infra"
-	kiteHttp "github.com/sllt/kite/pkg/kite/http"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/infra"
+	piHttp "github.com/sllt/pi/pkg/pi/http"
 )
 
 // Handler that calls multiple HTTP services
 // This handler demonstrates calling two different services (paymentService and shippingService)
 // to fetch order details from different parts of the system.
-func OrderDetailsHandler(ctx *kite.Context) (any, error) {
+func OrderDetailsHandler(ctx *pi.Context) (any, error) {
 	orderID := ctx.PathParam("id")
 	if orderID == "" {
 		return nil, errors.New("order ID is required")
@@ -285,7 +285,7 @@ func OrderDetailsHandler(ctx *kite.Context) (any, error) {
 
 func TestOrderDetailsHandler(t *testing.T) {
 	// Helper function to create test context with path parameters
-	createTestContext := func(path string, container *infra.Container) *kite.Context {
+	createTestContext := func(path string, container *infra.Container) *pi.Context {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		
 		// Set path parameters using mux.SetURLVars (required for ctx.PathParam to work)
@@ -296,9 +296,9 @@ func TestOrderDetailsHandler(t *testing.T) {
 			}
 		}
 
-		return &kite.Context{
+		return &pi.Context{
 			Context:   req.Context(),
-			Request:   kiteHttp.NewRequest(req),
+			Request:   piHttp.NewRequest(req),
 			Container: container,
 		}
 	}
@@ -307,7 +307,7 @@ func TestOrderDetailsHandler(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		setupMocks     func(*infra.Mocks, *kite.Context)
+		setupMocks     func(*infra.Mocks, *pi.Context)
 		requestPath    string
 		wantErr        bool
 		wantErrMsg     string
@@ -315,7 +315,7 @@ func TestOrderDetailsHandler(t *testing.T) {
 	}{
 		{
 			name: "successful order details retrieval",
-			setupMocks: func(mocks *infra.Mocks, ctx *kite.Context) {
+			setupMocks: func(mocks *infra.Mocks, ctx *pi.Context) {
 				// Set up expectation for paymentService - this is the first HTTP call in the handler
 				paymentResp := &http.Response{
 					StatusCode: http.StatusOK,
@@ -353,7 +353,7 @@ func TestOrderDetailsHandler(t *testing.T) {
 		},
 		{
 			name: "payment service error",
-			setupMocks: func(mocks *infra.Mocks, ctx *kite.Context) {
+			setupMocks: func(mocks *infra.Mocks, ctx *pi.Context) {
 				// Payment service returns an error - handler should fail before calling shipping service
 				mocks.HTTPServices["paymentService"].EXPECT().Get(
 					ctx.Context,
@@ -370,7 +370,7 @@ func TestOrderDetailsHandler(t *testing.T) {
 		},
 		{
 			name: "shipping service error",
-			setupMocks: func(mocks *infra.Mocks, ctx *kite.Context) {
+			setupMocks: func(mocks *infra.Mocks, ctx *pi.Context) {
 				// Payment service succeeds
 				paymentResp := &http.Response{
 					StatusCode: http.StatusOK,
@@ -395,7 +395,7 @@ func TestOrderDetailsHandler(t *testing.T) {
 		},
 		{
 			name: "missing order ID",
-			setupMocks: func(mocks *infra.Mocks, ctx *kite.Context) {
+			setupMocks: func(mocks *infra.Mocks, ctx *pi.Context) {
 				// No service calls should be made when order ID is missing
 			},
 			requestPath: "/orders/",
@@ -440,15 +440,15 @@ func TestOrderDetailsHandler(t *testing.T) {
 **Key Points**:
 - Each service registered via `WithMockHTTPService` gets its own separate mock instance
 - Always use `mocks.HTTPServices["serviceName"]` to access and set expectations for a specific service
-- Always create the `kite.Context` with the exact request context (`req.Context()`) that will be used in the handler
+- Always create the `pi.Context` with the exact request context (`req.Context()`) that will be used in the handler
 - Set expectations on the mock services before calling the handler
 - Test both success and error scenarios to ensure your handlers handle all cases correctly
 
 ### Summary
 
-- **Mocking Database Interactions**: Use Kite mock container to simulate database interactions.
+- **Mocking Database Interactions**: Use Pi mock container to simulate database interactions.
 - **Mocking HTTP Services**: Use `WithMockHTTPService("serviceName")` to register and mock HTTP services.
-- **Context Matching**: Always use `ctx.Context` from your `kite.Context` in mock expectations, not `t.Context()` or `context.Background()`.
+- **Context Matching**: Always use `ctx.Context` from your `pi.Context` in mock expectations, not `t.Context()` or `context.Background()`.
 - **Define Test Cases**: Create table-driven tests to handle various scenarios.
 - **Run and Validate**: Ensure that your tests check for expected results, and handle errors correctly.
 

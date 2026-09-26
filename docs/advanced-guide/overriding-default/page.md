@@ -1,17 +1,17 @@
 # Overriding Default
 
-Kite allows overriding default behavior of its features.
+Pi allows overriding default behavior of its features.
 
 ## Raw response format
 
-Kite by default wraps a handler's return value and assigns it to the `data` field in a response.
+Pi by default wraps a handler's return value and assigns it to the `data` field in a response.
 
 ### Example
 
 ```go
 package main
 
-import "github.com/sllt/kite/pkg/kite"
+import "github.com/sllt/pi/pkg/pi"
 
 type user struct {
 	ID   int    `json:"id"`
@@ -19,9 +19,9 @@ type user struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
-	app.GET("/users", func(ctx *kite.Context) (any, error) {
+	app.GET("/users", func(ctx *pi.Context) (any, error) {
 		users := []user{{ID: 1, Name: "Daria"}, {ID: 2, Name: "Ihor"}}
 
 		return users, nil
@@ -49,7 +49,7 @@ Response example:
 
 If you want to have a raw response structure - wrap it in `response.Raw`:
 ```go
-app.GET("/users", func(ctx *kite.Context) (any, error) {
+app.GET("/users", func(ctx *pi.Context) (any, error) {
 
     users := []user{{ID: 1, Name: "Daria"}, {ID: 2, Name: "Ihor"}}
 
@@ -76,7 +76,7 @@ Response example:
 If you need to respond with XML without JSON encoding, return `response.XML`. It bypasses JSON encoding just like `response.File` or `response.Template` and writes the bytes directly to the client. The `ContentType` defaults to `application/xml` but can be overridden.
 
 ```go
-app.GET("/legacy/xml", func(ctx *kite.Context) (any, error) {
+app.GET("/legacy/xml", func(ctx *pi.Context) (any, error) {
 	payload := []byte(`<Response status="ok"><Message>Hello</Message></Response>`)
 
 	return response.XML{Content: payload}, nil
@@ -88,7 +88,7 @@ app.GET("/legacy/xml", func(ctx *kite.Context) (any, error) {
 ```
 
 ## Rendering Templates
-Kite makes it easy to render HTML and HTMX templates directly from your handlers using the response.Template type.
+Pi makes it easy to render HTML and HTMX templates directly from your handlers using the response.Template type.
 By convention, all template files—whether HTML or HTMX—should be placed inside a templates directory located at the root of your project.
 
 ### Example
@@ -96,12 +96,12 @@ By convention, all template files—whether HTML or HTMX—should be placed insi
 package main
 
 import (
- "github.com/sllt/kite/pkg/kite"
- "github.com/sllt/kite/pkg/kite/http/response"
+ "github.com/sllt/pi/pkg/pi"
+ "github.com/sllt/pi/pkg/pi/http/response"
 )
 
 func main() {
- app := kite.New()
+ app := pi.New()
  app.GET("/list", listHandler)
  app.AddStaticFiles("/", "./static")
  app.Run()
@@ -117,12 +117,12 @@ type TodoPageData struct {
  Todos     []Todo
 }
 
-func listHandler(ctx *kite.Context) (any, error) {
+func listHandler(ctx *pi.Context) (any, error) {
  // Get data from somewhere
  data := TodoPageData{
   PageTitle: "My TODO list",
   Todos: []Todo{
-   {Title: "Expand on Kite documentation ", Done: false},
+   {Title: "Expand on Pi documentation ", Done: false},
    {Title: "Add more examples", Done: true},
    {Title: "Write some articles", Done: false},
   },
@@ -134,7 +134,7 @@ func listHandler(ctx *kite.Context) (any, error) {
 
 ## HTTP Redirects
 
-Kite allows redirecting HTTP requests to other URLs using the `response.Redirect` type.
+Pi allows redirecting HTTP requests to other URLs using the `response.Redirect` type.
 
 ### Example
 
@@ -142,15 +142,15 @@ Kite allows redirecting HTTP requests to other URLs using the `response.Redirect
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 
-	"github.com/sllt/kite/pkg/kite/http/response"
+	"github.com/sllt/pi/pkg/pi/http/response"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
-	app.GET("/old-page", func(ctx *kite.Context) (any, error) {
+	app.GET("/old-page", func(ctx *pi.Context) (any, error) {
 		// Redirect to a new URL
 		return response.Redirect{URL: "https://example.com/new-page"}, nil
 	})
@@ -159,7 +159,7 @@ func main() {
 }
 ```
 
-In Kite, the following HTTP methods can be redirected, along with their corresponding status codes:
+In Pi, the following HTTP methods can be redirected, along with their corresponding status codes:
 
 - **GET (302 Found)**: It is safe to redirect because the request remains a GET after the redirect.
 - **POST (303 See Other)**: The browser converts the POST request to a GET on redirect.
@@ -170,7 +170,7 @@ In Kite, the following HTTP methods can be redirected, along with their correspo
 
 ## Favicon.ico
 
-By default, Kite loads its own `favicon.ico` present in root directory for an application. To override `favicon.ico` user
+By default, Pi loads its own `favicon.ico` present in root directory for an application. To override `favicon.ico` user
 can place its custom icon in the **static** directory of its application.
 
 > [!NOTE]

@@ -2,7 +2,7 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Http-Server API",
-    "description": "Example Http-Server with multiple endpoints. This swagger represents the requests and responses for various endpoints included in the [http-server example of Kite](https://github.com/sllt/kite/tree/development/examples/http-server).",
+    "description": "Example Http-Server with multiple endpoints. This swagger represents the requests and responses for various endpoints included in the [http-server example of Pi](https://github.com/sllt/pi/tree/development/examples/http-server).",
     "version": "1.0.0"
   },
   "servers": [

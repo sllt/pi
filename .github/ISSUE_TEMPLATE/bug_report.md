@@ -33,7 +33,7 @@ If applicable, add screenshots to help explain your problem.
 
 **Environments (please complete the following information):**
 - OS: [e.g. Linux]
-- kite version [e.g. v1.5.0]
+- pi version [e.g. v1.5.0]
 - go version [e.g. 1.21]
 
 **More description**

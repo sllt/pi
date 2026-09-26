@@ -9,7 +9,7 @@ To connect to `OracleDB`, you need to provide the following environment variable
 - `SERVICE`: The specific Oracle database instance or service on the server that the client should connect to.
 
 ## Setup
-Kite supports injecting OracleDB as a relational datasource through a clean, extensible interface. Any driver that implements the following interface can be added using the `app.AddOracle()` method, and users can access OracleDB throughout their application via `kite.Context`.
+Pi supports injecting OracleDB as a relational datasource through a clean, extensible interface. Any driver that implements the following interface can be added using the `app.AddOracle()` method, and users can access OracleDB throughout their application via `pi.Context`.
 
 ```go
 type Oracle interface {
@@ -18,11 +18,11 @@ type Oracle interface {
 }
 ```
 
-This approach allows users to easily inject any compatible Oracle driver, providing both usability and the flexibility to use multiple databases in a Kite application.
+This approach allows users to easily inject any compatible Oracle driver, providing both usability and the flexibility to use multiple databases in a Pi application.
 
 ## ⚠️ Important: Oracle Database Must Exist
 
-**Before running your Kite application, you must ensure that the Oracle database and the required schema (such as the `users` table) are already created.**
+**Before running your Pi application, you must ensure that the Oracle database and the required schema (such as the `users` table) are already created.**
 
 - Oracle does not allow creating a database (PDB or CDB) via a simple SQL query from a standard client connection.
 - You must use Oracle tools (like DBCA, SQL\*Plus as SYSDBA, or Docker container initialization) to create the database and pluggable database (PDB) before connecting your app.
@@ -116,9 +116,9 @@ CREATE TABLE users (
 );
 ```
 
-This will create the required table for the Kite application to interact with.
+This will create the required table for the Pi application to interact with.
 
-### 7. Sample OracleDB Config for Kite
+### 7. Sample OracleDB Config for Pi
 
 | Setting     | Value              |
 | :---------- | :----------------- |
@@ -128,10 +128,10 @@ This will create the required table for the Kite application to interact with.
 | password    | `YourPasswordHere` |
 | service/SID | `FREEPDB1`         |
 
-## Import the Kite External Driver for OracleDB
+## Import the Pi External Driver for OracleDB
 
 ```bash
-go get github.com/sllt/kite/pkg/kite/datasource/oracle@latest
+go get github.com/sllt/pi/pkg/pi/datasource/oracle@latest
 ```
 
 ## Example
@@ -140,8 +140,8 @@ go get github.com/sllt/kite/pkg/kite/datasource/oracle@latest
 package main
 
 import (
- "github.com/sllt/kite/pkg/kite"
- "github.com/sllt/kite/pkg/kite/datasource/oracle"
+ "github.com/sllt/pi/pkg/pi"
+ "github.com/sllt/pi/pkg/pi/datasource/oracle"
 )
 
 type User struct {
@@ -151,7 +151,7 @@ type User struct {
 }
 
 func main() {
- app := kite.New()
+ app := pi.New()
 
  app.AddOracle(oracle.New(oracle.Config{
   Host:     app.Config.Get("HOST"),
@@ -167,7 +167,7 @@ func main() {
  app.Run()
 }
 
-func Post(ctx *kite.Context) (any, error) {
+func Post(ctx *pi.Context) (any, error) {
  err := ctx.Oracle.Exec(ctx, "INSERT INTO users (id, name, age) VALUES (:1, :2, :3)",
   "8f165e2d-feef-416c-95f6-913ce3172e15", "aryan", 10)
  if err != nil {
@@ -176,7 +176,7 @@ func Post(ctx *kite.Context) (any, error) {
  return "successfully inserted", nil
 }
 
-func Get(ctx *kite.Context) (any, error) {
+func Get(ctx *pi.Context) (any, error) {
  var users []map[string]any
  err := ctx.Oracle.Select(ctx, &users, "SELECT id, name, age FROM users")
  if err != nil {

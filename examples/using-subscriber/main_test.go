@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/infra"
-	"github.com/sllt/kite/pkg/kite/logging"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 
 	m.Run()
 }
@@ -48,7 +48,7 @@ func (e *errorRequest) Params(key string) []string  { return nil }
 func TestProductSubscribe_BindError(t *testing.T) {
 	mockContainer, _ := infra.NewMockContainer(t)
 
-	ctx := &kite.Context{
+	ctx := &pi.Context{
 		Request:       &errorRequest{},
 		Container:     mockContainer,
 		ContextLogger: *logging.NewContextLogger(context.Background(), mockContainer.Logger),
@@ -64,7 +64,7 @@ func TestProductSubscribe_BindError(t *testing.T) {
 func TestOrderSubscribe_BindError(t *testing.T) {
 	mockContainer, _ := infra.NewMockContainer(t)
 
-	ctx := &kite.Context{
+	ctx := &pi.Context{
 		Request:       &errorRequest{},
 		Container:     mockContainer,
 		ContextLogger: *logging.NewContextLogger(context.Background(), mockContainer.Logger),
@@ -99,7 +99,7 @@ func (r *successProductRequest) Params(string) []string  { return nil }
 
 func TestProductHandler_Success(t *testing.T) {
 	mockContainer, _ := infra.NewMockContainer(t)
-	ctx := &kite.Context{
+	ctx := &pi.Context{
 		Request:       &successProductRequest{},
 		Container:     mockContainer,
 		ContextLogger: *logging.NewContextLogger(context.Background(), mockContainer.Logger),
@@ -133,7 +133,7 @@ func (r *successOrderRequest) Params(string) []string  { return nil }
 
 func TestOrderHandler_Success(t *testing.T) {
 	mockContainer, _ := infra.NewMockContainer(t)
-	ctx := &kite.Context{
+	ctx := &pi.Context{
 		Request:       &successOrderRequest{},
 		Container:     mockContainer,
 		ContextLogger: *logging.NewContextLogger(context.Background(), mockContainer.Logger),

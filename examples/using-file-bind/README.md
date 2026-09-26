@@ -1,7 +1,7 @@
 # Using File Bind Example
 
-This Kite example demonstrates the use of context Bind where incoming request has multipart-form data and then binds
-it to the fields of the struct. Kite currently supports zip file type and also binds the more generic [`multipart.FileHeader`](https://pkg.go.dev/mime/multipart#FileHeader)
+This Pi example demonstrates the use of context Bind where incoming request has multipart-form data and then binds
+it to the fields of the struct. Pi currently supports zip file type and also binds the more generic [`multipart.FileHeader`](https://pkg.go.dev/mime/multipart#FileHeader)
 
 ### Usage
 ```go
@@ -11,7 +11,7 @@ type Data struct {
 	FileHeader *multipart.FileHeader `file:"file_upload"`
 }
 
-func Handler(c *kite.Context) (any, error) {
+func Handler(c *pi.Context) (any, error) {
 	var d Data
 
 	// bind the multipart data into the variable d

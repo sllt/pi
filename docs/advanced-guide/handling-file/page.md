@@ -1,12 +1,12 @@
 # Handling File
 
-Kite simplifies the complexity of working with different file stores by offering a uniform API. This allows developers to interact with different storage systems using the same set of methods, without needing to understand the underlying implementation details of each file store.
+Pi simplifies the complexity of working with different file stores by offering a uniform API. This allows developers to interact with different storage systems using the same set of methods, without needing to understand the underlying implementation details of each file store.
 
 ## USAGE
 
 By default, local file-store is initialized and user can access it from the context.
 
-Kite also supports FTP/SFTP file-store. Developers can also connect and use their cloud storage bucket as a file-store. Following cloud storage options are currently supported:
+Pi also supports FTP/SFTP file-store. Developers can also connect and use their cloud storage bucket as a file-store. Following cloud storage options are currently supported:
 
 - **AWS S3**
 - **Google Cloud Storage (GCS)**
@@ -20,13 +20,13 @@ The file-store can be initialized as follows:
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 
-	"github.com/sllt/kite/pkg/kite/datasource/file/ftp"
+	"github.com/sllt/pi/pkg/pi/datasource/file/ftp"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.AddFileStore(ftp.New(&ftp.Config{
 		Host:      "127.0.0.1",
@@ -46,13 +46,13 @@ func main() {
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 
-	"github.com/sllt/kite/pkg/kite/datasource/file/sftp"
+	"github.com/sllt/pi/pkg/pi/datasource/file/sftp"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.AddFileStore(sftp.New(&sftp.Config{
 		Host:     "127.0.0.1",
@@ -74,13 +74,13 @@ To run S3 File-Store locally we can use localstack,
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 
-	"github.com/sllt/kite/pkg/kite/datasource/file/s3"
+	"github.com/sllt/pi/pkg/pi/datasource/file/s3"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Note that currently we do not handle connections through session token.
 	// BaseEndpoint is not necessary while connecting to AWS as it automatically resolves it on the basis of region.
@@ -88,7 +88,7 @@ func main() {
 	// Note that locally, AccessKeyID & SecretAccessKey is not checked if we use localstack.
 	app.AddFileStore(s3.New(&s3.Config{
 		EndPoint:        "http://localhost:4566",
-		BucketName:      "kite-bucket-2",
+		BucketName:      "pi-bucket-2",
 		Region:          "us-east-1",
 		AccessKeyID:     app.Config.Get("AWS_ACCESS_KEY_ID"),
 		SecretAccessKey: app.Config.Get("AWS_SECRET_ACCESS_KEY"),
@@ -99,7 +99,7 @@ func main() {
 ```
 
 > Note: The current implementation supports handling only one bucket at a time,
-> as shown in the example with `kite-bucket-2`. Bucket switching mid-operation is not supported.
+> as shown in the example with `pi-bucket-2`. Bucket switching mid-operation is not supported.
 
 ### Google Cloud Storage (GCS) Bucket as File-Store
 
@@ -129,12 +129,12 @@ STORAGE_EMULATOR_HOST=localhost:4443
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/file/gcs"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/file/gcs"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Local setup with fake-gcs-server (uses STORAGE_EMULATOR_HOST)
 	app.AddFileStore(gcs.New(&gcs.Config{
@@ -175,18 +175,18 @@ app.AddFileStore(gcs.New(&gcs.Config{
 
 ### Azure File Storage as File-Store
 
-Azure File Storage provides fully managed file shares in the cloud. To use Azure File Storage with Kite:
+Azure File Storage provides fully managed file shares in the cloud. To use Azure File Storage with Pi:
 
 ```go
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/file/azure"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/file/azure"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Create Azure File Storage filesystem
 	fs, err := azure.New(&azure.Config{
@@ -302,7 +302,7 @@ file.Close()
 
 ### Reading file as CSV/JSON/TEXT
 
-Kite support reading CSV/JSON/TEXT files line by line.
+Pi support reading CSV/JSON/TEXT files line by line.
 
 ```go
 reader, err := file.ReadAll()
@@ -396,7 +396,7 @@ The `RemoveAll` command deletes all subdirectories as well. If you delete the cu
 err := ctx.File.RemoveAll("my_dir/my_text")
 ```
 
-> Kite supports relative paths, allowing locations to be referenced relative to the current working directory. However, since S3 and GCS use
+> Pi supports relative paths, allowing locations to be referenced relative to the current working directory. However, since S3 and GCS use
 > a flat file structure, all methods require a full path relative to the bucket. Azure File Storage supports native directory structures,
 > so relative paths work as expected with directory navigation.
 

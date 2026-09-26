@@ -1,6 +1,6 @@
 # Http-Service Example
 
-This Kite example demonstrates an inter-service HTTP communication along with circuit-breaker as well as
+This Pi example demonstrates an inter-service HTTP communication along with circuit-breaker as well as
 service health config addition.
 
 User can use the `AddHTTPService` method to add an HTTP service and then later get it using `GetHTTPService("service-name")`

@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/sllt/kite/examples/using-add-rest-handlers/migrations"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/examples/using-add-rest-handlers/migrations"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 type user struct {
@@ -13,13 +13,13 @@ type user struct {
 }
 
 // GetAll : User can overwrite the specific handlers by implementing them like this
-func (u *user) GetAll(c *kite.Context) (any, error) {
+func (u *user) GetAll(c *pi.Context) (any, error) {
 	return "user GetAll called", nil
 }
 
 func main() {
 	// Create a new application
-	a := kite.New()
+	a := pi.New()
 
 	// Add migrations to run
 	a.Migrate(migrations.All())

@@ -15,9 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/sllt/kite/examples/grpc/grpc-unary-client/client"
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/examples/grpc/grpc-unary-client/client"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 // SimpleHelloServer implements a normal gRPC server using client types
@@ -33,7 +33,7 @@ func (s *SimpleHelloServer) SayHello(ctx context.Context, req *client.HelloReque
 }
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -66,13 +66,13 @@ func TestIntegration_UnaryClient(t *testing.T) {
 	go main()
 	time.Sleep(100 * time.Millisecond) // Give HTTP server time to start
 
-	// Test HTTP endpoints that use Kite gRPC client internally
+	// Test HTTP endpoints that use Pi gRPC client internally
 	tests := []struct {
 		desc     string
 		path     string
 		expected string
 	}{
-		{"hello with name", "/hello?name=" + url.QueryEscape("kite"), "Hello kite!"},
+		{"hello with name", "/hello?name=" + url.QueryEscape("pi"), "Hello pi!"},
 		{"hello with empty name", "/hello", "Hello World!"},
 		{"hello with unicode", "/hello?name=" + url.QueryEscape("你好世界"), "Hello 你好世界!"},
 		{"hello with long name", "/hello?name=" + url.QueryEscape("ThisIsAVeryLongNameThatShouldStillWork"), "Hello ThisIsAVeryLongNameThatShouldStillWork!"},
@@ -155,9 +155,9 @@ func TestIntegration_UnaryClient_ErrorHandling(t *testing.T) {
 		t.Setenv("GRPC_SERVER_HOST", "invalid:address")
 
 		// Create a new app to test with invalid host
-		app := kite.New()
-		_, err := client.NewHelloKiteClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
-		// Kite client creation might not fail immediately for invalid addresses
+		app := pi.New()
+		_, err := client.NewHelloPiClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
+		// Pi client creation might not fail immediately for invalid addresses
 		// The error will occur when actually making RPC calls
 		if err != nil {
 			assert.Error(t, err, "Should fail with invalid gRPC server address")
@@ -169,9 +169,9 @@ func TestIntegration_UnaryClient_ErrorHandling(t *testing.T) {
 		t.Setenv("GRPC_SERVER_HOST", "")
 
 		// Create a new app to test with empty host
-		app := kite.New()
-		_, err := client.NewHelloKiteClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
-		// Kite client creation might not fail immediately for empty addresses
+		app := pi.New()
+		_, err := client.NewHelloPiClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
+		// Pi client creation might not fail immediately for empty addresses
 		// The error will occur when actually making RPC calls
 		if err != nil {
 			assert.Error(t, err, "Should fail with empty gRPC server address")

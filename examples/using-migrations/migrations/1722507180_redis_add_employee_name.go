@@ -3,7 +3,7 @@ package migrations
 import (
 	"context"
 
-	"github.com/sllt/kite/pkg/kite/migration"
+	"github.com/sllt/pi/pkg/pi/migration"
 )
 
 func addEmployeeInRedis() migration.Migrate {

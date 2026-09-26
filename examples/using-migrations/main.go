@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sllt/kite/examples/using-migrations/migrations"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/examples/using-migrations/migrations"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 const (
@@ -15,7 +15,7 @@ const (
 
 func main() {
 	// Create a new application
-	a := kite.New()
+	a := pi.New()
 
 	// Add migrations to run
 	a.Migrate(migrations.All())
@@ -37,7 +37,7 @@ type Employee struct {
 }
 
 // GetHandler handles GET requests for retrieving employee information
-func GetHandler(c *kite.Context) (any, error) {
+func GetHandler(c *pi.Context) (any, error) {
 	name := c.Param("name")
 	if name == "" {
 		return nil, errors.New("name can't be empty")
@@ -55,7 +55,7 @@ func GetHandler(c *kite.Context) (any, error) {
 }
 
 // PostHandler handles POST requests for creating new employees
-func PostHandler(c *kite.Context) (any, error) {
+func PostHandler(c *pi.Context) (any, error) {
 	var emp Employee
 	if err := c.Bind(&emp); err != nil {
 		c.Logger.Errorf("error in binding: %v", err)

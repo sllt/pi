@@ -1,6 +1,6 @@
 # Building CLI Applications
 
-Kite provides a simple way to build command-line applications using `app.NewCMD()`. This creates standalone CLI tools without starting an HTTP server.
+Pi provides a simple way to build command-line applications using `app.NewCMD()`. This creates standalone CLI tools without starting an HTTP server.
 
 ## Configuration
 To configure logging for CLI applications, set the following environment variable:
@@ -16,19 +16,19 @@ package main
 
 import (
 	"fmt"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.NewCMD()
+	app := pi.NewCMD()
 
 	// Simple hello command
-	app.SubCommand("hello", func(c *kite.Context) (any, error) {
+	app.SubCommand("hello", func(c *pi.Context) (any, error) {
 		return "Hello World!", nil
-	}, kite.AddDescription("Print hello message"))
+	}, pi.AddDescription("Print hello message"))
 
 	// Command with parameters
-	app.SubCommand("greet", func(c *kite.Context) (any, error) {
+	app.SubCommand("greet", func(c *pi.Context) (any, error) {
 		name := c.Param("name")
 		if name == "" {
 			name = "World"
@@ -40,12 +40,12 @@ func main() {
 }
 ```
 
-## Key Kite CLI Methods
+## Key Pi CLI Methods
 
 - **`app.NewCMD()`**: Initialize a CLI application
 - **`app.SubCommand(name, handler, options...)`**: Add a subcommand
-- **`kite.AddDescription(desc)`**: Add help description
-- **`kite.AddHelp(help)`**: Add detailed help text
+- **`pi.AddDescription(desc)`**: Add help description
+- **`pi.AddHelp(help)`**: Add detailed help text
 - **`ctx.Param(name)`**: Get command parameters
 - **`ctx.Out.Println()`**: Print to stdout
 - **`ctx.Logger`**: Access logging

@@ -1,15 +1,15 @@
 package main
 
 import (
-	"github.com/sllt/kite/examples/grpc/grpc-unary-client/client"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/examples/grpc/grpc-unary-client/client"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Create a gRPC client for the Hello service
-	helloGRPCClient, err := client.NewHelloKiteClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
+	helloGRPCClient, err := client.NewHelloPiClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
 	if err != nil {
 		app.Logger().Errorf("Failed to create Hello gRPC client: %v", err)
 		return
@@ -23,16 +23,16 @@ func main() {
 }
 
 type GreetHandler struct {
-	helloGRPCClient client.HelloKiteClient
+	helloGRPCClient client.HelloPiClient
 }
 
-func NewGreetHandler(helloClient client.HelloKiteClient) *GreetHandler {
+func NewGreetHandler(helloClient client.HelloPiClient) *GreetHandler {
 	return &GreetHandler{
 		helloGRPCClient: helloClient,
 	}
 }
 
-func (g GreetHandler) Hello(ctx *kite.Context) (any, error) {
+func (g GreetHandler) Hello(ctx *pi.Context) (any, error) {
 	userName := ctx.Param("name")
 
 	if userName == "" {

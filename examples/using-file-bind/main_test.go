@@ -12,11 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -48,7 +48,7 @@ func generateMultiPartBody(t *testing.T) (*bytes.Buffer, string) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
-	f, err := os.Open("../../pkg/kite/testutil/test.zip")
+	f, err := os.Open("../../pkg/pi/testutil/test.zip")
 	if err != nil {
 		t.Fatalf("Failed to open test.zip: %v", err)
 	}

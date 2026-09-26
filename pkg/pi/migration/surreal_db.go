@@ -1,0 +1,135 @@
+package migration
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/sllt/pi/pkg/pi/infra"
+)
+
+var errExecuteQuery = errors.New("failed to execute migration query")
+
+type surrealDS struct {
+	client SurrealDB
+}
+
+func (s surrealDS) Query(ctx context.Context, query string, vars map[string]any) ([]any, error) {
+	return s.client.Query(ctx, query, vars)
+}
+
+func (s surrealDS) CreateNamespace(ctx context.Context, namespace string) error {
+	return s.client.CreateNamespace(ctx, namespace)
+}
+
+func (s surrealDS) CreateDatabase(ctx context.Context, database string) error {
+	return s.client.CreateDatabase(ctx, database)
+}
+
+func (s surrealDS) DropNamespace(ctx context.Context, namespace string) error {
+	return s.client.DropNamespace(ctx, namespace)
+}
+
+func (s surrealDS) DropDatabase(ctx context.Context, database string) error {
+	return s.client.DropDatabase(ctx, database)
+}
+
+type surrealMigrator struct {
+	SurrealDB
+	migrator
+}
+
+func (s surrealDS) apply(m migrator) migrator {
+	return surrealMigrator{
+		SurrealDB: s.client,
+		migrator:  m,
+	}
+}
+
+const (
+	getLastSurrealDBPiMigration   = `SELECT version FROM kite_migrations ORDER BY version DESC LIMIT 1;`
+	insertSurrealDBPiMigrationRow = `CREATE kite_migrations SET version = $version, method = $method, ` +
+		`start_time = $start_time, duration = $duration;`
+)
+
+func getMigrationTableQueries() []string {
+	return []string{
+		"DEFINE TABLE kite_migrations SCHEMAFULL;",
+		"DEFINE FIELD id ON kite_migrations TYPE string;",
+		"DEFINE FIELD version ON kite_migrations TYPE number;",
+		"DEFINE FIELD method ON kite_migrations TYPE string;",
+		"DEFINE FIELD start_time ON kite_migrations TYPE datetime;",
+		"DEFINE FIELD duration ON kite_migrations TYPE number;",
+		"DEFINE INDEX version_method ON kite_migrations COLUMNS version, method UNIQUE;",
+	}
+}
+
+func (s surrealMigrator) checkAndCreateMigrationTable(*infra.Container) error {
+	if _, err := s.SurrealDB.Query(context.Background(), "USE NS test DB test", nil); err != nil {
+		return err
+	}
+
+	// Create migration table directly
+	for _, q := range getMigrationTableQueries() {
+		if _, err := s.SurrealDB.Query(context.Background(), q, nil); err != nil {
+			return fmt.Errorf("%w: %s: %w", errExecuteQuery, q, err)
+		}
+	}
+
+	return nil
+}
+
+func (s surrealMigrator) getLastMigration(c *infra.Container) (int64, error) {
+	var lastMigration int64
+
+	result, err := s.SurrealDB.Query(context.Background(), getLastSurrealDBPiMigration, nil)
+	if err != nil {
+		return -1, fmt.Errorf("surrealdb: %w", err)
+	}
+
+	if len(result) > 0 {
+		if version, ok := result[0].(map[string]any)["version"].(float64); ok {
+			lastMigration = int64(version)
+		}
+	}
+
+	c.Debugf("surrealDB last migration fetched value is: %v", lastMigration)
+
+	lm2, err := s.migrator.getLastMigration(c)
+	if err != nil {
+		return -1, err
+	}
+
+	return max(lastMigration, lm2), nil
+}
+
+func (s surrealMigrator) beginTransaction(c *infra.Container) transactionData {
+	data := s.migrator.beginTransaction(c)
+
+	c.Debug("surrealDB migrator begin successfully")
+
+	return data
+}
+
+func (s surrealMigrator) commitMigration(c *infra.Container, data transactionData) error {
+	_, err := s.SurrealDB.Query(context.Background(), insertSurrealDBPiMigrationRow, map[string]any{
+		"version":    data.MigrationNumber,
+		"method":     "UP",
+		"start_time": data.StartTime,
+		"duration":   time.Since(data.StartTime).Milliseconds(),
+	})
+	if err != nil {
+		return err
+	}
+
+	c.Debugf("inserted record for migration %v in surrealDB kite_migrations table", data.MigrationNumber)
+
+	return s.migrator.commitMigration(c, data)
+}
+
+func (s surrealMigrator) rollback(c *infra.Container, data transactionData) {
+	s.migrator.rollback(c, data)
+
+	c.Fatalf("migration %v failed and rolled back", data.MigrationNumber)
+}

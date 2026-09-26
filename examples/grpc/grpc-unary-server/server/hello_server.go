@@ -1,6 +1,6 @@
 // versions:
-// 	kite-cli v0.6.0
-// 	github.com/sllt/kite v1.37.0
+// 	pi-cli v0.6.0
+// 	github.com/sllt/pi v1.37.0
 // 	source: hello.proto
 
 package server
@@ -8,21 +8,21 @@ package server
 import (
 	"fmt"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 // Register the gRPC service in your app using the following code in your main.go:
 //
-// server.RegisterHelloServerWithKite(app, &server.NewHelloKiteServer())
+// server.RegisterHelloServerWithPi(app, &server.NewHelloPiServer())
 //
-// HelloKiteServer defines the gRPC server implementation.
+// HelloPiServer defines the gRPC server implementation.
 // Customize the struct with required dependencies and fields as needed.
 
-type HelloKiteServer struct {
+type HelloPiServer struct {
 	health *healthServer
 }
 
-func (s *HelloKiteServer) SayHello(ctx *kite.Context) (any, error) {
+func (s *HelloPiServer) SayHello(ctx *pi.Context) (any, error) {
 	request := HelloRequest{}
 
 	err := ctx.Bind(&request)

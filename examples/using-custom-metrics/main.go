@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 // This example simulates the usage of custom metrics for transactions of an ecommerce store.
@@ -17,7 +17,7 @@ const (
 
 func main() {
 	// Create a new application
-	a := kite.New()
+	a := pi.New()
 
 	a.Metrics().NewCounter(transactionSuccessful, "used to track the count of successful transactions")
 	a.Metrics().NewUpDownCounter(totalCreditDaySales, "used to track the total credit sales in a day")
@@ -33,7 +33,7 @@ func main() {
 	a.Run()
 }
 
-func TransactionHandler(c *kite.Context) (any, error) {
+func TransactionHandler(c *pi.Context) (any, error) {
 	transactionStartTime := time.Now()
 
 	// transaction logic
@@ -49,7 +49,7 @@ func TransactionHandler(c *kite.Context) (any, error) {
 	return "Transaction Successful", nil
 }
 
-func ReturnHandler(c *kite.Context) (any, error) {
+func ReturnHandler(c *pi.Context) (any, error) {
 	// logic to create a sales return
 	c.Metrics().DeltaUpDownCounter(c, totalCreditDaySales, -1000, "sale_type", "credit_return")
 

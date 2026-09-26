@@ -1,6 +1,6 @@
 # Connecting to Redis
 
-Kite simplifies the process of connecting to Redis.
+Pi simplifies the process of connecting to Redis.
 
 ## Setup:
 
@@ -9,7 +9,7 @@ Ensure we have Redis installed on our system.
 Optionally, we can use Docker to set up a development environment with password authentication as described below.
 
 ```bash
-docker run --name kite-redis -p 2002:6379 -d \
+docker run --name pi-redis -p 2002:6379 -d \
 	-e REDIS_PASSWORD=password \
 	redis:7.0.5 --requirepass password
 ```
@@ -17,12 +17,12 @@ docker run --name kite-redis -p 2002:6379 -d \
 We can set a sample key `greeting` using the following command:
 
 ```bash
-docker exec -it kite-redis bash -c 'redis-cli SET greeting "Hello from Redis."'
+docker exec -it pi-redis bash -c 'redis-cli SET greeting "Hello from Redis."'
 ```
 
 ## Configuration & Usage:
 
-Kite applications rely on environment variables to configure and connect to a Redis server.  
+Pi applications rely on environment variables to configure and connect to a Redis server.
 These variables are stored in a `.env` file located within the `configs` directory at your project root.
 
 ### Required Environment Variables:
@@ -116,14 +116,14 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	// Initialize Kite object
-	app := kite.New()
+	// Initialize Pi object
+	app := pi.New()
 
-	app.GET("/redis", func(ctx *kite.Context) (any, error) {
+	app.GET("/redis", func(ctx *pi.Context) (any, error) {
 		// Get the value using the Redis instance
 
 		val, err := ctx.Redis.Get(ctx.Context, "greeting").Result()

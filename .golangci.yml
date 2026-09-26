@@ -82,8 +82,8 @@ linters:
       settings:
         printf:
           funcs:
-            - (github.com/sllt/kite/pkg/kite/Logger).Logf
-            - (github.com/sllt/kite/pkg/kite/Logger).Errorf
+            - (github.com/sllt/pi/pkg/pi/Logger).Logf
+            - (github.com/sllt/pi/pkg/pi/Logger).Errorf
     lll:
       line-length: 140
     misspell:
@@ -172,4 +172,4 @@ formatters:
         - localmodule
     goimports:
       local-prefixes:
-        - github.com/sllt/kite
+        - github.com/sllt/pi

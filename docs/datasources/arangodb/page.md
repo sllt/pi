@@ -12,8 +12,8 @@ To connect to `ArangoDB`, you need to provide the following environment variable
 
 ## Setup
 
-Kite supports injecting `ArangoDB` that implements the following interface. Any driver that implements the interface can be
-added using the `app.AddArangoDB()` method, and users can use ArangoDB across the application with `kite.Context`.
+Pi supports injecting `ArangoDB` that implements the following interface. Any driver that implements the interface can be
+added using the `app.AddArangoDB()` method, and users can use ArangoDB across the application with `pi.Context`.
 
 ```go
 type ArangoDB interface {
@@ -53,10 +53,10 @@ type ArangoDB interface {
 
 Users can easily inject a driver that supports this interface, providing usability without compromising the extensibility to use multiple databases.
 
-Import the Kite's external driver for ArangoDB:
+Import the Pi's external driver for ArangoDB:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/arangodb@latest
+go get github.com/sllt/pi/pkg/pi/datasource/arangodb@latest
 ```
 
 ## Example
@@ -66,8 +66,8 @@ package main
 
 import (
 	"fmt"
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/arangodb"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/arangodb"
 )
 
 type Person struct {
@@ -76,7 +76,7 @@ type Person struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Configure the ArangoDB client
 	arangoClient := arangodb.New(arangodb.Config{
@@ -97,7 +97,7 @@ func main() {
 }
 
 // Setup demonstrates database and collection creation
-func Setup(ctx *kite.Context) (any, error) {
+func Setup(ctx *pi.Context) (any, error) {
 	_, err := ctx.ArangoDB.CreateDocument(ctx, "social_network", "", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
@@ -124,7 +124,7 @@ func Setup(ctx *kite.Context) (any, error) {
 }
 
 // Helper function to create collections
-func createCollection(ctx *kite.Context, dbName, collectionName string) error {
+func createCollection(ctx *pi.Context, dbName, collectionName string) error {
 	_, err := ctx.ArangoDB.CreateDocument(ctx, dbName, collectionName, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create collection %s: %w", collectionName, err)
@@ -133,7 +133,7 @@ func createCollection(ctx *kite.Context, dbName, collectionName string) error {
 }
 
 // CreateUserHandler demonstrates user management and document creation
-func CreateUserHandler(ctx *kite.Context) (any, error) {
+func CreateUserHandler(ctx *pi.Context) (any, error) {
 	name := ctx.PathParam("name")
 
 	// Create a person document
@@ -153,7 +153,7 @@ func CreateUserHandler(ctx *kite.Context) (any, error) {
 }
 
 // CreateFriendship demonstrates edge document creation
-func CreateFriendship(ctx *kite.Context) (any, error) {
+func CreateFriendship(ctx *pi.Context) (any, error) {
 	var req struct {
 		From      string `json:"from"`
 		To        string `json:"to"`
@@ -183,7 +183,7 @@ func CreateFriendship(ctx *kite.Context) (any, error) {
 }
 
 // GetEdgesHandler demonstrates fetching edges connected to a vertex
-func GetEdgesHandler(ctx *kite.Context) (any, error) {
+func GetEdgesHandler(ctx *pi.Context) (any, error) {
 	collection := ctx.PathParam("collection")
 	vertexID := ctx.PathParam("vertexID")
 

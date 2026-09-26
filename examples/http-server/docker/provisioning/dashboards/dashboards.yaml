@@ -1,11 +1,11 @@
 apiVersion: 1
 
 providers:
-  - name: 'Kite Dashboard'
+  - name: 'Pi Dashboard'
     orgId: 1
     folder: ''
     type: file
     disableDeletion: false
     updateIntervalSeconds: 10
     options:
-      path: /etc/grafana/provisioning/dashboards/kite-dashboard
+      path: /etc/grafana/provisioning/dashboards/pi-dashboard

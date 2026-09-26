@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi/testutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,13 +16,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/infra"
-	"github.com/sllt/kite/pkg/kite/logging"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -123,11 +123,11 @@ func TestProductFunction(t *testing.T) {
 	}
 }
 
-func testHandler(t *testing.T, name string, handler func(*kite.Context) (interface{}, error),
+func testHandler(t *testing.T, name string, handler func(*pi.Context) (interface{}, error),
 	container *infra.Container, body string, expectError bool, expectedResult interface{}) {
 
 	t.Run(name, func(t *testing.T) {
-		ctx := &kite.Context{
+		ctx := &pi.Context{
 			Context:       context.Background(),
 			Request:       &testRequest{Request: httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(body))), body: body},
 			Container:     container,

@@ -4,7 +4,7 @@ Authentication is a crucial aspect of web applications, controlling access to re
 It is the process of verifying a user's identity to grant access to protected resources. It ensures that only authenticated
 users can perform actions or access data within an application.
 
-Kite offers a **Unified Authentication** model, meaning that once you enable an authentication method, it automatically 
+Pi offers a **Unified Authentication** model, meaning that once you enable an authentication method, it automatically
 applies to both your HTTP and gRPC services.
 
 ## Exempted Paths
@@ -23,21 +23,21 @@ Basic auth is the simplest way to authenticate your APIs. It's built on
 {% new-tab-link title="HTTP protocol authentication scheme" href="https://datatracker.ietf.org/doc/html/rfc7617" /%}.
 It involves sending the prefix `Basic` trailed by the Base64-encoded `<username>:<password>` within the standard `Authorization` header.
 
-### Usage in Kite
+### Usage in Pi
 
-Kite offers two ways to implement basic authentication:
+Pi offers two ways to implement basic authentication:
 
 **1. Predefined Credentials**
 
-Use `EnableBasicAuth(username, password)` to configure Kite with pre-defined credentials.
+Use `EnableBasicAuth(username, password)` to configure Pi with pre-defined credentials.
 
 ```go
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.EnableBasicAuth("admin", "secret_password") // Replace with your credentials
 
-	app.GET("/protected-resource", func(c *kite.Context) (any, error) {
+	app.GET("/protected-resource", func(c *pi.Context) (any, error) {
 		return "Success", nil
 	})
 
@@ -57,7 +57,7 @@ func validateUser(c *infra.Container, username, password string) bool {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.EnableBasicAuthWithValidator(validateUser)
 
@@ -68,16 +68,16 @@ func main() {
 ## 2. API Keys Auth
 *API Key Authentication* is an authentication scheme where a unique API key is included in the request header `X-Api-Key` for validation against a store of authorized keys.
 
-### Usage in Kite
+### Usage in Pi
 
-Kite offers two ways to implement API Keys authentication.
+Pi offers two ways to implement API Keys authentication.
 
 **1. Framework Default Validation**
-- Kite's default validation can be selected using **_EnableAPIKeyAuth(apiKeys ...string)_**
+- Pi's default validation can be selected using **_EnableAPIKeyAuth(apiKeys ...string)_**
 
 ```go
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.EnableAPIKeyAuth("9221e451-451f-4cd6-a23d-2b2d3adea9cf", "0d98ecfe-4677-48aa-b463-d43505766915")
 
@@ -86,7 +86,7 @@ func main() {
 ```
 
 **2. Custom Validation Function**
-- Kite allows a custom validator function for validating APIKeys using **_EnableAPIKeyAuthWithValidator(validator)_**
+- Pi allows a custom validator function for validating APIKeys using **_EnableAPIKeyAuthWithValidator(validator)_**
 
 ```go
 func apiKeyValidator(c *infra.Container, apiKey string) bool {
@@ -96,7 +96,7 @@ func apiKeyValidator(c *infra.Container, apiKey string) bool {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.EnableAPIKeyAuthWithValidator(apiKeyValidator)
 
@@ -108,13 +108,13 @@ func main() {
 {% new-tab-link title="OAuth" href="https://www.rfc-editor.org/rfc/rfc6749" /%} 2.0 is the industry-standard protocol for authorization. 
 It involves sending the prefix `Bearer` trailed by the encoded token within the standard `Authorization` header.
 
-### Usage in Kite
+### Usage in Pi
 
-Enable OAuth 2.0 to authenticate requests. Use `EnableOAuth(jwks-endpoint, refresh_interval, options ...jwt.ParserOption)` to configure Kite.
+Enable OAuth 2.0 to authenticate requests. Use `EnableOAuth(jwks-endpoint, refresh_interval, options ...jwt.ParserOption)` to configure Pi.
 
 ```go
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.EnableOAuth("http://jwks-endpoint", 3600)
 
@@ -134,7 +134,7 @@ func main() {
 Once authenticated, you can retrieve the authentication information from the context using the `GetAuthInfo()` method. This works identically for both HTTP and gRPC handlers.
 
 ```go
-func MyHandler(ctx *kite.Context) (any, error) {
+func MyHandler(ctx *pi.Context) (any, error) {
     authInfo := ctx.GetAuthInfo()
 
     // For Basic Auth
@@ -156,5 +156,5 @@ func MyHandler(ctx *kite.Context) (any, error) {
 
 ## Security Best Practices
 
-*   **Timing Attacks**: Kite's Basic Auth and API Key interceptors use `subtle.ConstantTimeCompare` to prevent timing attacks.
+*   **Timing Attacks**: Pi's Basic Auth and API Key interceptors use `subtle.ConstantTimeCompare` to prevent timing attacks.
 *   **TLS**: Always use TLS in production to encrypt the authentication credentials and tokens transmitted over the network.

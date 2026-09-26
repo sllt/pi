@@ -6,8 +6,8 @@ To connect to `Solr` DB, you need to provide the following environment variables
 - `PORT`: The port number.
 
 ## Setup
-Kite supports injecting Solr database that supports the following interface. Any driver that implements the interface can be added
-using `app.AddSolr()` method, and user's can use Solr DB across application with `kite.Context`.
+Pi supports injecting Solr database that supports the following interface. Any driver that implements the interface can be added
+using `app.AddSolr()` method, and user's can use Solr DB across application with `pi.Context`.
 
 ```go
 type Solr interface {
@@ -27,10 +27,10 @@ type Solr interface {
 User's can easily inject a driver that supports this interface, this provides usability
 without compromising the extensibility to use multiple databases.
 
-Import the kite's external driver for Solr:
+Import the pi's external driver for Solr:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/solr@latest
+go get github.com/sllt/pi/pkg/pi/datasource/solr@latest
 ```
 Note : This datasource package requires the user to create the collection before performing any operations.
 While testing the below code create a collection using :
@@ -43,12 +43,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/solr"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/solr"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.AddSolr(solr.New(solr.Config{
 		Host: app.Config.Get("HOST"),
@@ -66,7 +66,7 @@ type Person struct {
 	Age  int
 }
 
-func post(c *kite.Context) (any, error) {
+func post(c *pi.Context) (any, error) {
 	p := []Person{{Name: "Srijan", Age: 24}}
 	body, _ := json.Marshal(p)
 
@@ -78,7 +78,7 @@ func post(c *kite.Context) (any, error) {
 	return resp, nil
 }
 
-func get(c *kite.Context) (any, error) {
+func get(c *pi.Context) (any, error) {
 	resp, err := c.Solr.Search(c, "test", nil)
 	if err != nil {
 		return nil, err

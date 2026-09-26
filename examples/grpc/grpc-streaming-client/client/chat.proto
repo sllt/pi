@@ -1,5 +1,5 @@
 syntax = "proto3";
-option go_package = "github.com/sllt/kite/examples/grpc/grpc-streaming-client/client";
+option go_package = "github.com/sllt/pi/examples/grpc/grpc-streaming-client/client";
 
 message Request {
   string message = 1;

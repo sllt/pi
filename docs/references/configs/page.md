@@ -1,6 +1,6 @@
-# Kite Configuration Options
+# Pi Configuration Options
 
-This document lists all the configuration options supported by the Kite framework. The configurations are grouped by category for better organization.
+This document lists all the configuration options supported by the Pi framework. The configurations are grouped by category for better organization.
 
 ## App
 
@@ -14,7 +14,7 @@ This document lists all the configuration options supported by the Kite framewor
 
 -  APP_NAME
 -  Name of the application
--  kite-app
+-  pi-app
 
 ---
 
@@ -65,7 +65,7 @@ This document lists all the configuration options supported by the Kite framewor
 ---
 
 -  TRACE_EXPORTER
--  Tracing exporter to use. Supported values: kite, zipkin, jaeger, otlp.
+-  Tracing exporter to use. Supported values: pi, zipkin, jaeger, otlp.
 
 ---
 
@@ -113,8 +113,8 @@ This document lists all the configuration options supported by the Kite framewor
 
 ---
 
--  KITE_TELEMETRY
--  Enable telemetry for Kite framework usage
+-  PI_TELEMETRY
+-  Enable telemetry for Pi framework usage
 -  true
 
 ---
@@ -142,7 +142,7 @@ This document lists all the configuration options supported by the Kite framewor
 ---
 
 -  REQUEST_TIMEOUT
--  Set the request timeouts (in seconds) for HTTP server.
+-  Set the response timeout (in seconds) for ordinary HTTP handlers. A deadline produces HTTP 408; cancellation of the parent request context produces HTTP 499. This cancels the handler context but cannot forcibly stop business code that ignores cancellation. WebSocket upgrades do not receive this additional timeout.
 
 ---
 
@@ -398,7 +398,7 @@ This document lists all the configuration options supported by the Kite framewor
 ---
 
 - REDIS_PUBSUB_DB
-- Redis database number to use only for Redis Pub/Sub (when `PUBSUB_BACKEND=REDIS`). Use a different DB than `REDIS_DB` when running Kite migrations with Redis Streams mode to avoid `kite_migrations` key-type collisions.
+- Redis database number to use only for Redis Pub/Sub (when `PUBSUB_BACKEND=REDIS`). Use a different DB than `REDIS_DB` when running Pi migrations with Redis Streams mode to avoid `kite_migrations` key-type collisions.
 - Default: `15` (highest default Redis database, 0-15)
 
 ---
@@ -439,7 +439,7 @@ This document lists all the configuration options supported by the Kite framewor
 
 {% /table %}
 
-> **Note**: When using Kite migrations with Streams mode, keep `REDIS_DB` and `REDIS_PUBSUB_DB` separate (defaults: 0 and 15). For `REDIS_STREAMS_BLOCK_TIMEOUT`: use 1s-2s for real-time or 10s-30s for batch processing.
+> **Note**: When using Pi migrations with Streams mode, keep `REDIS_DB` and `REDIS_PUBSUB_DB` separate (defaults: 0 and 15). For `REDIS_STREAMS_BLOCK_TIMEOUT`: use 1s-2s for real-time or 10s-30s for batch processing.
 
 ### Pub/Sub
 
@@ -507,7 +507,7 @@ This document lists all the configuration options supported by the Kite framewor
 
 -  CONSUMER_ID
 -  Unique identifier for this consumer
--  kite-consumer
+-  pi-consumer
 
 ---
 
@@ -666,4 +666,3 @@ This document lists all the configuration options supported by the Kite framewor
 - creds.json
 
 {% /table %}
-

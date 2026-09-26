@@ -1,5 +1,5 @@
 # Cassandra
-Kite supports pluggable Cassandra drivers. 
+Pi supports pluggable Cassandra drivers.
 
 ## Configuration
 To connect to `Cassandra`, you need to provide the following environment variables:
@@ -13,8 +13,8 @@ To connect to `Cassandra`, you need to provide the following environment variabl
 
 ## Setup
 
-Kite defines an interface that specifies the required methods for interacting
-with Cassandra. Any driver implementation that adheres to this interface can be integrated into Kite using the
+Pi defines an interface that specifies the required methods for interacting
+with Cassandra. Any driver implementation that adheres to this interface can be integrated into Pi using the
 `app.AddCassandra()` method. This approach promotes flexibility and allows you to choose the Cassandra driver that best
 suits your project's needs.
 
@@ -42,13 +42,13 @@ type CassandraBatchWithContext interface {
 }
 ```
 
-Kite simplifies Cassandra integration with a well-defined interface. Users can easily implement any driver that adheres
+Pi simplifies Cassandra integration with a well-defined interface. Users can easily implement any driver that adheres
 to this interface, fostering a user-friendly experience.
 
-Import the kite's external driver for Cassandra:
+Import the pi's external driver for Cassandra:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/cassandra@latest
+go get github.com/sllt/pi/pkg/pi/datasource/cassandra@latest
 ```
 
 ### Example
@@ -57,8 +57,8 @@ go get github.com/sllt/kite/pkg/kite/datasource/cassandra@latest
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
-	cassandraPkg "github.com/sllt/kite/pkg/kite/datasource/cassandra"
+	"github.com/sllt/pi/pkg/pi"
+	cassandraPkg "github.com/sllt/pi/pkg/pi/datasource/cassandra"
 )
 
 type Person struct {
@@ -70,7 +70,7 @@ type Person struct {
 }
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	config := cassandraPkg.Config{
 		Hosts:    app.Config.Get("HOSTS"),
@@ -84,7 +84,7 @@ func main() {
 
 	app.AddCassandra(cassandra)
 
-	app.POST("/user", func(c *kite.Context) (any, error) {
+	app.POST("/user", func(c *pi.Context) (any, error) {
 		person := Person{}
 
 		err := c.Bind(&person)
@@ -101,7 +101,7 @@ func main() {
 		return "created", nil
 	})
 
-	app.GET("/user", func(c *kite.Context) (any, error) {
+	app.GET("/user", func(c *pi.Context) (any, error) {
 		persons := make([]Person, 0)
 
 		err := c.Cassandra.QueryWithCtx(c, &persons, `SELECT id, name, age, location FROM persons`)

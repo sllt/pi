@@ -1,6 +1,6 @@
 // versions:
-// 	kite-cli v0.6.0
-// 	github.com/sllt/kite v1.37.0
+// 	pi-cli v0.6.0
+// 	github.com/sllt/pi v1.37.0
 // 	source: chat.proto
 
 package server
@@ -14,21 +14,21 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 // Register the gRPC service in your app using the following code in your main.go:
 //
-// server.RegisterChatServiceServerWithKite(app, &server.NewChatServiceKiteServer())
+// server.RegisterChatServiceServerWithPi(app, &server.NewChatServicePiServer())
 //
-// ChatServiceKiteServer defines the gRPC server implementation.
+// ChatServicePiServer defines the gRPC server implementation.
 // Customize the struct with required dependencies and fields as needed.
 
-type ChatServiceKiteServer struct {
+type ChatServicePiServer struct {
 	health *healthServer
 }
 
-func (s *ChatServiceKiteServer) ServerStream(ctx *kite.Context, stream ChatService_ServerStreamServer) error {
+func (s *ChatServicePiServer) ServerStream(ctx *pi.Context, stream ChatService_ServerStreamServer) error {
 	req := Request{}
 	err := ctx.Bind(&req)
 	if err != nil {
@@ -52,7 +52,7 @@ func (s *ChatServiceKiteServer) ServerStream(ctx *kite.Context, stream ChatServi
 	return nil
 }
 
-func (s *ChatServiceKiteServer) ClientStream(ctx *kite.Context, stream ChatService_ClientStreamServer) error {
+func (s *ChatServicePiServer) ClientStream(ctx *pi.Context, stream ChatService_ClientStreamServer) error {
 	var messageCount int
 	var finalMessage strings.Builder
 
@@ -80,7 +80,7 @@ func (s *ChatServiceKiteServer) ClientStream(ctx *kite.Context, stream ChatServi
 	}
 }
 
-func (s *ChatServiceKiteServer) BiDiStream(ctx *kite.Context, stream ChatService_BiDiStreamServer) error {
+func (s *ChatServicePiServer) BiDiStream(ctx *pi.Context, stream ChatService_BiDiStreamServer) error {
 	// Handle incoming messages in a goroutine
 	errChan := make(chan error)
 

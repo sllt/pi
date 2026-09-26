@@ -1,6 +1,6 @@
-# Role-Based Access Control (RBAC) in Kite
+# Role-Based Access Control (RBAC) in Pi
 
-Role-Based Access Control (RBAC) is a security mechanism that restricts access to resources based on user roles and permissions. Kite provides a pure config-based RBAC middleware that supports multiple authentication methods, fine-grained permissions, and role inheritance.
+Role-Based Access Control (RBAC) is a security mechanism that restricts access to resources based on user roles and permissions. Pi provides a pure config-based RBAC middleware that supports multiple authentication methods, fine-grained permissions, and role inheritance.
 
 ## Overview
 
@@ -16,11 +16,11 @@ Role-Based Access Control (RBAC) is a security mechanism that restricts access t
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 	
 	// Use default paths (configs/rbac.json, configs/rbac.yaml, configs/rbac.yml)
 	// Uses rbac.DefaultConfigPath internally (empty string triggers default path resolution)
@@ -168,9 +168,9 @@ func main() {
 
 ### Mux Pattern Syntax
 
-RBAC uses **gorilla/mux route pattern conventions** for endpoint matching. This ensures perfect alignment with how routes are registered in Kite.
+RBAC uses **gorilla/mux route pattern conventions** for endpoint matching. This ensures perfect alignment with how routes are registered in Pi.
 
-**Important**: The RBAC middleware uses the same router configuration as Kite's application router (`StrictSlash(false)`), ensuring consistent behavior for trailing slashes. This means `/api/users` and `/api/users/` are treated as the same route in both RBAC authorization checks and actual route matching.
+**Important**: The RBAC middleware uses the same router configuration as Pi's application router (`StrictSlash(false)`), ensuring consistent behavior for trailing slashes. This means `/api/users` and `/api/users/` are treated as the same route in both RBAC authorization checks and actual route matching.
 
 **Pattern Types**:
 - **Exact**: `"/api/users"` matches exactly `/api/users`
@@ -203,7 +203,7 @@ For endpoints that need to match multiple paths, use mux patterns:
 For production/public APIs, use JWT-based role extraction:
 
 ```go
-app := kite.New()
+app := pi.New()
 
 // Enable OAuth middleware first (required for JWT validation)
 app.EnableOAuth("https://auth.example.com/.well-known/jwks.json", 10)
@@ -233,8 +233,8 @@ For business logic, you can access the user's role from the request context:
 import (
 	"encoding/json"
 	
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/http"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/http"
 )
 
 // JWTClaims represents the JWT claims structure
@@ -244,14 +244,14 @@ type JWTClaims struct {
 	// Add other claim fields as needed
 }
 
-func handler(ctx *kite.Context) (interface{}, error) {
+func handler(ctx *pi.Context) (interface{}, error) {
 	// Get JWT claims from context
 	claimsMap := ctx.GetAuthInfo().GetClaims()
 	if claimsMap == nil {
 		return nil, http.ErrorInvalidParam{Params: []string{"authorization"}}
 	}
 	
-	// Convert map claims to struct (recommended Kite pattern)
+	// Convert map claims to struct (recommended Pi pattern)
 	var claims JWTClaims
 	claimsBytes, err := json.Marshal(claimsMap)
 	if err != nil {
@@ -536,6 +536,6 @@ RBAC middleware never logs:
 
 ## Related Documentation
 
-- [HTTP Authentication](https://github.com/sllt/kite/docs/advanced-guide/http-authentication) - Basic Auth, API Keys, OAuth 2.0
-- [HTTP Communication](https://github.com/sllt/kite/docs/advanced-guide/http-communication) - Inter-service HTTP calls
-- [Middlewares](https://github.com/sllt/kite/docs/advanced-guide/middlewares) - Custom middleware implementation
+- [HTTP Authentication](https://github.com/sllt/pi/docs/advanced-guide/http-authentication) - Basic Auth, API Keys, OAuth 2.0
+- [HTTP Communication](https://github.com/sllt/pi/docs/advanced-guide/http-communication) - Inter-service HTTP calls
+- [Middlewares](https://github.com/sllt/pi/docs/advanced-guide/middlewares) - Custom middleware implementation

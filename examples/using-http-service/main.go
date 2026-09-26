@@ -5,12 +5,12 @@ import (
 	"io"
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/service"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/service"
 )
 
 func main() {
-	a := kite.New()
+	a := pi.New()
 
 	// HTTP service with Circuit Breaker, Health Check, and Connection Pool configuration
 	// Note: /breeds is not an actual health check endpoint for "https://catfact.ninja"
@@ -51,7 +51,7 @@ func main() {
 	a.Run()
 }
 
-func Handler(c *kite.Context) (any, error) {
+func Handler(c *pi.Context) (any, error) {
 	var data = struct {
 		Fact   string `json:"fact"`
 		Length int    `json:"length"`

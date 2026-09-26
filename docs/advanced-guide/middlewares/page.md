@@ -1,14 +1,14 @@
-# Middleware in Kite
+# Middleware in Pi
 
 Middleware allows you intercepting and manipulating HTTP requests and responses flowing through your application's
 router. Middlewares can perform tasks such as authentication, authorization, caching etc. before
 or after the request reaches your application's handler.
 
-## CORS Middleware in Kite
-Kite includes built-in CORS (Cross-Origin Resource Sharing) middleware to handle CORS-related headers. 
+## CORS Middleware in Pi
+Pi includes built-in CORS (Cross-Origin Resource Sharing) middleware to handle CORS-related headers.
 This middleware allows you to control access to your API from different origins. It automatically adds the necessary
 headers to responses, allowing or restricting cross-origin requests. User can also override the default response headers
-sent by Kite by providing the suitable CORS configs.
+sent by Pi by providing the suitable CORS configs.
 
 The CORS middleware provides the following overridable configs:
 
@@ -18,14 +18,14 @@ The CORS middleware provides the following overridable configs:
 - `ACCESS_CONTROL_EXPOSE_HEADERS`: Specify additional headers exposed to the client.
 - `ACCESS_CONTROL_MAX_AGE`: Set the maximum time (in seconds) for preflight request caching.
 
-> Note: Kite automatically interprets the registered route methods and based on that sets the value of `ACCESS_CONTROL_ALLOW_METHODS`
+> Note: Pi automatically interprets the registered route methods and based on that sets the value of `ACCESS_CONTROL_ALLOW_METHODS`
 
 
-## Adding Custom Middleware in Kite
+## Adding Custom Middleware in Pi
 
-By adding custom middleware to your Kite application, user can easily extend its functionality and implement 
+By adding custom middleware to your Pi application, user can easily extend its functionality and implement
 cross-cutting concerns in a modular and reusable way.
-User can use the `UseMiddleware` or `UseMiddlewareWithContainer` method on your Kite application instance to register your custom middleware.
+User can use the `UseMiddleware` or `UseMiddlewareWithContainer` method on your Pi application instance to register your custom middleware.
 
 ### Using UseMiddleware method for Custom Middleware
 The UseMiddleware method is ideal for simple middleware that doesn't need direct access to the application's container.
@@ -36,11 +36,11 @@ The UseMiddleware method is ideal for simple middleware that doesn't need direct
 import (
 	"net/http"
 
-	kiteHTTP "github.com/sllt/kite/pkg/kite/http"
+	piHTTP "github.com/sllt/pi/pkg/pi/http"
 )
 
 // Define your custom middleware function
-func customMiddleware() kiteHTTP.Middleware {
+func customMiddleware() piHTTP.Middleware {
 	return func(inner http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Your custom logic here
@@ -53,8 +53,8 @@ func customMiddleware() kiteHTTP.Middleware {
 }
 
 func main() {
-	// Create a new instance of your Kite application
-	app := kite.New()
+	// Create a new instance of your Pi application
+	app := pi.New()
 
 	// Add your custom middleware to the application
 	app.UseMiddleware(customMiddleware())
@@ -62,14 +62,14 @@ func main() {
 	// Define your application routes and handlers
 	// ...
 
-	// Run your Kite application
+	// Run your Pi application
 	app.Run()
 }
 ```
 
-## Rate Limiter Middleware in Kite
+## Rate Limiter Middleware in Pi
 
-Kite provides a built-in rate limiter middleware to protect your API from abuse and ensure fair resource distribution. 
+Pi provides a built-in rate limiter middleware to protect your API from abuse and ensure fair resource distribution.
 It uses a token bucket algorithm for smooth rate limiting with configurable burst capacity.
 
 ### Features
@@ -84,12 +84,12 @@ It uses a token bucket algorithm for smooth rate limiting with configurable burs
 
 ```go
 import (
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/http/middleware"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/http/middleware"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Configure rate limiter
 	rateLimiterConfig := middleware.RateLimiterConfig{

@@ -14,11 +14,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/sllt/kite/examples/grpc/grpc-streaming-server/server"
+	"github.com/sllt/pi/examples/grpc/grpc-streaming-server/server"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 
 	go main()
 	time.Sleep(300 * time.Millisecond) // wait for server to boot

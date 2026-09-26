@@ -1,6 +1,6 @@
 # CockroachDB
 
-Kite provides support for CockroachDB, a cloud-native SQL database that is compatible with PostgreSQL.
+Pi provides support for CockroachDB, a cloud-native SQL database that is compatible with PostgreSQL.
 
 ## Configuration
 
@@ -22,19 +22,19 @@ package main
 import (
 	"context"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	// Create a new Kite app
-	app := kite.New()
+	// Create a new Pi app
+	app := pi.New()
 	
 	app.GET("/user", GetUser)
 	
 	app.Run()
 }
 
-func GetUser(ctx *kite.Context)(any, error){
+func GetUser(ctx *pi.Context)(any, error){
 	// Example: Performing a simple query
 	rows, err := ctx.SQL.QueryContext(context.Background(), "SELECT 1")
 	if err != nil {

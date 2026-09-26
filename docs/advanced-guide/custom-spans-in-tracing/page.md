@@ -1,6 +1,6 @@
 # Custom Spans In Tracing
 
-Kite's built-in tracing provides valuable insights into application's behavior. However, sometimes we might need 
+Pi's built-in tracing provides valuable insights into application's behavior. However, sometimes we might need
 even more granular details about specific operations within your application. This is where `custom spans` can be used.
 
 ## How it helps?
@@ -15,7 +15,7 @@ By adding custom spans in traces to our requests, we can:
 
 ## Usage
 
-To add a custom trace to a request, Kite context provides `Trace()` method, which takes the name of the span as an argument 
+To add a custom trace to a request, Pi context provides `Trace()` method, which takes the name of the span as an argument
 and returns a trace.Span. 
 
 ```go
@@ -31,4 +31,4 @@ func MyHandler(c context.Context) error {
 In this example, **my-custom-span** is the name of the custom span that is added to the request.
 The defer statement ensures that the span is closed even if an error occurs to ensure that the trace is properly recorded.
 
-> ##### Check out the example of creating a custom span in Kite: [Visit GitHub](https://github.com/kite-dev/kite/blob/main/examples/http-server/main.go#L58)
+> ##### Check out the example of creating a custom span in Pi: [Visit GitHub](https://github.com/kite-dev/pi/blob/main/examples/http-server/main.go#L58)

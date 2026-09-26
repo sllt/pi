@@ -1,13 +1,13 @@
-# Kite Context
+# Pi Context
 
-Kite context is an object injected by the Kite handler. It contains all the request-specific data, for each
+Pi context is an object injected by the Pi handler. It contains all the request-specific data, for each
 request-response cycle a new context is created. The request can be either an HTTP request, gRPC call or
 a message from Pub-Sub.
-Kite Context also embeds the **_container_** which maintains all the dependencies like databases, logger, HTTP service clients,
+Pi Context also embeds the **_container_** which maintains all the dependencies like databases, logger, HTTP service clients,
 metrics manager, etc. This reduces the complexity of the application as users don't have to maintain and keep track of
 all the dependencies by themselves.
 
-Kite context is an extension of the Go context, providing a wrapper around the request and response providing
+Pi context is an extension of the Go context, providing a wrapper around the request and response providing
 user access to dependencies.
 
 # Usage
@@ -93,8 +93,8 @@ values := ctx.Request.Params("category")
 
 ## Accessing Authentication Information
 
-Kite provides a helper method to access authentication details from the context.
-These values are populated when the respective authentication middleware is enabled (see [HTTP Auth Middleware](https://github.com/kite-dev/kite/blob/0845d19181d2cc55e12c557fc9ad51adb4ab44fd/examples/using-http-auth-middleware/ReadMe.md) section).
+Pi provides a helper method to access authentication details from the context.
+These values are populated when the respective authentication middleware is enabled (see [HTTP Auth Middleware](https://github.com/kite-dev/pi/blob/0845d19181d2cc55e12c557fc9ad51adb4ab44fd/examples/using-http-auth-middleware/ReadMe.md) section).
 
 ```go
 info := ctx.GetAuthInfo()
@@ -126,6 +126,6 @@ info := ctx.GetAuthInfo()
 
 ## Accessing dependencies
 
-Kite context embeds the container object which provides access to
+Pi context embeds the container object which provides access to
 all the injected dependencies by the users. Users can access the fields and methods provided
 by the **_container_**.

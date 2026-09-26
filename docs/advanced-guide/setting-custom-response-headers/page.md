@@ -1,6 +1,6 @@
-# Custom Response Headers and Metadata in Kite
+# Custom Response Headers and Metadata in Pi
 
-Kite simplifies the process of adding custom HTTP response headers and metadata to API responses using the `Response` struct. This feature allows you to include additional information such as custom headers or metadata to enhance client-server communication while keeping your data payload clean and structured.
+Pi simplifies the process of adding custom HTTP response headers and metadata to API responses using the `Response` struct. This feature allows you to include additional information such as custom headers or metadata to enhance client-server communication while keeping your data payload clean and structured.
 
 ## Features
 
@@ -47,19 +47,19 @@ package main
 import (
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/http/response"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/http/response"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.GET("/hello", HelloHandler)
 
 	app.Run()
 }
 
-func HelloHandler(c *kite.Context) (any, error) {
+func HelloHandler(c *pi.Context) (any, error) {
 	name := c.Param("name")
 	if name == "" {
 		c.Log("Name parameter is empty, defaulting to 'World'")

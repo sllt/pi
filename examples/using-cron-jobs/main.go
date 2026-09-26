@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 var (
@@ -15,7 +15,7 @@ var (
 const duration = 3
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// runs every second
 	app.AddCronJob("* * * * * *", "counter", count)
@@ -29,7 +29,7 @@ func main() {
 	// app.Run()
 }
 
-func count(c *kite.Context) {
+func count(c *pi.Context) {
 	mu.Lock()
 	defer mu.Unlock()
 

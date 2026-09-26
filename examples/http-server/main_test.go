@@ -1,18 +1,18 @@
 package main
 
-// This test file demonstrates how to test handlers in Kite.
+// This test file demonstrates how to test handlers in Pi.
 //
 // Key Concepts:
-// 1. Kite wraps http.Request using kiteHTTP.NewRequest(req)
-// 2. Handlers receive kite.Context which contains the wrapped request
+// 1. Pi wraps http.Request using piHTTP.NewRequest(req)
+// 2. Handlers receive pi.Context which contains the wrapped request
 // 3. Use mux.SetURLVars() to set path parameters for ctx.PathParam()
 // 4. Each HTTP service registered with WithMockHTTPService gets its own separate mock instance
 // 5. Expectations set on one service do NOT affect other services
 // 6. Always use mocks.HTTPServices["serviceName"] when you have multiple services
 //
 // For detailed documentation, see:
-// - https://github.com/sllt/kite/docs/references/testing (Official Kite Testing Guide)
-// - https://github.com/sllt/kite/docs/references/context (Kite Context Documentation)
+// - https://github.com/sllt/pi/docs/references/testing (Official Pi Testing Guide)
+// - https://github.com/sllt/pi/docs/references/context (Pi Context Documentation)
 
 import (
 	"context"
@@ -32,17 +32,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/config"
-	"github.com/sllt/kite/pkg/kite/infra"
-	"github.com/sllt/kite/pkg/kite/datasource/redis"
-	kiteHTTP "github.com/sllt/kite/pkg/kite/http"
-	"github.com/sllt/kite/pkg/kite/logging"
-	"github.com/sllt/kite/pkg/kite/testutil"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/config"
+	"github.com/sllt/pi/pkg/pi/datasource/redis"
+	piHTTP "github.com/sllt/pi/pkg/pi/http"
+	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Setenv("KITE_TELEMETRY", "false")
+	os.Setenv("PI_TELEMETRY", "false")
 	m.Run()
 }
 
@@ -64,7 +64,7 @@ func TestIntegration_SimpleAPIServer(t *testing.T) {
 		body any
 	}{
 		{"hello handler", "/hello", "Hello World!"},
-		{"hello handler with query parameter", "/hello?name=kite", "Hello kite!"},
+		{"hello handler with query parameter", "/hello?name=pi", "Hello pi!"},
 		{"redis handler", "/redis", ""},
 		{"mysql handler", "/mysql", float64(4)},
 	}
@@ -202,7 +202,7 @@ func TestRedisHandler(t *testing.T) {
 	t.Setenv("METRICS_PORT", strconv.Itoa(metricsPort))
 	t.Setenv("HTTP_PORT", strconv.Itoa(httpPort))
 
-	a := kite.New()
+	a := pi.New()
 	logger := logging.NewLogger(logging.DEBUG)
 	redisClient, mock := redismock.NewClientMock()
 
@@ -211,7 +211,7 @@ func TestRedisHandler(t *testing.T) {
 
 	mock.ExpectGet("test").SetErr(testutil.CustomError{ErrorMessage: "redis get error"})
 
-	ctx := &kite.Context{Context: context.Background(),
+	ctx := &pi.Context{Context: context.Background(),
 		Request: nil, Container: &infra.Container{Logger: logger, Redis: rc}}
 
 	resp, err := RedisHandler(ctx)
@@ -272,18 +272,18 @@ func (m *MockRequest) Bind(i any) error {
 	return nil
 }
 
-// createTestContext sets up a Kite context for unit tests with a given URL and optional mock container.
-// This demonstrates how Kite wraps http.Request into kite.Request.
+// createTestContext sets up a Pi context for unit tests with a given URL and optional mock container.
+// This demonstrates how Pi wraps http.Request into pi.Request.
 //
 // Note: For path parameters, use mux.SetURLVars() before calling this function.
 // See TestHandler_WithPathParams example for usage with path parameters.
-func createTestContext(method, url string, mockContainer *infra.Container) *kite.Context {
+func createTestContext(method, url string, mockContainer *infra.Container) *pi.Context {
 	// Create standard HTTP request
 	req := httptest.NewRequest(method, url, nil)
 	req.Header.Set("Content-Type", "application/json")
 
-	// Wrap with Kite's Request wrapper (this is how Kite wraps requests)
-	kiteReq := kiteHTTP.NewRequest(req)
+	// Wrap with Pi's Request wrapper (this is how Pi wraps requests)
+	piReq := piHTTP.NewRequest(req)
 
 	var c *infra.Container
 	if mockContainer != nil {
@@ -294,9 +294,9 @@ func createTestContext(method, url string, mockContainer *infra.Container) *kite
 
 	logger := c.Logger
 
-	return &kite.Context{
+	return &pi.Context{
 		Context:       req.Context(),
-		Request:       kiteReq,
+		Request:       piReq,
 		Container:     c,
 		ContextLogger: *logging.NewContextLogger(req.Context(), logger),
 	}
@@ -366,7 +366,7 @@ func TestTraceHandler(t *testing.T) {
 
 	// Now ctx.Context has been modified by both Trace() calls, matching what TraceHandler does
 	// TraceHandler calls: c.GetHTTPService("anotherService").Get(c, "redis", nil)
-	// When passing 'c' (*kite.Context) to Get(), Go uses the embedded context.Context
+	// When passing 'c' (*pi.Context) to Get(), Go uses the embedded context.Context
 	// which is now the modified context after both Trace() calls
 	mocks.HTTPServices["anotherService"].EXPECT().Get(
 		ctx.Context, // Use the context after both Trace() calls (use gomock.Any to avoid this!)

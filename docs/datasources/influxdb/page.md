@@ -1,5 +1,5 @@
 # InfluxDB
-Kite supports injecting InfluxDB using an interface that defines the necessary methods to interact with InfluxDB v2+.  
+Pi supports injecting InfluxDB using an interface that defines the necessary methods to interact with InfluxDB v2+.
 Any driver that implements this interface can be injected via the `app.AddInfluxDB()` method.
 
 ---
@@ -27,10 +27,10 @@ type InfluxDB interface {
 
 This structure supports all essential InfluxDB operations including organization/bucket management, health checks, and metrics ingestion.
 
-Import the kite's external driver for influxdb: 
+Import the pi's external driver for influxdb:
 
 ```bash
-go get github.com/sllt/kite/pkg/kite/datasource/influxdb@latest
+go get github.com/sllt/pi/pkg/pi/datasource/influxdb@latest
 ```
 
 ## Example
@@ -42,14 +42,14 @@ import (
 "fmt"
 "time"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/influxdb"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/influxdb"
 )
 
 func main() {
 	
-    // Create a new Kite application
-    app := kite.New() 
+    // Create a new Pi application
+    app := pi.New()
 	
 	// Initialize InfluxDB client
 	client := influxdb.New(influxdb.Config{
@@ -63,7 +63,7 @@ func main() {
 	app.AddInfluxDB(client)
 
 	// Sample route
-	app.GET("/greet", func(ctx *kite.Context) (any, error) {
+	app.GET("/greet", func(ctx *pi.Context) (any, error) {
 		return "Hello World!", nil
 	})
 

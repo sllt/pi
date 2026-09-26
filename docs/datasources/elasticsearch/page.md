@@ -8,7 +8,7 @@ To connect to `Elasticsearch`, you need to provide the following environment var
 
 ## Setup
 
-Kite supports injecting Elasticsearch with an interface that defines the 
+Pi supports injecting Elasticsearch with an interface that defines the
 necessary methods for interacting with Elasticsearch. 
 Any driver that implements the following interface can be added using 
 the app.AddElasticsearch() method.
@@ -52,10 +52,10 @@ Users can easily inject a driver that supports this interface, allowing for flex
 without compromising usability. This structure supports all common Elasticsearch 
 operations including indexing, searching, and document management.
 
-Import the kite's external driver for Elasticsearch:
+Import the pi's external driver for Elasticsearch:
 
 ```shell
-go get github.com/sllt/kite/pkg/kite/datasource/elasticsearch@latest
+go get github.com/sllt/pi/pkg/pi/datasource/elasticsearch@latest
 ```
 
 ### Example
@@ -67,13 +67,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/datasource/elasticsearch"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/datasource/elasticsearch"
 )
 
 func main() {
 	// Create a new application
-	app := kite.New()
+	app := pi.New()
 
 	// Create Elasticsearch client with configuration
 	es := elasticsearch.New(elasticsearch.Config{
@@ -95,7 +95,7 @@ func main() {
 }
 
 // CreateDocumentHandler handles POST requests to create documents in Elasticsearch
-func CreateDocumentHandler(c *kite.Context) (any, error) {
+func CreateDocumentHandler(c *pi.Context) (any, error) {
 	// Parse request body
 	var document map[string]any
 	if err := json.NewDecoder(c.Request().Body).Decode(&document); err != nil {
@@ -118,11 +118,11 @@ func CreateDocumentHandler(c *kite.Context) (any, error) {
 }
 
 // GetDocumentHandler handles GET requests to retrieve documents from Elasticsearch
-func GetDocumentHandler(c *kite.Context) (any, error) {
+func GetDocumentHandler(c *pi.Context) (any, error) {
 	// Get document ID from URL parameter
 	id := c.PathParam("id")
 	if id == "" {
-		return nil, kite.NewError(http.StatusBadRequest, "document ID is required")
+		return nil, pi.NewError(http.StatusBadRequest, "document ID is required")
 	}
 
 	// Retrieve the document from Elasticsearch
@@ -135,7 +135,7 @@ func GetDocumentHandler(c *kite.Context) (any, error) {
 }
 
 // SearchDocumentsHandler handles GET requests to search documents in Elasticsearch
-func SearchDocumentsHandler(c *kite.Context) (any, error) {
+func SearchDocumentsHandler(c *pi.Context) (any, error) {
 	query := c.Param("q")
 	
 	// Build search query

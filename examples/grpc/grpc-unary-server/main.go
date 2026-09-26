@@ -1,14 +1,14 @@
 package main
 
 import (
-	"github.com/sllt/kite/examples/grpc/grpc-unary-server/server"
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/examples/grpc/grpc-unary-server/server"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
-	server.RegisterHelloServerWithKite(app, server.NewHelloKiteServer())
+	server.RegisterHelloServerWithPi(app, server.NewHelloPiServer())
 
 	app.Run()
 }

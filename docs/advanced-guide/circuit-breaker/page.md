@@ -6,7 +6,7 @@ In such scenarios, it's crucial for applications to recognize when an operation 
 
 To prevent this, a defense mechanism like the circuit breaker pattern is essential. Unlike the "Retry pattern" which aims to eventually succeed, the circuit breaker pattern focuses on preventing futile operations. While these patterns can be used together, it's vital for the retry logic to be aware of the circuit breaker's feedback and cease retries if the circuit breaker indicates a non-transient fault.
 
-Kite inherently provides the functionality, it can be enabled by passing circuit breaker configs as options to `AddHTTPService()` method.
+Pi inherently provides the functionality, it can be enabled by passing circuit breaker configs as options to `AddHTTPService()` method.
 
 ## How It Works:
 
@@ -16,9 +16,9 @@ The circuit breaker tracks consecutive failed requests for a downstream service.
 
 
 
-- **Interval:** Once the circuit is open, Kite starts a background goroutine that periodically checks the health of the service by making requests to its aliveness endpoint (by default: `/.well-known/alive`) at the specified interval. When the service is deemed healthy again, the circuit breaker transitions directly from **Open** to **Closed**, allowing requests to resume.
+- **Interval:** Once the circuit is open, Pi starts a background goroutine that periodically checks the health of the service by making requests to its aliveness endpoint (by default: `/.well-known/alive`) at the specified interval. When the service is deemed healthy again, the circuit breaker transitions directly from **Open** to **Closed**, allowing requests to resume.
 
-> Kite's circuit breaker implementation does not use a **Half-Open** state. Instead, it relies on periodic asynchronous health checks to determine service recovery.
+> Pi's circuit breaker implementation does not use a **Half-Open** state. Instead, it relies on periodic asynchronous health checks to determine service recovery.
 
 ## Failure Conditions
 
@@ -60,13 +60,13 @@ package main
 import (
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/service"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/service"
 )
 
 func main() {
 	// Create a new application
-	app := kite.New()
+	app := pi.New()
 
 	app.AddHTTPService("order", "https://order-func",
 		&service.CircuitBreakerConfig{
@@ -85,10 +85,10 @@ func main() {
 ```
 
 Circuit breaker state changes to open when number of consecutive failed requests increases the threshold.
-When it is in open state, Kite makes request to the health endpoint (default being - /.well-known/alive, or the custom endpoint if configured) at an equal interval of time provided in config.
+When it is in open state, Pi makes request to the health endpoint (default being - /.well-known/alive, or the custom endpoint if configured) at an equal interval of time provided in config.
 
-Kite publishes the following metric to track circuit breaker state:
+Pi publishes the following metric to track circuit breaker state:
 
 - `app_http_circuit_breaker_state`: Current state of the circuit breaker (0 for Closed, 1 for Open). This metric is used to visualize a historical timeline of circuit transitions on the dashboard.
 
-> ##### Check out the example of an inter-service HTTP communication along with circuit-breaker in Kite: [Visit GitHub](https://github.com/kite-dev/kite/blob/main/examples/using-http-service/main.go)
+> ##### Check out the example of an inter-service HTTP communication along with circuit-breaker in Pi: [Visit GitHub](https://github.com/kite-dev/pi/blob/main/examples/using-http-service/main.go)

@@ -1,5 +1,5 @@
 syntax = "proto3";
-option go_package = "github.com/sllt/kite/examples/grpc/grpc-server/server";
+option go_package = "github.com/sllt/pi/examples/grpc/grpc-server/server";
 
 message HelloRequest {
   string name = 1;

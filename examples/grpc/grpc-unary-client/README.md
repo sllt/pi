@@ -1,6 +1,6 @@
 # gRPC Unary Client Example
 
-This Kite example demonstrates a simple gRPC unary client that communicates with another gRPC service hosted on a different machine. It serves as a client for another gRPC example included in this examples folder.
+This Pi example demonstrates a simple gRPC unary client that communicates with another gRPC service hosted on a different machine. It serves as a client for another gRPC example included in this examples folder.
 Refer to the documentation to setup
 
 ### Steps to Run the Example

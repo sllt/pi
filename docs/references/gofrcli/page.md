@@ -1,13 +1,13 @@
-# Kite Command Line Interface
+# Pi Command Line Interface
 
 Managing repetitive tasks and maintaining consistency across large-scale applications is challenging!
 
-**Kite CLI provides the following:**
+**Pi CLI provides the following:**
 
-* All-in-one command-line tool designed specifically for Kite applications
+* All-in-one command-line tool designed specifically for Pi applications
 * Simplifies **database migrations** management
-* Abstracts **tracing**, **metrics** and structured **logging** for Kite's gRPC server/client
-* Enforces standard **Kite conventions** in new projects
+* Abstracts **tracing**, **metrics** and structured **logging** for Pi's gRPC server/client
+* Enforces standard **Pi conventions** in new projects
 
 ## Prerequisites
 
@@ -17,15 +17,15 @@ Managing repetitive tasks and maintaining consistency across large-scale applica
 ```
 
 ## **Installation**
-To get started with Kite CLI, use the below commands
+To get started with Pi CLI, use the below commands
 
 ```bash
-  go install github.com/sllt/kite/cli/kite@latest
+  go install github.com/sllt/pi/cli/pi@latest
 ```
 
 To check the installation:
 ```bash
-  kite version
+  pi version
 ```
 ---
 
@@ -34,7 +34,7 @@ To check the installation:
 The CLI can be run directly from the terminal after installation. Here’s the general syntax:
 
 ```bash
-  kite <subcommand> [flags]=[arguments]
+  pi <subcommand> [flags]=[arguments]
 ```
 ---
 
@@ -42,11 +42,11 @@ The CLI can be run directly from the terminal after installation. Here’s the g
 
 ## 1. ***`init`***
 
-   The init command initializes a new Kite project. It sets up the foundational structure for the project and generates a basic "Hello World!" program as a starting point. This allows developers to quickly dive into building their application with a ready-made structure.
+   The init command initializes a new Pi project. It sets up the foundational structure for the project and generates a basic "Hello World!" program as a starting point. This allows developers to quickly dive into building their application with a ready-made structure.
 
 ### Command Usage
 ```bash
-  kite init
+  pi init
 ```
 ---
 
@@ -58,13 +58,13 @@ The CLI can be run directly from the terminal after installation. Here’s the g
 
 ### Command Usage
 ```bash
-  kite migrate create -name=<migration-name>
+  pi migrate create -name=<migration-name>
 ```
 
 ### Example Usage
 
 ```bash
-kite migrate create -name=create_employee_table
+pi migrate create -name=create_employee_table
 ```
 This command generates a migration directory which has the below files:
 
@@ -73,7 +73,7 @@ This command generates a migration directory which has the below files:
 package migrations
 
 import (
-    "github.com/sllt/kite/pkg/kite/migration"
+    "github.com/sllt/pi/pkg/pi/migration"
 )
 
 func create_employee_table() migration.Migrate {
@@ -87,11 +87,11 @@ func create_employee_table() migration.Migrate {
 ```
 2. An auto-generated all.go file that maintains a registry of all migrations:
 ```go
-// This is auto-generated file using 'kite migrate' tool. DO NOT EDIT.
+// This is auto-generated file using 'pi migrate' tool. DO NOT EDIT.
 package migrations
 
 import (
-    "github.com/sllt/kite/pkg/kite/migration"
+    "github.com/sllt/pi/pkg/pi/migration"
 )
 
 func All() map[int64]migration.Migrate {
@@ -104,23 +104,23 @@ func All() map[int64]migration.Migrate {
 > **💡 Best Practice:** Learn about [organizing migrations by feature](../../docs/advanced-guide/handling-data-migrations#organizing-migrations-by-feature) to avoid creating one migration per table or operation.
 
 For detailed instructions on handling database migrations, see the [handling-data-migrations documentation](../../docs/advanced-guide/handling-data-migrations)
-For more examples, see the [using-migrations](https://github.com/kite-dev/kite/tree/main/examples/using-migrations)
+For more examples, see the [using-migrations](https://github.com/kite-dev/pi/tree/main/examples/using-migrations)
 ---
 
 ## 3. ***`wrap grpc`***
 
-   * The kite wrap grpc command streamlines gRPC integration in a Kite project by generating Kite's context-aware structures.
-   * It simplifies setting up gRPC handlers with minimal steps, and accessing datasources, adding tracing as well as custom metrics. Based on the proto file it creates the handler/client with Kite's context.
-   For detailed instructions on using grpc with Kite see the [gRPC documentation](../../advanced-guide/grpc/page.md)
+   * The pi wrap grpc command streamlines gRPC integration in a Pi project by generating Pi's context-aware structures.
+   * It simplifies setting up gRPC handlers with minimal steps, and accessing datasources, adding tracing as well as custom metrics. Based on the proto file it creates the handler/client with Pi's context.
+   For detailed instructions on using grpc with Pi see the [gRPC documentation](../../advanced-guide/grpc/page.md)
 
 ### Command Usage
 **gRPC Server**
 ```bash
-  kite wrap grpc server --proto=<path_to_the_proto_file>
+  pi wrap grpc server --proto=<path_to_the_proto_file>
 ```
 ### Generated Files
 **Server**
-- ```{serviceName}_kite.go (auto-generated; do not modify)```
+- ```{serviceName}_pi.go (auto-generated; do not modify)```
 - ```{serviceName}_server.go (example structure below)```
 
 ### Example Usage
@@ -131,12 +131,12 @@ The command generates a server implementation template similar to this:
 package server
 
 import (
-   "github.com/sllt/kite/pkg/kite"
+   "github.com/sllt/pi/pkg/pi"
 )
 
 // Register the gRPC service in your app using the following code in your main.go:
 //
-// service.Register{ServiceName}ServerWithKite(app, &server.{ServiceName}Server{})
+// service.Register{ServiceName}ServerWithPi(app, &server.{ServiceName}Server{})
 //
 // {ServiceName}Server defines the gRPC server implementation.
 // Customize the struct with required dependencies and fields as needed.
@@ -144,17 +144,17 @@ type {ServiceName}Server struct {
 }
 
 // Example method (actual methods will depend on your proto file)
-func (s *MyServiceServer) MethodName(ctx *kite.Context) (any, error) {
+func (s *MyServiceServer) MethodName(ctx *pi.Context) (any, error) {
    // Replace with actual logic if needed
    return &ServiceResponse{
    }, nil
 }
 ```
-For detailed instruction on setting up a gRPC server with Kite see the [gRPC Server Documentation](https://github.com/sllt/kite/docs/advanced-guide/grpc#generating-g-rpc-server-handler-template-using)
+For detailed instruction on setting up a gRPC server with Pi see the [gRPC Server Documentation](https://github.com/sllt/pi/docs/advanced-guide/grpc#generating-g-rpc-server-handler-template-using)
 
 **gRPC Client**
 ```bash
-  kite wrap grpc client --proto=<path_to_the_proto_file>
+  pi wrap grpc client --proto=<path_to_the_proto_file>
 ```
 
 **Client**
@@ -166,16 +166,16 @@ Assuming the service is named hello, after generating the hello_client.go file, 
 
 ```go
 type GreetHandler struct {
-	helloGRPCClient client.HelloKiteClient
+	helloGRPCClient client.HelloPiClient
 }
 
-func NewGreetHandler(helloClient client.HelloKiteClient) *GreetHandler {
+func NewGreetHandler(helloClient client.HelloPiClient) *GreetHandler {
     return &GreetHandler{
         helloGRPCClient: helloClient,
     }
 }
 
-func (g GreetHandler) Hello(ctx *kite.Context) (any, error) {
+func (g GreetHandler) Hello(ctx *pi.Context) (any, error) {
     userName := ctx.Param("name")
     helloResponse, err := g.helloGRPCClient.SayHello(ctx, &client.HelloRequest{Name: userName})
     if err != nil {
@@ -186,10 +186,10 @@ func (g GreetHandler) Hello(ctx *kite.Context) (any, error) {
 }
 
 func main() {
-    app := kite.New()
+    app := pi.New()
 
 // Create a gRPC client for the Hello service
-    helloGRPCClient, err := client.NewHelloKiteClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
+    helloGRPCClient, err := client.NewHelloPiClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
     if err != nil {
 		app.Logger().Errorf("Failed to create Hello gRPC client: %v", err)
     return
@@ -204,5 +204,5 @@ func main() {
     app.Run()
 }
 ```
-For detailed instruction on setting up a gRPC server with Kite see the [gRPC Client Documentation](https://github.com/sllt/kite/docs/advanced-guide/grpc#generating-tracing-enabled-g-rpc-client-using)
-For more examples refer [gRPC Examples](https://github.com/kite-dev/kite/tree/main/examples/grpc)
+For detailed instruction on setting up a gRPC server with Pi see the [gRPC Client Documentation](https://github.com/sllt/pi/docs/advanced-guide/grpc#generating-tracing-enabled-g-rpc-client-using)
+For more examples refer [gRPC Examples](https://github.com/kite-dev/pi/tree/main/examples/grpc)

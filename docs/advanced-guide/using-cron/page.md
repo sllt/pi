@@ -18,7 +18,7 @@ that needs to be run at that schedule. The cron schedule is expressed in the fol
 
 `minute hour day_of_month month day_of_week`
 
-Kite also allows an optional field for `second` as first part in the schedule format, like in the following format:
+Pi also allows an optional field for `second` as first part in the schedule format, like in the following format:
 
 `second minute hour day_of_month month day_of_week`
 
@@ -26,20 +26,20 @@ Each field can take a specific value or combination of values to define the sche
 `*` (asterisk) to represent **any** value and `,` (comma) to separate multiple values. It also supports `0-n` to define a
 range of values for which the cron should run and `*/n` to define number of times the cron should run. Here n is an integer.
 
-## Adding cron jobs in Kite applications
-Adding cron jobs to Kite applications is made easy with a simple injection of user's function to the cron table maintained
-by the Kite. The minimum time difference between cron job's two consecutive runs is a minute as it is the least significant
+## Adding cron jobs in Pi applications
+Adding cron jobs to Pi applications is made easy with a simple injection of user's function to the cron table maintained
+by the Pi. The minimum time difference between cron job's two consecutive runs is a minute as it is the least significant
 scheduling time parameter.
 
 Cron job with generic format:
 ```go
-app.AddCronJob("* * * * *", "job-name", func(ctx *kite.Context) {
+app.AddCronJob("* * * * *", "job-name", func(ctx *pi.Context) {
 	// the cron job that needs to be executed at every minute
 })
 ```
 Cron job with optional second in format: 
 ```go
-app.AddCronJob("* * * * * *", "job-name", func(ctx *kite.Context) {
+app.AddCronJob("* * * * * *", "job-name", func(ctx *pi.Context) {
     // the cron job that needs to be executed at every second
 })
 ```
@@ -54,19 +54,19 @@ package main
 import (
 	"time"
 
-	"github.com/sllt/kite/pkg/kite"
+	"github.com/sllt/pi/pkg/pi"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	// Run the cron job every 5 hours(*/5)
-	app.AddCronJob("* */5 * * *", "", func(ctx *kite.Context) {
+	app.AddCronJob("* */5 * * *", "", func(ctx *pi.Context) {
 		ctx.Logger.Infof("current time is %v", time.Now())
 	})
 
 	// Run the cron job every 10 seconds(*/10)
-	app.AddCronJob("*/10 * * * * *", "", func(ctx *kite.Context) {
+	app.AddCronJob("*/10 * * * * *", "", func(ctx *pi.Context) {
 		ctx.Logger.Infof("current time is %v", time.Now())
 	})
 
@@ -74,4 +74,4 @@ func main() {
 }
 ```
 
-> #### Check out the example on how to add cron jobs in Kite: [Visit GitHub](https://github.com/kite-dev/kite/blob/main/examples/using-cron-jobs/main.go)
+> #### Check out the example on how to add cron jobs in Pi: [Visit GitHub](https://github.com/kite-dev/pi/blob/main/examples/using-cron-jobs/main.go)

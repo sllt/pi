@@ -6,12 +6,12 @@ import (
 	"mime/multipart"
 	"os"
 
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/file"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/file"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 
 	app.POST("/upload", UploadHandler)
 
@@ -33,7 +33,7 @@ type Data struct {
 	FileHeader *multipart.FileHeader `file:"file_upload"`
 }
 
-func UploadHandler(c *kite.Context) (any, error) {
+func UploadHandler(c *pi.Context) (any, error) {
 	var d Data
 
 	// bind the multipart data into the variable d

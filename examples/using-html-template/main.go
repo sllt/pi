@@ -1,12 +1,12 @@
 package main
 
 import (
-	"github.com/sllt/kite/pkg/kite"
-	"github.com/sllt/kite/pkg/kite/http/response"
+	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/http/response"
 )
 
 func main() {
-	app := kite.New()
+	app := pi.New()
 	app.GET("/list", listHandler)
 	app.AddStaticFiles("/", "./static")
 	app.Run()
@@ -22,12 +22,12 @@ type TodoPageData struct {
 	Todos     []Todo
 }
 
-func listHandler(*kite.Context) (any, error) {
+func listHandler(*pi.Context) (any, error) {
 	// Get data from somewhere
 	data := TodoPageData{
 		PageTitle: "My TODO list",
 		Todos: []Todo{
-			{Title: "Expand on Kite documentation ", Done: false},
+			{Title: "Expand on Pi documentation ", Done: false},
 			{Title: "Add more examples", Done: true},
 			{Title: "Write some articles", Done: false},
 		},
