@@ -1,5 +1,25 @@
 # Pi
 
+### Reproducible projects (v0.3.2)
+
+Install a specific CLI (`go install github.com/sllt/pi/cmd/pi@v0.3.2`), then run
+`pi init --module example.com/company/orders ./orders`. The default template ref
+matches the CLI version. `--ref` selects another tag/commit explicitly. Generated
+`.pi-template.json` records the CLI, framework, template ref/commit and verification
+result. Imports, proto options and serialized protobuf metadata use your module.
+Initialization builds with `-mod=readonly` in a temporary directory before delivery.
+`--offline --template /path/to/local/git-template` skips build verification and
+records `verified: false`; it never reports a verified application.
+
+Generators render/format before writing. Existing handwritten skeletons are
+preserved; wrapper regeneration replaces only files marked as generated. An init
+directory is delivered by rename; multi-file regeneration is not a filesystem
+transaction, so an uncatchable SIGKILL may require rerunning the generator.
+Use `make unit`, `make race`, `make generator` and `make modules` for separate
+checks. `make integration` enables migration real-backend checks when their
+`PI_MIGRATION_TEST_*` variables point to disposable databases. Independent adapter
+module builds are separate from the root module and do not certify backend behavior.
+
 一个为微服务开发而设计的 Go 语言框架。
 
 项目已由 Kite 更名为 Pi，CLI 命令为 `pi`，脚手架为 [pi-layout](https://github.com/sllt/pi-layout)。新 module 从 v0.2.4 开始发布；v0.3.0 提供 Migration v2，见[发布说明](docs/releases/v0.3.0.zh-CN.md)和[迁移兼容性](docs/design/migration-v2.zh-CN.md)。历史 `v0.2.3` 仍使用旧路径。

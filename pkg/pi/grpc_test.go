@@ -458,8 +458,7 @@ func TestApp_InterceptorOrderingWithServiceRegistration(t *testing.T) {
 	assert.False(t, g.serverCreated)
 
 	// Run should create server with all interceptors
-	go g.Run(c)
-	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, g.Run(c))
 
 	assert.True(t, g.serverCreated)
 	assert.Len(t, g.interceptors, 3) // 2 default + 1 test

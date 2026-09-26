@@ -366,8 +366,9 @@ func Test_SQLRetryConnectionInfoLog(t *testing.T) {
 
 		mockLogger := logging.NewMockLogger(logging.DEBUG)
 
-		mockMetrics.EXPECT().SetGauge("app_sql_open_connections", float64(0))
-		mockMetrics.EXPECT().SetGauge("app_sql_inUse_connections", float64(0))
+		// A retry may already have allocated a connection when metrics sample it.
+		mockMetrics.EXPECT().SetGauge("app_sql_open_connections", gomock.Any()).AnyTimes()
+		mockMetrics.EXPECT().SetGauge("app_sql_inUse_connections", gomock.Any()).AnyTimes()
 
 		_ = NewSQL(mockConfig, mockLogger, mockMetrics)
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/sllt/pi/pkg/pi/cli/bootstrap"
 	"github.com/sllt/pi/pkg/pi/cli/create"
@@ -21,6 +23,12 @@ func main() {
 			{
 				Name:  "init",
 				Usage: "Initialize a new Pi project",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "module", Usage: "Go module path (independent of destination directory)"},
+					&cli.StringFlag{Name: "ref", Usage: "Template Git tag or commit (default: CLI version)"},
+					&cli.StringFlag{Name: "template", Usage: "Template Git repository"},
+					&cli.BoolFlag{Name: "offline", Usage: "Use a local template; do not claim build verification"},
+				},
 				Arguments: []cli.Argument{
 					&cli.StringArg{
 						Name: "project-name",
@@ -31,7 +39,7 @@ func main() {
 					if name == "" {
 						return fmt.Errorf("please provide a project name, e.g.: pi init myproject")
 					}
-					return bootstrap.Create(name)
+					return bootstrap.CreateContext(ctx, bootstrap.Options{Directory: name, Module: cmd.String("module"), Ref: cmd.String("ref"), Template: cmd.String("template"), Offline: cmd.Bool("offline")})
 				},
 			},
 			{
@@ -157,7 +165,9 @@ func main() {
 		},
 	}
 
-	if err := app.Run(context.Background(), os.Args); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := app.Run(ctx, os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

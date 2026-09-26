@@ -2,128 +2,188 @@ package bootstrap
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"go/format"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/sllt/pi/pkg/pi/version"
 )
 
-const (
-	repoURL        = "https://github.com/sllt/pi-layout.git"
-	oldPackageName = "github.com/sllt/pi-layout"
-)
+const repoURL = "https://github.com/sllt/pi-layout.git"
+const oldPackageName = "github.com/sllt/pi-layout"
 
-var (
-	ErrNameEmpty     = errors.New("please provide the project name")
-	ErrCloneFailed   = errors.New("failed to clone pi-layout repository")
-	ErrReplaceFailed = errors.New("failed to replace package name")
-	ErrModEditFailed = errors.New("failed to update go.mod module name")
-	ErrModTidyFailed = errors.New("failed to run go mod tidy")
-	ErrProjectExists = errors.New("project directory already exists")
-)
+var ErrNameEmpty = errors.New("please provide the project directory")
+var ErrProjectExists = errors.New("project directory already exists")
 
-// Create initializes a new Pi project by cloning pi-layout and replacing package names.
-func Create(projectName string) error {
-	if projectName == "" {
+// Options separates the filesystem destination from the Go module identity.
+// Offline requires a local Git template and skips dependency/build verification.
+type Options struct {
+	Directory string
+	Module    string
+	Ref       string
+	Template  string
+	Offline   bool
+}
+
+func Create(directory string) error {
+	return CreateContext(context.Background(), Options{Directory: directory})
+}
+
+func CreateContext(ctx context.Context, o Options) error {
+	if o.Directory == "" {
 		return ErrNameEmpty
 	}
-
-	// Check if directory already exists
-	if stat, _ := os.Stat(projectName); stat != nil {
+	dest, err := filepath.Abs(o.Directory)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
 		return ErrProjectExists
 	}
-
-	// Step 1: Clone the repository
-	fmt.Printf("Cloning pi-layout from %s...\n", repoURL)
-	if err := gitClone(projectName); err != nil {
-		return fmt.Errorf("%w: %v", ErrCloneFailed, err)
+	if o.Module == "" {
+		o.Module = filepath.Base(dest)
 	}
-
-	// Step 2: Replace package names in all .go files
-	fmt.Printf("Replacing package name to %s...\n", projectName)
-	if err := replacePackageName(projectName); err != nil {
-		return fmt.Errorf("%w: %v", ErrReplaceFailed, err)
+	if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~+-]*(/[A-Za-z0-9][A-Za-z0-9._~+-]*)*$`).MatchString(o.Module) || strings.Contains(o.Module, "..") {
+		return fmt.Errorf("invalid Go module path %q", o.Module)
 	}
-
-	// Step 3: Update go.mod module name
-	fmt.Println("Updating go.mod module name...")
-	if err := updateGoMod(projectName); err != nil {
-		return fmt.Errorf("%w: %v", ErrModEditFailed, err)
+	if o.Ref == "" {
+		o.Ref = version.Framework
 	}
-
-	// Step 4: Remove .git directory
-	fmt.Println("Removing .git directory...")
-	os.RemoveAll(filepath.Join(projectName, ".git"))
-
-	// Step 5: Run go mod tidy
-	fmt.Println("Running go mod tidy...")
-	if err := goModTidy(projectName); err != nil {
-		fmt.Printf("Warning: go mod tidy failed: %v (you may need to run it manually)\n", err)
+	if strings.HasPrefix(o.Ref, "-") {
+		return errors.New("template ref cannot start with '-' ")
 	}
-
-	fmt.Printf("\nProject %s created successfully!\n\n", projectName)
-	fmt.Printf("Next steps:\n")
-	fmt.Printf("  cd %s\n", projectName)
-	fmt.Printf("  go run ./cmd/server\n\n")
-
-	return nil
-}
-
-// gitClone clones the pi-layout repository to the specified directory.
-func gitClone(projectName string) error {
-	cmd := exec.Command("git", "clone", repoURL, projectName)
-	output, err := cmd.CombinedOutput()
+	if o.Template == "" {
+		o.Template = repoURL
+	}
+	if o.Offline {
+		info, err := os.Stat(o.Template)
+		if err != nil || !info.IsDir() {
+			return errors.New("offline mode requires a local Git template directory")
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return err
+	}
+	stage, err := os.MkdirTemp(filepath.Dir(dest), ".pi-init-*")
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(output))
+		return err
 	}
-	return nil
-}
-
-// replacePackageName replaces all occurrences of the old package name with the new project name.
-func replacePackageName(projectName string) error {
-	return filepath.Walk(projectName, func(path string, info os.FileInfo, err error) error {
+	defer os.RemoveAll(stage)
+	project := filepath.Join(stage, "project")
+	if _, err = command(ctx, "", "git", "clone", "--no-checkout", "--", o.Template, project); err != nil {
+		return err
+	}
+	if _, err = command(ctx, project, "git", "checkout", "--detach", o.Ref); err != nil {
+		return err
+	}
+	commit, err := command(ctx, project, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if err = os.RemoveAll(filepath.Join(project, ".git")); err != nil {
+		return err
+	}
+	for _, name := range []string{"configs/.env", "go.work", "go.work.sum"} {
+		if err = os.Remove(filepath.Join(project, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	err = filepath.WalkDir(project, func(name string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("template symlink is not supported: %s", name)
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(name)
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if bytes.IndexByte(data, 0) >= 0 {
 			return nil
 		}
-		if filepath.Ext(path) != ".go" {
-			return nil
+		if strings.HasSuffix(name, ".pb.go") {
+			data, err = rewriteDescriptor(data, o.Module)
+			if err != nil {
+				return fmt.Errorf("protobuf metadata %s: %w", name, err)
+			}
 		}
-
-		data, err := os.ReadFile(path)
+		data = bytes.ReplaceAll(data, []byte(oldPackageName), []byte(o.Module))
+		if filepath.Ext(name) == ".go" {
+			data, err = format.Source(data)
+			if err != nil {
+				return fmt.Errorf("format %s: %w", name, err)
+			}
+		}
+		info, err := d.Info()
 		if err != nil {
 			return err
 		}
-
-		newData := bytes.ReplaceAll(data, []byte(oldPackageName), []byte(projectName))
-		if err := os.WriteFile(path, newData, 0644); err != nil {
-			return err
-		}
-		return nil
+		return os.WriteFile(name, data, info.Mode().Perm())
 	})
-}
-
-// updateGoMod updates the module name in go.mod.
-func updateGoMod(projectName string) error {
-	cmd := exec.Command("go", "mod", "edit", "-module", projectName)
-	cmd.Dir = projectName
-	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(output))
+		return err
+	}
+	if _, err = command(ctx, project, "go", "mod", "edit", "-module", o.Module); err != nil {
+		return err
+	}
+	if !o.Offline {
+		if _, err = command(ctx, project, "go", "build", "-mod=readonly", "./..."); err != nil {
+			return fmt.Errorf("generated application verification failed: %w", err)
+		}
+	}
+	mod, err := os.ReadFile(filepath.Join(project, "go.mod"))
+	if err != nil {
+		return err
+	}
+	framework := regexp.MustCompile(`github.com/sllt/pi\s+(\S+)`).FindSubmatch(mod)
+	if len(framework) != 2 {
+		return errors.New("template is missing the Pi framework dependency")
+	}
+	meta, _ := json.MarshalIndent(map[string]any{"cli": version.Framework, "framework": string(framework[1]), "template_ref": o.Ref, "template_commit": strings.TrimSpace(commit), "verified": !o.Offline}, "", "  ")
+	if err = os.WriteFile(filepath.Join(project, ".pi-template.json"), append(meta, '\n'), 0644); err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(dest+".pi-init.lock", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	lock.Close()
+	defer os.Remove(dest + ".pi-init.lock")
+	if _, err = os.Lstat(dest); !os.IsNotExist(err) {
+		return ErrProjectExists
+	}
+	if err = os.Rename(project, dest); err != nil {
+		return err
+	}
+	if o.Offline {
+		fmt.Printf("Created %s (offline, build NOT verified)\n", dest)
+	} else {
+		fmt.Printf("Created and verified %s\n", dest)
 	}
 	return nil
 }
 
-// goModTidy runs go mod tidy in the project directory.
-func goModTidy(projectName string) error {
-	cmd := exec.Command("go", "mod", "tidy")
-	cmd.Dir = projectName
-	output, err := cmd.CombinedOutput()
+func command(ctx context.Context, dir, program string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, program, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(output))
+		return "", fmt.Errorf("%s: %w: %s", program, err, out)
 	}
-	return nil
+	return string(out), nil
 }

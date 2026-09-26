@@ -1,190 +1,84 @@
 package migration
 
 import (
-	"bufio"
-	"errors"
+	"bytes"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
-	"regexp"
-	"strings"
-	"text/template"
+	"path/filepath"
+	"strconv"
 	"time"
+
+	"github.com/sllt/pi/pkg/pi/cli/helper"
 )
 
-const (
-	mig         = "migrations"
-	allFile     = "all.go"
-	matchLength = 3
-)
-
-var (
-	errNameEmpty    = errors.New("please provide the migration name")
-	errScanningFile = errors.New("failed to scan existing all.go file")
-	migRegex        = regexp.MustCompile(`^\s*(\d+)\s*:\s*([a-zA-Z_]+)\(\),?\s*$`)
-)
-
-//nolint:gochecknoglobals // keeping them local so that they are computed at the compile time.
-var (
-	allTemplate = template.Must(template.New("allContent").Parse(
-		`// This is auto-generated file using 'pi migrate' tool. DO NOT EDIT.
-package migrations
-
-import (
-	"github.com/sllt/pi/pkg/pi/migration"
-)
-
-func All() map[int64]migration.Migrate {
-	return map[int64]migration.Migrate {
-{{range $key, $value := .}}
-		{{ $key }}: {{ $value }}(),{{end}}
+// Migrate prepares both files before delivery and never changes process cwd.
+func Migrate(name string) (string, error) {
+	if !token.IsIdentifier(name) || name == "_" {
+		return "", fmt.Errorf("migration name must be a Go identifier: %q", name)
 	}
-}
-`))
-
-	migrationTemplate = template.Must(template.New("migrationContent").Parse(
-		`package migrations
-
-import (
-	"context"
-
-	"github.com/sllt/pi/pkg/pi/migration"
-)
-
-func {{ . }}() migration.Migrate {
-	return migration.Migrate{
-		Name: "{{ . }}",
-		UpContext: func(ctx context.Context, d migration.Datasource) error {
-			// write your migrations here and pass ctx to datasource calls when available
-
-			return nil
-		},
+	stamp := time.Now().Format("20060102150405")
+	registry := filepath.Join("migrations", "all.go")
+	data, err := os.ReadFile(registry)
+	replace := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
 	}
-}
-`))
-)
-
-// Migrate creates a new timestamped migration file and updates the all.go registry.
-func Migrate(migName string) (string, error) {
-	if migName == "" {
-		return "", errNameEmpty
+	if !replace {
+		data = []byte("package migrations\nimport \"github.com/sllt/pi/pkg/pi/migration\"\nfunc All() map[int64]migration.Migrate { return map[int64]migration.Migrate{} }\n")
 	}
-
-	if err := createMigrationFile(migName); err != nil {
-		return "", fmt.Errorf("error while creating migration file, err: %w", err)
-	}
-
-	if err := createAllMigration(); err != nil {
-		return "", fmt.Errorf("error while creating all.go file, err: %w", err)
-	}
-
-	return fmt.Sprintf("Successfully created migration %v", migName), nil
-}
-
-func createMigrationFile(migrationName string) error {
-	if _, err := os.Stat(mig); os.IsNotExist(err) {
-		if err := os.MkdirAll(mig, os.ModePerm); err != nil {
-			return err
-		}
-	}
-
-	if err := os.Chdir(mig); err != nil {
-		return err
-	}
-
-	currTimeStamp := time.Now().Format("20060102150405")
-
-	fileName := currTimeStamp + "_" + migrationName
-
-	file, err := os.OpenFile(fileName+".go", os.O_CREATE|os.O_WRONLY, os.ModePerm)
+	set := token.NewFileSet()
+	file, err := parser.ParseFile(set, registry, data, parser.ParseComments)
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	defer file.Close()
-
-	err = migrationTemplate.Execute(file, migrationName)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func createAllMigration() error {
-	existing := make(map[string]string)
-
-	existing, err := getAllExistingMigrations(existing)
-	if err != nil {
-		return err
-	}
-
-	f, err := os.Create(allFile)
-	if err != nil {
-		return err
-	}
-
-	d, err := os.ReadDir("./")
-	if err != nil {
-		return err
-	}
-
-	currentMigs := findMigrations(d)
-
-	// Merge new migrations into existing map
-	for ts, fn := range currentMigs {
-		if _, ok := existing[ts]; !ok {
-			existing[ts] = fn
-		}
-	}
-
-	err = allTemplate.Execute(f, existing)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func getAllExistingMigrations(existing map[string]string) (map[string]string, error) {
-	if _, err := os.Stat(allFile); err == nil {
-		file, err := os.OpenFile(allFile, os.O_RDONLY, os.ModePerm)
-		if err != nil {
-			return nil, err
-		}
-
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-
-			matches := migRegex.FindStringSubmatch(line)
-			if len(matches) == matchLength {
-				timestamp := matches[1]
-				funcName := matches[2]
-				existing[timestamp] = funcName
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("%w: %w", errScanningFile, err)
-		}
-	}
-
-	return existing, nil
-}
-
-func findMigrations(files []os.DirEntry) map[string]string {
-	var existingMig = make(map[string]string)
-
-	for _, file := range files {
-		fileParts := strings.Split(file.Name(), "_")
-		if len(fileParts) < 2 || file.Name() == allFile || fileParts[len(fileParts)-1] == "test.go" {
+	var entries *ast.CompositeLit
+	for _, d := range file.Decls {
+		f, ok := d.(*ast.FuncDecl)
+		if !ok || f.Name.Name != "All" || f.Body == nil {
 			continue
 		}
-
-		existingMig[fileParts[0]] = strings.TrimSuffix(strings.Join(fileParts[1:], "_"), ".go")
+		for _, stmt := range f.Body.List {
+			r, ok := stmt.(*ast.ReturnStmt)
+			if !ok || len(r.Results) != 1 {
+				continue
+			}
+			entries, _ = r.Results[0].(*ast.CompositeLit)
+		}
 	}
-
-	return existingMig
+	if entries == nil {
+		return "", fmt.Errorf("all.go All must return a map literal; edit this registry manually")
+	}
+	for _, entry := range entries.Elts {
+		kv, ok := entry.(*ast.KeyValueExpr)
+		if !ok {
+			return "", fmt.Errorf("unsupported migration registry entry")
+		}
+		key, ok := kv.Key.(*ast.BasicLit)
+		if !ok {
+			return "", fmt.Errorf("unsupported migration version expression")
+		}
+		if key.Value == stamp {
+			return "", fmt.Errorf("migration timestamp %s already exists; retry after one second", stamp)
+		}
+		if call, ok := kv.Value.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == name {
+				return "", fmt.Errorf("migration %s already registered", name)
+			}
+		}
+	}
+	entries.Elts = append(entries.Elts, &ast.KeyValueExpr{Key: &ast.BasicLit{Kind: token.INT, Value: stamp}, Value: &ast.CallExpr{Fun: ast.NewIdent(name)}})
+	var rendered bytes.Buffer
+	if err = format.Node(&rendered, set, file); err != nil {
+		return "", err
+	}
+	source := fmt.Sprintf("package migrations\nimport (\"context\"; \"github.com/sllt/pi/pkg/pi/migration\")\nfunc %s() migration.Migrate { return migration.Migrate{Name: %s, UpContext: func(ctx context.Context, d migration.Datasource) error {\n// Add migration operations using ctx.\nreturn nil\n}} }\n", name, strconv.Quote(name))
+	destination := filepath.Join("migrations", stamp+"_"+name+".go")
+	if err = helper.WriteFiles(map[string]helper.File{registry: {Data: rendered.Bytes(), Replace: replace}, destination: {Data: []byte(source)}}); err != nil {
+		return "", err
+	}
+	return "Created migration: " + destination, nil
 }

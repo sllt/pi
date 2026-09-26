@@ -1,8 +1,10 @@
 package create
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,133 +21,71 @@ var (
 	ErrExecuteTemplate = errors.New("failed to execute template")
 )
 
-// CreateData holds the data structure for template execution.
 type CreateData struct {
-	ProjectName          string
-	CreateType           string
-	FilePath             string
-	FileName             string
-	StructName           string
-	StructNameLowerFirst string
-	StructNameSnakeCase  string
+	ProjectName, CreateType, FilePath, FileName, StructName, StructNameLowerFirst, StructNameSnakeCase string
 }
 
-// Handler creates a new handler file.
-func Handler(name string) (string, error) {
-	return CreateComponent(name, "handler")
-}
-
-// Service creates a new service file.
-func Service(name string) (string, error) {
-	return CreateComponent(name, "service")
-}
-
-// Repository creates a new repository file.
-func Repository(name string) (string, error) {
-	return CreateComponent(name, "repository")
-}
-
-// Model creates a new model file.
-func Model(name string) (string, error) {
-	return CreateComponent(name, "model")
-}
-
-// All creates handler, service, repository, and model files.
+func Handler(name string) (string, error)    { return CreateComponent(name, "handler") }
+func Service(name string) (string, error)    { return CreateComponent(name, "service") }
+func Repository(name string) (string, error) { return CreateComponent(name, "repository") }
+func Model(name string) (string, error)      { return CreateComponent(name, "model") }
 func All(name string) (string, error) {
-	if name == "" {
-		return "", ErrNameEmpty
-	}
-
-	results := make([]string, 0, 4)
-	types := []string{"handler", "service", "repository", "model"}
-
-	for _, t := range types {
-		result, err := CreateComponent(name, t)
-		if err != nil {
-			return "", err
-		}
-		results = append(results, result)
-	}
-
-	return strings.Join(results, "\n"), nil
+	return generate(name, []string{"handler", "service", "repository", "model"})
 }
+func CreateComponent(name, kind string) (string, error) { return generate(name, []string{kind}) }
 
-// CreateComponent creates a component file for the given type.
-func CreateComponent(name, createType string) (string, error) {
+func generate(name string, kinds []string) (string, error) {
 	if name == "" {
 		return "", ErrNameEmpty
 	}
-
-	projectName := helper.GetProjectName(".")
-	if projectName == "" {
+	if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(filepath.Clean(name), ".."+string(filepath.Separator)) {
+		return "", errors.New("component path must stay inside the project")
+	}
+	project := helper.GetProjectName(".")
+	if project == "" {
 		return "", ErrNoProjectName
 	}
-
-	// Parse name (may include path like "user/profile")
-	filePath, fileName := filepath.Split(name)
-	fileName = strings.TrimSuffix(fileName, ".go")
-
-	// Generate struct name and variants
-	structName := helper.ToCamelCase(fileName)
-	structNameLowerFirst := helper.ToLowerFirst(structName)
-	structNameSnakeCase := helper.ToSnakeCase(structName)
-
-	data := &CreateData{
-		ProjectName:          projectName,
-		CreateType:           createType,
-		FilePath:             filePath,
-		FileName:             fileName,
-		StructName:           structName,
-		StructNameLowerFirst: structNameLowerFirst,
-		StructNameSnakeCase:  structNameSnakeCase,
+	dir, base := filepath.Split(name)
+	base = strings.TrimSuffix(base, ".go")
+	structName := helper.ToCamelCase(base)
+	if !token.IsIdentifier(structName) {
+		return "", fmt.Errorf("invalid component name %q", name)
 	}
-
-	return generateFile(data)
-}
-
-// generateFile generates the file for the given CreateData.
-func generateFile(data *CreateData) (string, error) {
-	// Determine output directory
-	dirPath := data.FilePath
-	if dirPath == "" {
-		dirPath = fmt.Sprintf("internal/%s/", data.CreateType)
+	files := map[string]helper.File{}
+	var messages []string
+	for _, kind := range kinds {
+		data := CreateData{project, kind, dir, base, structName, helper.ToLowerFirst(structName), helper.ToSnakeCase(structName)}
+		source := GetTemplate(kind)
+		if source == "" {
+			return "", ErrInvalidType
+		}
+		tmpl, err := template.New(kind).Parse(source)
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", ErrExecuteTemplate, err)
+		}
+		var buf bytes.Buffer
+		if err = tmpl.Execute(&buf, &data); err != nil {
+			return "", err
+		}
+		outDir := dir
+		if outDir == "" {
+			outDir = filepath.Join("internal", kind)
+		}
+		file := filepath.Join(outDir, strings.ToLower(base)+".go")
+		if _, err = os.Lstat(file); err == nil {
+			messages = append(messages, "Preserved: "+file)
+			continue
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		if _, exists := files[file]; exists {
+			return "", fmt.Errorf("component output collision: %s; omit the custom directory for create all", file)
+		}
+		files[file] = helper.File{Data: buf.Bytes()}
+		messages = append(messages, "Created: "+file)
 	}
-
-	// Create directory if not exists
-	if err := os.MkdirAll(dirPath, os.ModePerm); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrCreateFile, err)
+	if err := helper.WriteFiles(files); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrCreateFile, err)
 	}
-
-	// Generate file path
-	outputFile := filepath.Join(dirPath, strings.ToLower(data.FileName)+".go")
-
-	// Check if file already exists
-	if _, err := os.Stat(outputFile); err == nil {
-		return fmt.Sprintf("Skipped: %s (already exists)", outputFile), nil
-	}
-
-	// Create the file
-	f, err := os.Create(outputFile)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrCreateFile, err)
-	}
-	defer f.Close()
-
-	// Get template
-	tmplContent := GetTemplate(data.CreateType)
-	if tmplContent == "" {
-		return "", ErrInvalidType
-	}
-
-	// Parse and execute template
-	tmpl, err := template.New(data.CreateType).Parse(tmplContent)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrExecuteTemplate, err)
-	}
-
-	if err := tmpl.Execute(f, data); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrExecuteTemplate, err)
-	}
-
-	return fmt.Sprintf("Created new %s: %s", data.CreateType, outputFile), nil
+	return strings.Join(messages, "\n"), nil
 }
