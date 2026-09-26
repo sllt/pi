@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"net"
 	"reflect"
-	"strconv"
 	"strings"
 
 	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 
 	"github.com/sllt/pi/pkg/pi/config"
@@ -24,6 +24,7 @@ type pendingService struct {
 }
 
 type grpcServer struct {
+	listenerState
 	server             *grpc.Server
 	interceptors       []grpc.UnaryServerInterceptor
 	streamInterceptors []grpc.StreamServerInterceptor
@@ -144,6 +145,13 @@ func (g *grpcServer) createServer() error {
 	if g.serverCreated {
 		return nil
 	}
+	tlsConfig, err := serverTLS(g.config.Get("GRPC_CERT_FILE"), g.config.Get("GRPC_KEY_FILE"))
+	if err != nil {
+		return err
+	}
+	if tlsConfig != nil {
+		g.options = append(g.options, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	}
 
 	interceptorOption := grpc.ChainUnaryInterceptor(g.interceptors...)
 	streamOpt := grpc.ChainStreamInterceptor(g.streamInterceptors...)
@@ -202,14 +210,7 @@ func (g *grpcServer) start(c *infra.Container, onError func(error)) error {
 		g.pendingServices = nil
 	}
 
-	if !isPortAvailable(g.port) {
-		c.Metrics().IncrementCounter(context.Background(), "grpc_server_errors_total")
-		c.Metrics().SetGauge("grpc_server_status", 0)
-
-		return fmt.Errorf("gRPC port %d is blocked or unreachable", g.port)
-	}
-
-	addr := ":" + strconv.Itoa(g.port)
+	addr := g.listenAddress(g.port)
 
 	c.Logger.Infof("starting gRPC server at %s", addr)
 
@@ -220,9 +221,10 @@ func (g *grpcServer) start(c *infra.Container, onError func(error)) error {
 
 		return fmt.Errorf("error in starting gRPC server at %s: %w", addr, err)
 	}
+	g.boundTo(listener.Addr())
 
 	c.Metrics().SetGauge("grpc_server_status", 1)
-	c.Logger.Infof("gRPC server started successfully on %s", addr)
+	c.Logger.Infof("gRPC server started successfully on %s", listener.Addr())
 
 	go func() {
 		if err := g.server.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {

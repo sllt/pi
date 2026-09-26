@@ -141,6 +141,7 @@ func TestGRPCServer_CreateServer(t *testing.T) {
 
 func TestGRPCServer_RegisterService(t *testing.T) {
 	c, mocks, g := setupTestGRPCServer(t, 9999, false)
+	g.address = "127.0.0.1:0"
 	setupGRPCMetricExpectations(mocks.Metrics)
 
 	app := New()
@@ -158,8 +159,7 @@ func TestGRPCServer_RegisterService(t *testing.T) {
 	assert.False(t, g.serverCreated, "serverCreated flag should be false")
 
 	// Run should create server and register pending services
-	go g.Run(c)
-	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, g.Run(c))
 
 	assert.NotNil(t, g.server, "server should be created during Run")
 	assert.True(t, g.serverCreated, "serverCreated flag should be true")
@@ -260,12 +260,11 @@ func TestGRPC_ServerRun(t *testing.T) {
 				t.Fatalf("Failed to create server: %v", err)
 			}
 
-			// Run the server - this should call Fatalf but not exit
-			g.Run(c)
+			require.Error(t, g.Run(c))
 		})
 
 		// Assert that the expected log message was captured
-		assert.Contains(t, out, "gRPC port", "Expected log message not found for occupied port test")
+		assert.Contains(t, out, "error in starting gRPC server", "Expected log message not found for occupied port test")
 	})
 }
 
@@ -403,11 +402,7 @@ func TestGRPC_ServerRun_WithInterceptorAndOptions(t *testing.T) {
 	err := app.grpcServer.createServer()
 	require.NoError(t, err)
 
-	// Start the server in a goroutine
-	go app.grpcServer.Run(c)
-
-	// Wait for the server to start
-	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, app.grpcServer.Run(c))
 
 	// Shutdown the server immediately to avoid timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)

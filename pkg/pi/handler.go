@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/trace"
 
@@ -62,6 +63,10 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c := newContext(responder, piHTTP.NewRequest(r), h.container)
 
 	traceID := trace.SpanFromContext(r.Context()).SpanContext().TraceID().String()
+	if !trace.SpanFromContext(r.Context()).SpanContext().HasTraceID() {
+		traceID = uuid.NewString()
+	}
+	w.Header().Set("X-Request-ID", traceID)
 
 	if websocket.IsWebSocketUpgrade(r) {
 		// If the request is a WebSocket upgrade, do not apply the timeout
@@ -102,7 +107,7 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle custom headers if 'result' is a 'Response'.
-	if resp, ok := result.data.(response.Response); ok {
+	if resp, ok := result.data.(response.Response); ok && result.err == nil {
 		resp.SetCustomHeaders(w)
 	}
 

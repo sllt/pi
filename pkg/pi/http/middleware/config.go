@@ -39,6 +39,18 @@ func GetConfigs(c config.Config) Config {
 			middlewareConfigs.CorsHeaders[convertHeaderNames(v)] = val
 		}
 	}
+	for key, header := range map[string]string{
+		"CORS_ALLOWED_ORIGINS":   "Access-Control-Allow-Origin",
+		"CORS_ALLOWED_METHODS":   "Access-Control-Allow-Methods",
+		"CORS_ALLOWED_HEADERS":   "Access-Control-Allow-Headers",
+		"CORS_ALLOW_CREDENTIALS": "Access-Control-Allow-Credentials",
+		"CORS_EXPOSE_HEADERS":    "Access-Control-Expose-Headers",
+		"CORS_MAX_AGE":           "Access-Control-Max-Age",
+	} {
+		if value := c.Get(key); value != "" {
+			middlewareConfigs.CorsHeaders[header] = value
+		}
+	}
 
 	// Config values for Log Probes
 	logDisableProbes := c.GetOrDefault("LOG_DISABLE_PROBES", "false")

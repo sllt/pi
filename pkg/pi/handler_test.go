@@ -42,7 +42,7 @@ func TestHandler_ServeHTTP(t *testing.T) {
 		{"method is get, data is nil and error is nil", http.MethodGet, nil, nil, http.StatusOK,
 			`{"code":0,"data":null,"message":"ok"}`},
 		{"method is get, data is mil, error is not nil", http.MethodGet, nil, errTest, http.StatusInternalServerError,
-			`{"code":-1,"data":null,"message":"some error"}`},
+			`{"code":-1,"data":null,"message":"internal server error"}`},
 		{"method is get, data is mil, error is http error", http.MethodGet, nil, piHTTP.ErrorEntityNotFound{}, http.StatusNotFound,
 			`{"code":404,"data":null,"message":"No entity found with : "}`},
 		{"method is post, data is nil and error is nil", http.MethodPost, "Created", nil, http.StatusCreated,
@@ -104,7 +104,7 @@ func TestHandler_ServeHTTP_Panic(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code, "TestHandler_ServeHTTP_Panic Failed")
 
-	assert.Contains(t, w.Body.String(), http.StatusText(http.StatusInternalServerError), "TestHandler_ServeHTTP_Panic Failed")
+	assert.Contains(t, w.Body.String(), "internal server error", "TestHandler_ServeHTTP_Panic Failed")
 }
 
 func TestHandler_ServeHTTP_WithHeaders(t *testing.T) {

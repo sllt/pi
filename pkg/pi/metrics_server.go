@@ -13,6 +13,7 @@ import (
 )
 
 type metricServer struct {
+	listenerState
 	port int
 	srv  *http.Server
 }
@@ -36,7 +37,7 @@ func (m *metricServer) start(c *infra.Container, onError func(error)) error {
 	if m != nil {
 		c.Logf("Starting metrics server on port: %d", m.port)
 
-		addr := fmt.Sprintf(":%d", m.port)
+		addr := m.listenAddress(m.port)
 		m.srv = &http.Server{
 			Addr:              addr,
 			Handler:           metrics.GetHandler(c.Metrics()),
@@ -47,6 +48,8 @@ func (m *metricServer) start(c *infra.Container, onError func(error)) error {
 		if err != nil {
 			return fmt.Errorf("failed to listen on metrics address %s: %w", addr, err)
 		}
+		m.boundTo(listener.Addr())
+		c.Infof("Metrics server listening on %s", listener.Addr())
 
 		go func() {
 			if err := m.srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -65,5 +68,5 @@ func (m *metricServer) Shutdown(ctx context.Context) error {
 
 	return ShutdownWithContext(ctx, func(ctx context.Context) error {
 		return m.srv.Shutdown(ctx)
-	}, nil)
+	}, m.srv.Close)
 }

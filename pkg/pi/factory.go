@@ -1,9 +1,9 @@
 package pi
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/sllt/pi/pkg/pi/cmd/terminal"
 	"github.com/sllt/pi/pkg/pi/http/middleware"
@@ -21,12 +21,13 @@ func New() *App {
 	app.initMetricsServer()
 
 	// HTTP Server
-	port, err := strconv.Atoi(app.Config.Get("HTTP_PORT"))
-	if err != nil || port <= 0 {
-		port = defaultHTTPPort
-	}
-
-	app.httpServer = newHTTPServer(app.container, port, middleware.GetConfigs(app.Config))
+	address, enabled, err := endpointConfig(app.Config, "HTTP", defaultHTTPPort)
+	app.initErr = errors.Join(app.initErr, err)
+	app.httpDisabled = !enabled
+	middlewareConfig := middleware.GetConfigs(app.Config)
+	app.initErr = errors.Join(app.initErr, middleware.ValidateCORS(middlewareConfig.CorsHeaders))
+	app.httpServer = newHTTPServer(app.container, defaultHTTPPort, middlewareConfig)
+	app.httpServer.address = address
 	app.httpServer.certFile = app.Config.GetOrDefault("CERT_FILE", "")
 	app.httpServer.keyFile = app.Config.GetOrDefault("KEY_FILE", "")
 	app.httpServer.staticFiles = make(map[string]string)
@@ -35,16 +36,17 @@ func New() *App {
 	// only when HTTP server actually starts. This prevents gRPC-only apps from starting HTTP server.
 
 	// gRPC Server
-	port, err = strconv.Atoi(app.Config.Get("GRPC_PORT"))
-	if err != nil || port <= 0 {
-		port = defaultGRPCPort
-	}
-
-	app.grpcServer, err = newGRPCServer(app.container, port, app.Config)
+	address, enabled, err = endpointConfig(app.Config, "GRPC", defaultGRPCPort)
+	app.initErr = errors.Join(app.initErr, err)
+	app.grpcDisabled = !enabled
+	app.grpcServer, err = newGRPCServer(app.container, defaultGRPCPort, app.Config)
 
 	// Continue without gRPC server rather than failing the entire app
 	if err != nil {
 		app.container.Logger.Errorf("failed to create gRPC server: %v", err)
+		app.initErr = errors.Join(app.initErr, err)
+	} else {
+		app.grpcServer.address = address
 	}
 
 	app.subscriptionManager = newSubscriptionManager(app.container)
@@ -80,21 +82,11 @@ func NewCMD() *App {
 // initMetricsServer initializes the metrics server based on configuration.
 // If METRICS_PORT is explicitly set to 0, the metrics server is disabled.
 func (a *App) initMetricsServer() {
-	metricsPortStr := a.Config.Get("METRICS_PORT")
-
-	if metricsPortStr == "0" {
-		a.container.Logger.Logf("Metrics server is disabled (METRICS_PORT=0)")
+	address, enabled, err := endpointConfig(a.Config, "METRICS", defaultMetricPort)
+	a.initErr = errors.Join(a.initErr, err)
+	if !enabled || err != nil {
 		return
 	}
-
-	port, err := strconv.Atoi(metricsPortStr)
-	if err != nil || port <= 0 {
-		port = defaultMetricPort
-	}
-
-	if !isPortAvailable(port) {
-		a.container.Logger.Fatalf("metrics port %d is blocked or unreachable", port)
-	}
-
-	a.metricServer = newMetricServer(port)
+	a.metricServer = newMetricServer(defaultMetricPort)
+	a.metricServer.address = address
 }

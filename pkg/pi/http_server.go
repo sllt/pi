@@ -16,6 +16,7 @@ import (
 )
 
 type httpServer struct {
+	listenerState
 	router      *piHTTP.Router
 	registry    *RouteRegistry
 	port        int
@@ -71,26 +72,27 @@ func (s *httpServer) start(c *infra.Container, onError func(error)) error {
 
 	c.Logf("Starting server on port: %d", s.port)
 
+	tlsConfig, err := serverTLS(s.certFile, s.keyFile)
+	if err != nil {
+		return err
+	}
+	addr := s.listenAddress(s.port)
 	s.srv = &http.Server{
-		Addr:              fmt.Sprintf(":%d", s.port),
+		Addr:              addr,
 		Handler:           s.router,
 		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:         tlsConfig,
 	}
-
-	addr := fmt.Sprintf(":%d", s.port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on HTTP address %s: %w", addr, err)
 	}
 
-	if s.certFile != "" && s.keyFile != "" {
-		if err := validateCertificateAndKeyFiles(s.certFile, s.keyFile); err != nil {
-			_ = listener.Close()
-			return err
-		}
-
+	s.boundTo(listener.Addr())
+	c.Infof("HTTP server listening on %s", listener.Addr())
+	if tlsConfig != nil {
 		go func() {
-			if err := s.srv.ServeTLS(listener, s.certFile, s.keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := s.srv.ServeTLS(listener, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				onError(err)
 			}
 		}()

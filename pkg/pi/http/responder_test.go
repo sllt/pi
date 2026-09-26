@@ -387,7 +387,7 @@ func TestCodeResponder(t *testing.T) {
 			},
 			expectedCode: 5000,
 			expectedHTTP: http.StatusInternalServerError,
-			expectedBody: `{"code":5000,"data":null,"message":"custom error"}`,
+			expectedBody: `{"code":5000,"data":null,"message":"internal server error"}`,
 		},
 	}
 

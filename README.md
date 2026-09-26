@@ -6,6 +6,16 @@
 
 ## 核心特性
 
+### v0.3.1 配置与错误响应
+
+- `HTTP_ADDR`、`GRPC_ADDR`、`METRICS_ADDR` 接受 `host:port`，优先于对应 `*_HOST`/`*_PORT`；`[::1]:0` 支持 IPv6 和随机端口。启动后通过 `HTTPAddress()`、`GRPCAddress()`、`MetricsAddress()` 获取实际地址。
+- `*_ENABLED=false` 显式禁用；旧 HTTP/GRPC `PORT=0` 仍回落默认端口，旧 `METRICS_PORT=0` 仍禁用。端口冲突由 Start 返回，不在注册/构造阶段 Fatal。
+- HTTP 使用 `CERT_FILE`/`KEY_FILE`，gRPC 使用 `GRPC_CERT_FILE`/`GRPC_KEY_FILE`；必须成对、可解析且匹配，错误导致启动失败。
+- CORS 由框架统一处理，默认不允许跨域。`CORS_ALLOWED_ORIGINS` 是逗号分隔的完整 origin；另有 `CORS_ALLOWED_METHODS`、`CORS_ALLOWED_HEADERS`、`CORS_ALLOW_CREDENTIALS`、`CORS_EXPOSE_HEADERS`、`CORS_MAX_AGE`。新键优先于旧 `ACCESS_CONTROL_*` 键；通配 origin 不能同时允许 credentials。
+- HTTP 错误支持包装/Join。取消优先，其余按深度优先、从左到右选第一个状态错误，业务码与消息来自同一错误。5xx/未知错误默认隐藏内部消息；实现 `PublicMessage() string` 可显式提供安全消息。Handler 响应的 `X-Request-ID` 对应服务端错误日志中的 trace_id。
+
+安全兼容变化：依赖默认 `*` 的跨域客户端需要配置来源；未知错误不再把原始 Error 文本发给客户端，错误响应也不会返回附带的成功数据/文件。
+
 - **简洁的 API 语法** - 轻松定义路由和处理器
 - **RESTful 规范** - 默认遵循 REST 最佳实践
 - **配置管理** - 灵活的配置加载和管理

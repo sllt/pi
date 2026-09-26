@@ -38,6 +38,9 @@ type App struct {
 	grpcServer   *grpcServer
 	httpServer   *httpServer
 	metricServer *metricServer
+	initErr      error
+	httpDisabled bool
+	grpcDisabled bool
 
 	cmd  *cmd
 	cron *Crontab
@@ -536,10 +539,6 @@ func contains(elems []string, v string) bool {
 // If `filePath` starts with "./", it will be interpreted as a relative path
 // to the current working directory.
 func (a *App) AddStaticFiles(endpoint, filePath string) {
-	if !a.httpRegistered && !isPortAvailable(a.httpServer.port) {
-		a.container.Logger.Fatalf("http port %d is blocked or unreachable", a.httpServer.port)
-	}
-
 	a.httpRegistered = true
 
 	if !strings.HasPrefix(filePath, "./") && !filepath.IsAbs(filePath) {

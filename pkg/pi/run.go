@@ -138,6 +138,9 @@ func (a *App) startOnce(ctx context.Context) (err error) {
 			err = fmt.Errorf("%w: %v", errRuntimeStartPanic, re)
 		}
 	}()
+	if a.initErr != nil {
+		return a.initErr
+	}
 	if err = ctx.Err(); err != nil {
 		return err
 	}
@@ -268,6 +271,9 @@ func (a *App) startMetricsServer() error {
 
 // startHTTPServer starts the HTTP server if registered.
 func (a *App) startHTTPServer() error {
+	if a.httpDisabled {
+		return nil
+	}
 	if a.httpRegistered {
 		a.httpServerSetup()
 
@@ -282,6 +288,9 @@ func (a *App) startHTTPServer() error {
 
 // startGRPCServer starts the gRPC server if registered.
 func (a *App) startGRPCServer() error {
+	if a.grpcDisabled {
+		return nil
+	}
 	if a.grpcRegistered {
 		return a.grpcServer.start(a.container, func(err error) {
 			a.Logger().Errorf("gRPC server failed: %v", err)

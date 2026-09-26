@@ -28,6 +28,9 @@ type Responder struct {
 // Respond sends a response with the given data and handles potential errors, setting appropriate
 // status codes and formatting responses as JSON with {code, data, message, meta} format.
 func (r Responder) Respond(data any, err error) {
+	if err != nil {
+		data = nil
+	}
 	if r.handleSpecialResponseTypes(data, err) {
 		return
 	}
@@ -77,9 +80,8 @@ func (r Responder) buildResponse(data any, meta map[string]any, err error) respo
 		return response{Code: getErrorCode(errEmptyResponse), Data: nil, Message: errEmptyResponse.Error()}
 	}
 
-	code := getErrorCode(err)
-
-	return response{Code: code, Data: nil, Message: err.Error(), Meta: meta}
+	_, code, message := ErrorResponse(err)
+	return response{Code: code, Data: nil, Message: message, Meta: meta}
 }
 
 // getHTTPStatusCode returns the HTTP status code for the response.
@@ -92,25 +94,15 @@ func (r Responder) getHTTPStatusCode(data any, err error) int {
 		return handleSuccessStatusCode(r.method, data)
 	}
 
-	if e, ok := err.(StatusCodeResponder); ok {
-		return e.StatusCode()
-	}
-
-	return http.StatusInternalServerError
+	status, _, _ := ErrorResponse(err)
+	return status
 }
 
 // getErrorCode returns the business error code from the error.
 // Priority: CodeResponder.Code() > StatusCodeResponder.StatusCode() > -1
 func getErrorCode(err error) int {
-	if e, ok := err.(CodeResponder); ok {
-		return e.Code()
-	}
-
-	if e, ok := err.(StatusCodeResponder); ok {
-		return e.StatusCode()
-	}
-
-	return -1
+	_, code, _ := ErrorResponse(err)
+	return code
 }
 
 // handleSpecialResponseTypes handles special response types that bypass JSON encoding.
@@ -175,11 +167,8 @@ func (r Responder) getStatusCodeForSpecialResponse(data any, err error) int {
 		return handleSuccessStatusCode(r.method, data)
 	}
 
-	if e, ok := err.(StatusCodeResponder); ok {
-		return e.StatusCode()
-	}
-
-	return http.StatusInternalServerError
+	status, _, _ := ErrorResponse(err)
+	return status
 }
 
 // getCustomStatusCode extracts optional HTTP status code overrides from supported response types.

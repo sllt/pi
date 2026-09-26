@@ -236,12 +236,12 @@ func TestAppStart_ReturnsGRPCListenFailure(t *testing.T) {
 	app := New()
 	app.GET("/rollback", func(*Context) (any, error) { return "ok", nil })
 	app.grpcRegistered = true
-	app.grpcServer.port = port
+	app.grpcServer.address = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 
 	err = app.Start(t.Context())
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gRPC port")
+	assert.Contains(t, err.Error(), "error in starting gRPC server")
 	// HTTP started before the gRPC failure and must be closed by rollback.
 	reused, listenErr := net.Listen("tcp", ":"+strconv.Itoa(httpPort))
 	require.NoError(t, listenErr)

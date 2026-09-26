@@ -3,102 +3,57 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
-	"strconv"
-	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-type MockHandlerForCORS struct {
-	statusCode int
-	response   string
-}
-
-// ServeHTTP is used for testing different panic recovery cases.
-func (r *MockHandlerForCORS) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(r.statusCode)
-	_, _ = w.Write([]byte(r.response))
-}
-
-func Test_CORS(t *testing.T) {
-	tests := []struct {
-		method           string
-		registeredRoutes *[]string
-		respBody         string
-		respCode         int
-		expHeaders       int
+func TestCORSBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin, method, requestMethod, headers string
+		code                                         int
+		allowed                                      bool
 	}{
-		{http.MethodGet, &[]string{"GET,POST"}, "Sample Response", http.StatusFound, 3},
-		{http.MethodOptions, &[]string{"PUT,DELETE,GET,POST"}, "", http.StatusOK, 3},
-	}
-
-	for i, tc := range tests {
-		handler := CORS(nil, tc.registeredRoutes)(&MockHandlerForCORS{statusCode: http.StatusFound, response: "Sample Response"})
-
-		req := httptest.NewRequest(tc.method, "/hello", http.NoBody)
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-
-		assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"), "TEST[%d], Failed.\n", i)
-		assert.Equal(t, strings.Join(*tc.registeredRoutes, ", ")+", OPTIONS",
-			w.Header().Get("Access-Control-Allow-Methods"), "TEST[%d], Failed.\n", i)
-		assert.Len(t, w.Header(), tc.expHeaders, "TEST[%d], Failed.\n", i)
-		assert.Equal(t, tc.respCode, w.Code, "TEST[%d], Failed.\n", i)
-		assert.Equal(t, tc.respBody, w.Body.String(), "TEST[%d], Failed.\n", i)
-	}
-}
-
-func TestSetMiddlewareHeaders(t *testing.T) {
-	testCases := []struct {
-		environmentConfig map[string]string
-		registeredRoutes  []string
-		expectedHeaders   map[string]string
-	}{
-		{
-			environmentConfig: map[string]string{},
-			registeredRoutes:  []string{"GET"},
-			expectedHeaders: map[string]string{
-				"Access-Control-Allow-Origin":  "*",
-				"Access-Control-Allow-Headers": allowedHeaders,
-				"Access-Control-Allow-Methods": "GET, OPTIONS",
-			},
-		},
-		{
-			environmentConfig: map[string]string{"Access-Control-Allow-Headers": "clientid"},
-			registeredRoutes:  []string{"POST, PUT"},
-			expectedHeaders: map[string]string{
-				"Access-Control-Allow-Origin":  "*",
-				"Access-Control-Allow-Headers": allowedHeaders + ", clientid",
-				"Access-Control-Allow-Methods": "POST, PUT, OPTIONS",
-			},
-		},
-		{
-			environmentConfig: map[string]string{
-				"Access-Control-Max-Age":      strconv.Itoa(600),
-				"Access-Control-Allow-Origin": "same-origin",
-			},
-			registeredRoutes: []string{},
-			expectedHeaders: map[string]string{
-				"Access-Control-Max-Age":       strconv.Itoa(600),
-				"Access-Control-Allow-Origin":  "same-origin",
-				"Access-Control-Allow-Headers": allowedHeaders,
-				"Access-Control-Allow-Methods": "OPTIONS",
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		w := httptest.NewRecorder()
-
-		setMiddlewareHeaders(tc.environmentConfig, tc.registeredRoutes, w)
-
-		// Check if the actual headers match the expected headers
-		for header, expectedValue := range tc.expectedHeaders {
-			actualValue := w.Header().Get(header)
-			if actualValue != expectedValue {
-				t.Errorf("Header %s: expected %s, got %s", header, expectedValue, actualValue)
+		{"ordinary", "", "GET", "", "", 200, false},
+		{"allowed", "https://app.example", "GET", "", "", 200, true},
+		{"denied", "https://evil.example", "GET", "", "", 403, false},
+		{"preflight", "https://app.example", "OPTIONS", "POST", "authorization, content-type", 204, true},
+		{"bad method", "https://app.example", "OPTIONS", "DELETE", "", 403, false},
+		{"bad header", "https://app.example", "OPTIONS", "POST", "X-Secret", 403, false},
+		{"normal options", "", "OPTIONS", "", "", 200, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := map[string]string{"Access-Control-Allow-Origin": "https://app.example", "Access-Control-Allow-Credentials": "true"}
+			methods := []string{"GET", "POST"}
+			next := false
+			h := CORS(cfg, &methods)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { next = true; w.WriteHeader(200) }))
+			r := httptest.NewRequest(tc.method, "/", nil)
+			r.Header.Set("Origin", tc.origin)
+			r.Header.Set("Access-Control-Request-Method", tc.requestMethod)
+			r.Header.Set("Access-Control-Request-Headers", tc.headers)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			require.Equal(t, tc.code, w.Code)
+			if tc.allowed {
+				require.Equal(t, tc.origin, w.Header().Get("Access-Control-Allow-Origin"))
+				require.Equal(t, "true", w.Header().Get("Access-Control-Allow-Credentials"))
+			} else {
+				require.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
 			}
-		}
+			require.Contains(t, w.Header().Values("Vary"), "Origin")
+			require.Equal(t, tc.code == 200, next)
+		})
 	}
+}
+
+func TestCORSRejectsAmbiguousConfig(t *testing.T) {
+	require.Error(t, ValidateCORS(map[string]string{"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"}))
+	require.Error(t, ValidateCORS(map[string]string{"Access-Control-Allow-Origin": "https://app.example/path"}))
+	require.NoError(t, ValidateCORS(map[string]string{"Access-Control-Allow-Origin": "https://app.example, http://localhost:3000"}))
+	h := CORS(nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("unexpected request") }))
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Origin", "https://app.example")
+	h.ServeHTTP(w, r)
+	require.Equal(t, 403, w.Code)
 }

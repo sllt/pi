@@ -45,10 +45,6 @@ func (a *App) add(method, pattern string, h Handler) {
 }
 
 func (a *App) ensureHTTPAvailable() {
-	if !a.httpRegistered && !isPortAvailable(a.httpServer.port) {
-		a.container.Logger.Fatalf("http port %d is blocked or unreachable", a.httpServer.port)
-	}
-
 	a.httpRegistered = true
 }
 
