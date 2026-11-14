@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -86,12 +87,30 @@ func (l gRPCLog) String() string {
 	return string(line)
 }
 
+func resolveTracerProvider(providerFn func() trace.TracerProvider) trace.TracerProvider {
+	if providerFn != nil {
+		if tp := providerFn(); tp != nil {
+			return tp
+		}
+	}
+	return otel.GetTracerProvider()
+}
+
 // StreamObservabilityInterceptor handles logging, metrics, and tracing for streaming RPCs.
 func StreamObservabilityInterceptor(logger Logger, metrics Metrics) grpc.StreamServerInterceptor {
-	tracer := otel.GetTracerProvider().Tracer("pi-gRPC-stream", trace.WithInstrumentationVersion("v0.1"))
+	return StreamObservabilityInterceptorWithProvider(logger, metrics, otel.GetTracerProvider)
+}
 
+// StreamObservabilityInterceptorWithProvider handles logging, metrics, and tracing for streaming RPCs
+// using the supplied TracerProvider resolver, falling back to otel.GetTracerProvider when nil.
+func StreamObservabilityInterceptorWithProvider(
+	logger Logger,
+	metrics Metrics,
+	providerFn func() trace.TracerProvider,
+) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		start := time.Now()
+		tracer := resolveTracerProvider(providerFn).Tracer("pi-gRPC-stream", trace.WithInstrumentationVersion("v0.1"))
 
 		// Initialize tracing context from incoming metadata
 		ctx := initializeSpanContext(ss.Context())
@@ -148,57 +167,107 @@ func (w *wrappedServerStream) Context() context.Context {
 }
 
 func ObservabilityInterceptor(logger Logger, metrics Metrics) grpc.UnaryServerInterceptor {
-	tracer := otel.GetTracerProvider().Tracer("pi", trace.WithInstrumentationVersion("v0.1"))
+	return ObservabilityInterceptorWithProvider(logger, metrics, otel.GetTracerProvider)
+}
 
+// ObservabilityInterceptorWithProvider handles logging, metrics, and tracing for unary RPCs
+// using the supplied TracerProvider resolver, falling back to otel.GetTracerProvider when nil.
+func ObservabilityInterceptorWithProvider(
+	logger Logger,
+	metrics Metrics,
+	providerFn func() trace.TracerProvider,
+) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		start := time.Now()
+		tracer := resolveTracerProvider(providerFn).Tracer("pi", trace.WithInstrumentationVersion("v0.1"))
 
 		ctx = initializeSpanContext(ctx)
 		ctx, span := tracer.Start(ctx, info.FullMethod)
+		defer span.End()
 
 		resp, err := handler(ctx, req)
 		if err != nil {
 			logger.Errorf("error while handling gRPC request to method %q: %q", info.FullMethod, err)
 		}
 
+		rpcMethod := info.FullMethod
 		if info.FullMethod == healthCheck {
 			service, ok := req.(*grpc_health_v1.HealthCheckRequest)
 			if ok {
-				info.FullMethod = fmt.Sprintf("%s	Service: %q", healthCheck, service.Service)
+				rpcMethod = fmt.Sprintf("%s	Service: %q", healthCheck, service.Service)
 			}
 		}
 
-		logRPC(ctx, logger, metrics, start, err, info.FullMethod, "app_gRPC-Server_stats")
-
-		span.End()
+		logRPC(ctx, logger, metrics, start, err, rpcMethod, "app_gRPC-Server_stats")
 
 		return resp, err
 	}
 }
 
+var defaultGRPCPropagator = propagation.NewCompositeTextMapPropagator(
+	propagation.TraceContext{},
+	propagation.Baggage{},
+)
+
+func resolveGRPCTextMapPropagator() propagation.TextMapPropagator {
+	if p := otel.GetTextMapPropagator(); p != nil && len(p.Fields()) > 0 {
+		return p
+	}
+	return defaultGRPCPropagator
+}
+
+type grpcMetadataCarrier metadata.MD
+
+func (c grpcMetadataCarrier) Get(key string) string {
+	return getMetadataValue(metadata.MD(c), strings.ToLower(key))
+}
+
+func (c grpcMetadataCarrier) Set(key, value string) {
+	metadata.MD(c).Set(strings.ToLower(key), value)
+}
+
+func (c grpcMetadataCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func initializeSpanContext(ctx context.Context) context.Context {
-	md, _ := metadata.FromIncomingContext(ctx)
-
-	traceIDHex := getMetadataValue(md, "x-kite-traceid")
-	spanIDHex := getMetadataValue(md, "x-kite-spanid")
-
-	if traceIDHex == "" || spanIDHex == "" {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok || len(md) == 0 {
 		return ctx
 	}
 
-	traceID, _ := trace.TraceIDFromHex(traceIDHex)
-	spanID, _ := trace.SpanIDFromHex(spanIDHex)
+	traceIDHex := getMetadataValue(md, "x-pi-traceid")
+	if traceIDHex == "" {
+		traceIDHex = getMetadataValue(md, "x-kite-traceid")
+	}
+	spanIDHex := getMetadataValue(md, "x-pi-spanid")
+	if spanIDHex == "" {
+		spanIDHex = getMetadataValue(md, "x-kite-spanid")
+	}
 
-	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID:    traceID,
-		SpanID:     spanID,
-		TraceFlags: trace.FlagsSampled,
-		Remote:     true,
-	})
+	if traceIDHex != "" && spanIDHex != "" {
+		traceID, traceErr := trace.TraceIDFromHex(traceIDHex)
+		spanID, spanErr := trace.SpanIDFromHex(spanIDHex)
+		if traceErr == nil && spanErr == nil && traceID.IsValid() && spanID.IsValid() {
+			spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID:    traceID,
+				SpanID:     spanID,
+				TraceFlags: trace.FlagsSampled,
+				Remote:     true,
+			})
+			return trace.ContextWithRemoteSpanContext(ctx, spanContext)
+		}
+		if extracted := resolveGRPCTextMapPropagator().Extract(ctx, grpcMetadataCarrier(md)); trace.SpanContextFromContext(extracted).IsValid() {
+			return extracted
+		}
+		return trace.ContextWithRemoteSpanContext(ctx, trace.SpanContext{})
+	}
 
-	ctx = trace.ContextWithRemoteSpanContext(ctx, spanContext)
-
-	return ctx
+	return resolveGRPCTextMapPropagator().Extract(ctx, grpcMetadataCarrier(md))
 }
 
 func (gRPCLog) DocumentRPCLog(ctx context.Context, logger Logger, metrics Metrics, start time.Time, err error, method, name string) {

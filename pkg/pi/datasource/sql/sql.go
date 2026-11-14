@@ -135,11 +135,29 @@ func NewSQL(configs config.Config, logger datasource.Logger, metrics Metrics) *D
 
 	database = pingToTestConnection(database)
 
-	go retryConnection(database)
-
-	go pushDBMetrics(database.DB, metrics)
+	database.startBackgroundLoops()
 
 	return database
+}
+
+func (d *DB) startBackgroundLoops() {
+	if d == nil || d.DB == nil {
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d.bgCancel = cancel
+	d.bgWg.Add(2)
+
+	go func() {
+		defer d.bgWg.Done()
+		retryConnection(ctx, d)
+	}()
+
+	go func() {
+		defer d.bgWg.Done()
+		pushDBMetrics(ctx, d.DB, d.metrics)
+	}()
 }
 
 func registerOtel(dialect string, logger datasource.Logger) (string, error) {
@@ -167,28 +185,71 @@ func pingToTestConnection(database *DB) *DB {
 	return database
 }
 
-func retryConnection(database *DB) {
-	const connRetryFrequencyInSeconds = 10
+func retryConnection(ctx context.Context, database *DB) {
+	const connRetryFrequency = 10 * time.Second
+
+	if ctx == nil || database == nil || database.DB == nil {
+		return
+	}
 
 	for {
-		if database.DB.PingContext(context.Background()) != nil {
-			database.logger.Info("retrying SQL database connection")
+		if ctx.Err() != nil {
+			return
+		}
+
+		if err := database.DB.PingContext(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if database.logger != nil {
+				database.logger.Info("retrying SQL database connection")
+			}
 
 			for {
-				err := database.DB.PingContext(context.Background())
+				if ctx.Err() != nil {
+					return
+				}
+
+				err = database.DB.PingContext(ctx)
+				if ctx.Err() != nil {
+					return
+				}
 				if err == nil {
-					printConnectionSuccessLog("connected", database.config, database.logger)
+					if database.logger != nil && database.config != nil {
+						printConnectionSuccessLog("connected", database.config, database.logger)
+					}
 
 					break
 				}
 
-				printConnectionFailureLog("connect", database.config, database.logger, err)
+				if database.logger != nil && database.config != nil {
+					printConnectionFailureLog("connect", database.config, database.logger, err)
+				}
 
-				time.Sleep(connRetryFrequencyInSeconds * time.Second)
+				if !sleepWithContext(ctx, connRetryFrequency) {
+					return
+				}
 			}
 		}
 
-		time.Sleep(connRetryFrequencyInSeconds * time.Second)
+		if !sleepWithContext(ctx, connRetryFrequency) {
+			return
+		}
+	}
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -271,17 +332,24 @@ func quotePostgresValue(value string) string {
 	return "'" + value + "'"
 }
 
-func pushDBMetrics(db *sql.DB, metrics Metrics) {
-	const frequency = 10
+func pushDBMetrics(ctx context.Context, db *sql.DB, metrics Metrics) {
+	const frequency = 10 * time.Second
+
+	if ctx == nil || db == nil || metrics == nil {
+		return
+	}
 
 	for {
-		if db != nil {
-			stats := db.Stats()
+		if ctx.Err() != nil {
+			return
+		}
 
-			metrics.SetGauge("app_sql_open_connections", float64(stats.OpenConnections))
-			metrics.SetGauge("app_sql_inUse_connections", float64(stats.InUse))
+		stats := db.Stats()
+		metrics.SetGauge("app_sql_open_connections", float64(stats.OpenConnections))
+		metrics.SetGauge("app_sql_inUse_connections", float64(stats.InUse))
 
-			time.Sleep(frequency * time.Second)
+		if !sleepWithContext(ctx, frequency) {
+			return
 		}
 	}
 }

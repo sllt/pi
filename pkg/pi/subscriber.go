@@ -118,7 +118,7 @@ type panicLog struct {
 }
 
 func panicRecovery(re any, log logging.Logger) {
-	if re == nil {
+	if re == nil || log == nil {
 		return
 	}
 

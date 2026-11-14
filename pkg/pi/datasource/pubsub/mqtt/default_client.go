@@ -38,6 +38,7 @@ func getDefaultClient(config *Config, logger Logger, metrics Metrics) *MQTT {
 
 	client := mqtt.NewClient(opts)
 
+	stopCh := make(chan struct{})
 	mqttClient := &MQTT{
 		Client:        client,
 		config:        config,
@@ -45,12 +46,14 @@ func getDefaultClient(config *Config, logger Logger, metrics Metrics) *MQTT {
 		subscriptions: subscriptions,
 		mu:            mu,
 		metrics:       metrics,
+		stopCh:        stopCh,
 	}
 
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		logger.Errorf("could not connect to MQTT at '%v:%v', error: %v", config.Hostname, config.Port, token.Error())
 
-		go retryDefaultConnect(client, config, logger, opts)
+		mqttClient.retryDone = make(chan struct{})
+		go retryDefaultConnect(client, config, logger, opts, stopCh, mqttClient.retryDone)
 
 		return mqttClient
 	}
@@ -63,7 +66,15 @@ func getDefaultClient(config *Config, logger Logger, metrics Metrics) *MQTT {
 
 	logger.Infof("connected to MQTT at '%v:%v' with clientID '%v'", config.Hostname, config.Port, clientID)
 
-	return &MQTT{Client: client, config: config, logger: logger, subscriptions: msg, mu: new(sync.RWMutex), metrics: metrics}
+	return &MQTT{
+		Client:        client,
+		config:        config,
+		logger:        logger,
+		subscriptions: msg,
+		mu:            new(sync.RWMutex),
+		metrics:       metrics,
+		stopCh:        stopCh,
+	}
 }
 
 func getMQTTClientOptions(config *Config) *mqtt.ClientOptions {
@@ -102,10 +113,22 @@ func getClientID(clientID string) string {
 	return id.String() + clientID
 }
 
-func retryDefaultConnect(client mqtt.Client, config *Config, logger Logger, options *mqtt.ClientOptions) {
+func retryDefaultConnect(client mqtt.Client, config *Config, logger Logger, options *mqtt.ClientOptions, stopCh <-chan struct{}, done chan<- struct{}) {
+	if done != nil {
+		defer close(done)
+	}
+
 	backoff := defaultRetryTimeout
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
 
 	for {
+		select {
+		case <-stopCh:
+			return
+		case <-timer.C:
+		}
+
 		token := client.Connect()
 		if token.Wait() && token.Error() == nil {
 			logger.Infof("connected to MQTT at '%v:%v' with clientID '%v'", config.Hostname, config.Port, options.ClientID)
@@ -114,7 +137,7 @@ func retryDefaultConnect(client mqtt.Client, config *Config, logger Logger, opti
 		}
 
 		logger.Errorf("could not connect to MQTT at '%v:%v', error: %v", config.Hostname, config.Port, token.Error())
-		time.Sleep(backoff)
 		backoff = time.Duration(math.Min(float64(backoff*backoffMultiplier), float64(maxRetryTimeout)))
+		timer.Reset(backoff)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sllt/pi/pkg/pi/datasource"
@@ -24,6 +25,12 @@ type DB struct {
 	logger  datasource.Logger
 	config  *DBConfig
 	metrics Metrics
+
+	stopOnce   sync.Once
+	bgCancel   context.CancelFunc
+	bgWg       sync.WaitGroup
+	closeOnce  sync.Once
+	closeDBErr error
 }
 
 type Log struct {
@@ -134,12 +141,30 @@ func (d *DB) BeginTxContext(ctx context.Context, opts *sql.TxOptions) (*Tx, erro
 	return &Tx{Tx: tx, config: d.config, logger: d.logger, metrics: d.metrics, owner: d}, nil
 }
 
-func (d *DB) Close() error {
-	if d.DB != nil {
-		return d.DB.Close()
+func (d *DB) stopBackgroundLoops() {
+	if d == nil {
+		return
 	}
+	d.stopOnce.Do(func() {
+		if d.bgCancel != nil {
+			d.bgCancel()
+		}
+	})
+	d.bgWg.Wait()
+}
 
-	return nil
+func (d *DB) Close() error {
+	if d == nil {
+		return nil
+	}
+	d.stopBackgroundLoops()
+	d.closeOnce.Do(func() {
+		if d.DB != nil {
+			d.closeDBErr = d.DB.Close()
+		}
+	})
+
+	return d.closeDBErr
 }
 
 type Tx struct {

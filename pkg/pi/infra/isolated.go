@@ -7,6 +7,7 @@ import (
 	"github.com/sllt/pi/pkg/pi/metrics"
 	"github.com/sllt/pi/pkg/pi/websocket"
 	"go.opentelemetry.io/otel/metric/noop"
+	traceNoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // NewIsolated registers in-memory infrastructure without global telemetry,
@@ -18,7 +19,16 @@ func NewIsolated(c config.Config, l logging.Logger, m metrics.Manager) *Containe
 	if m == nil {
 		m = metrics.NewMetricsManager(noop.NewMeterProvider().Meter("pi"), l)
 	}
-	x := &Container{Logger: l, appName: c.GetOrDefault("APP_NAME", "pi-app"), appVersion: c.GetOrDefault("APP_VERSION", "dev"), metricsManager: m, WSManager: websocket.New()}
+	x := &Container{
+		Logger:         l,
+		appName:        c.GetOrDefault("APP_NAME", "pi-app"),
+		appVersion:     c.GetOrDefault("APP_VERSION", "dev"),
+		metricsManager: m,
+		WSManager:      websocket.New(),
+		TracerProvider: traceNoop.NewTracerProvider(),
+		isolated:       true,
+		healthState:    &containerHealthState{},
+	}
 	x.File = file.NewLocalFileSystem(l)
 	x.registerFrameworkMetrics()
 	return x

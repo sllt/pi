@@ -12,8 +12,10 @@ const (
 	serviceDown    = "DOWN"
 	defaultTimeout = 5
 
-	AlivePath  = "/.well-known/alive"
-	HealthPath = "/.well-known/health"
+	StartupPath = "/.well-known/startup"
+	AlivePath   = "/.well-known/alive"
+	ReadyPath   = "/.well-known/ready"
+	HealthPath  = "/.well-known/health"
 )
 
 type Health struct {
@@ -30,17 +32,24 @@ func (h *httpService) getHealthResponseForEndpoint(ctx context.Context, endpoint
 		Details: make(map[string]any),
 	}
 
-	// create a new context with timeout for healthCheck call.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(timeout)*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	// send a new context as we can have downstream services taking too long
-	// which may cancel the original health check http request
 	resp, err := h.Get(ctx, endpoint, nil)
 
 	if err != nil || resp == nil {
 		healthResponse.Status = serviceDown
-		healthResponse.Details["error"] = err.Error()
+		if err != nil {
+			healthResponse.Details["error"] = err.Error()
+		} else {
+			healthResponse.Details["error"] = "empty response"
+		}
 
 		return &healthResponse
 	}

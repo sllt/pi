@@ -35,13 +35,25 @@ type TelemetryData struct {
 	StartupTime      string `json:"startup_time,omitempty"`
 }
 
-// SendFrameworkStartupTelemetry sends telemetry data.
+// SendFrameworkStartupTelemetry sends telemetry data asynchronously when enabled by ambient environment.
+// Deprecated for internal construction paths: framework runtime lifecycle calls SendFrameworkStartupTelemetryContext.
 func SendFrameworkStartupTelemetry(appName, appVersion string) {
 	if !telemetryEnabled() {
 		return
 	}
 
-	go sendTelemetryData(appName, appVersion)
+	go sendTelemetryData(context.Background(), appName, appVersion)
+}
+
+// SendFrameworkStartupTelemetryContext sends startup telemetry synchronously bounded by ctx.
+func SendFrameworkStartupTelemetryContext(ctx context.Context, appName, appVersion string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	sendTelemetryData(ctx, appName, appVersion)
 }
 
 func telemetryEnabled() bool {
@@ -52,7 +64,7 @@ func telemetryEnabled() bool {
 	return setting != "false"
 }
 
-func sendTelemetryData(appName, appVersion string) {
+func sendTelemetryData(ctx context.Context, appName, appVersion string) {
 	if appName == "" {
 		appName = defaultAppName
 	}
@@ -77,16 +89,23 @@ func sendTelemetryData(appName, appVersion string) {
 		StartupTime:      now.Format(time.RFC3339),
 	}
 
-	sendToEndpoint(&data, defaultTelemetryEndpoint)
+	sendToEndpointContext(ctx, &data, defaultTelemetryEndpoint)
 }
 
 func sendToEndpoint(data *TelemetryData, endpoint string) {
+	sendToEndpointContext(context.Background(), data, endpoint)
+}
+
+func sendToEndpointContext(parent context.Context, data *TelemetryData, endpoint string) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	ctx, cancel := context.WithTimeout(parent, requestTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
@@ -96,7 +115,7 @@ func sendToEndpoint(data *TelemetryData, endpoint string) {
 
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: requestTimeout}
 
 	resp, err := client.Do(req)
 	if err != nil {

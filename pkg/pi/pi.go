@@ -11,10 +11,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sllt/pi/pkg/pi/config"
+	"github.com/sllt/pi/pkg/pi/http/middleware"
 	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/metrics"
@@ -54,22 +57,71 @@ type App struct {
 	subscriptionManager SubscriptionManager
 	onStartHooks        []func(ctx *Context) error
 	onStopHooks         []func(ctx *Context) error
-	backgroundWorkers   []backgroundWorker
+	drainHooks          []func(ctx context.Context) error
+	backgroundWorkers   []*workerSlot
+	nextWorkerSeq       uint64
+	wsClients           []*wsClientSlot
+	nextWSClientSeq     uint64
+	compatWSServices    []*compatWSService
+	subscriberSlotsList []*subscriberSlot
+	nextSubscriberSeq   uint64
 
-	runtimeCtx    context.Context
-	runtimeCancel context.CancelCauseFunc
-	runtimeTasks  sync.WaitGroup
-	runtimeMu     sync.Mutex
-	runtimeState  lifecycleState
-	startupDone   chan struct{}
-	startDone     chan struct{}
-	startErr      error
-	stopDone      chan struct{}
-	stopErr       error
-	pureBuild     bool
-	resources     []managedResource
-	waitDone      chan struct{}
-	httpSetup     sync.Once
+	wsServerRegistered    bool
+	wsDrainOnce           sync.Once
+	wsServerSessionsMu    sync.RWMutex
+	wsServerSessions      map[string]*wsServerSession
+	nextWSSessionSeq      uint64
+	wsHubBoots            atomic.Uint64
+	wsServerEnqueuedTotal atomic.Uint64
+	wsServerDroppedTotal  atomic.Uint64
+	wsServerWriteErrTotal atomic.Uint64
+
+	startupCompleted      atomic.Bool
+	actorTreeDead         atomic.Bool
+	grpcHealthEnabled     atomic.Bool
+	grpcHealthOnce        sync.Once
+	grpcHealthDirtyCh     chan struct{}
+	grpcHealthLoopStarted atomic.Bool
+	grpcHealthSyncMu      sync.Mutex
+	supMetricsOnce        sync.Once
+	supMetricsReady       atomic.Bool
+	rateLimitMetricsOnce  sync.Once
+	ownedTracerShutdown   func(context.Context) error
+	middlewareClosers     []func() error
+
+	runtimeCtx      context.Context
+	runtimeCancel   context.CancelCauseFunc
+	intakeCtx       context.Context
+	intakeCancel    context.CancelCauseFunc
+	intakeStopAfter func() bool
+	drainExecCtx    context.Context
+	drainCancel     context.CancelCauseFunc
+
+	taskGateMu          sync.Mutex
+	intakeClosed        bool
+	runtimeTasks        sync.WaitGroup
+	controllerStopTasks sync.WaitGroup
+
+	runtimeMu      sync.Mutex
+	runtimeState   lifecycleState
+	startupDone    chan struct{}
+	startDone      chan struct{}
+	startErr       error
+	stopDone       chan struct{}
+	stopErr        error
+	lateRuntimeErr error
+	actorRT        *actorRuntime
+	workerJitter   func(maxDelay time.Duration) time.Duration
+	cronNow        func() time.Time
+	pureBuild        bool
+	resources        []managedResource
+	waitDone         chan struct{}
+	customValidate   func(any) error
+	typedBind        TypedBindConfig
+	openAPI          OpenAPIConfig
+	hasOpenAPIConfig bool
+	httpSetupMu      sync.Mutex
+	httpSetupDone    bool
 }
 
 func (a *App) runOnStartHooks(ctx context.Context) error {
@@ -106,17 +158,73 @@ func (a *App) runOnStopHooks(ctx context.Context) error {
 
 	for i := len(hooks) - 1; i >= 0; i-- {
 		if ctx.Err() != nil {
-			return errors.Join(err, ctx.Err())
+			err = joinShutdownErr(err, fmt.Errorf("OnStop hook %d not executed: %w", i, ctx.Err()))
+			return err
 		}
 
 		hookErr := a.runLifecycleHook("OnStop", i, hooks[i], piCtx, errStopHookPanic)
 		if hookErr != nil {
-			a.Logger().Errorf("OnStop hook failed: %v", hookErr)
-			err = errors.Join(err, hookErr)
+			if l := a.safeLogger(); l != nil {
+				l.Errorf("OnStop hook failed: %v", hookErr)
+			}
+			err = joinShutdownErr(err, hookErr)
 		}
 	}
 
-	return errors.Join(err, ctx.Err())
+	return joinShutdownErr(err, ctx.Err())
+}
+
+func (a *App) runShutdownOnStopHooks(callerCtx context.Context, fallbackCtx func() context.Context) error {
+	a.runtimeMu.Lock()
+	hooks := append([]func(*Context) error(nil), a.onStopHooks...)
+	a.runtimeMu.Unlock()
+
+	var err error
+	for i := len(hooks) - 1; i >= 0; i-- {
+		hookCtx := callerCtx
+		if callerErr := callerCtx.Err(); callerErr != nil {
+			err = joinShutdownErr(err, callerErr)
+			hookCtx = fallbackCtx()
+		}
+		if hookCtx.Err() != nil {
+			err = joinShutdownErr(err, fmt.Errorf("OnStop hook %d not executed: %w", i, hookCtx.Err()))
+			break
+		}
+
+		piCtx := newContext(nil, noopRequest{ctx: hookCtx}, a.container)
+		hookErr := a.runLifecycleHook("OnStop", i, hooks[i], piCtx, errStopHookPanic)
+		if hookErr != nil {
+			if l := a.safeLogger(); l != nil {
+				l.Errorf("OnStop hook failed: %v", hookErr)
+			}
+			err = joinShutdownErr(err, hookErr)
+		}
+		if callerErr := callerCtx.Err(); callerErr != nil {
+			err = joinShutdownErr(err, callerErr)
+		}
+	}
+
+	return err
+}
+
+func joinShutdownErr(existing, next error) error {
+	if next == nil {
+		return existing
+	}
+	if existing == nil {
+		return next
+	}
+	if errors.Is(existing, next) && (errors.Is(next, context.Canceled) || errors.Is(next, context.DeadlineExceeded)) {
+		return existing
+	}
+	return errors.Join(existing, next)
+}
+
+func (a *App) safeLogger() logging.Logger {
+	if a != nil && a.container != nil {
+		return a.container.Logger
+	}
+	return nil
 }
 
 func (a *App) runLifecycleHook(name string, idx int, hook func(ctx *Context) error, ctx *Context, panicErr error) (hookErr error) {
@@ -148,12 +256,12 @@ func (a *App) Stop(ctx context.Context) error {
 		a.runtimeState = lifecycleStopping
 		a.stopDone = make(chan struct{})
 		startupDone := a.startupDone
-		cancel := a.runtimeCancel
 		a.runtimeMu.Unlock()
 
-		if cancel != nil {
-			cancel(nil)
-		}
+		func() {
+			defer func() { _ = recover() }()
+			a.beginStopIntake(nil)
+		}()
 		go a.finishStop(ctx, startupDone)
 	} else {
 		a.runtimeMu.Unlock()
@@ -168,53 +276,170 @@ func (a *App) Shutdown(ctx context.Context) error {
 	return a.Stop(ctx)
 }
 
-// shutdown stops HTTP, gRPC, Metrics servers and closes the container's active connections to datasources.
+// shutdown executes the three-phase shutdown sequence:
+// Phase A (Stop Intake & protocol listeners) -> Phase B (Business Drain while drainExecCtx stays live)
+// -> Phase C (Cancel drainExecCtx, stop Actor supervision tree, wait for all tracked runtime tasks)
+// -> OnStop hooks -> Owned resources & Metrics server.
 func (a *App) shutdown(ctx context.Context) error {
-	a.requestShutdown(nil)
+	a.beginStopIntake(nil)
 
-	var err error
-	if a.httpServer != nil {
-		err = errors.Join(err, a.httpServer.Shutdown(ctx))
+	var (
+		err            error
+		fallbackCtxVal context.Context
+		fallbackCancel context.CancelFunc
+	)
+	defer func() {
+		if fallbackCancel != nil {
+			fallbackCancel()
+		}
+	}()
+
+	getCleanupFallbackCtx := func() context.Context {
+		if fallbackCtxVal != nil {
+			return fallbackCtxVal
+		}
+		timeout := 30 * time.Second
+		if a.Config != nil {
+			if cfgTimeout, cfgErr := a.shutdownTimeout(); cfgErr == nil && cfgTimeout > 0 {
+				timeout = cfgTimeout
+			}
+		}
+		fallbackCtxVal, fallbackCancel = context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		return fallbackCtxVal
 	}
 
+	// Phase A: close protocol listeners and stop subscriber intake (reserve sub-budget when Phase B drain work is registered).
+	needsPhaseB := a.hasPhaseBDrainHooks() || a.cronActorCount() > 0 || a.hasDrainSubscribers()
+	listenerCtx := ctx
+	var listenerCancel context.CancelFunc
+	if needsPhaseB {
+		if deadline, ok := ctx.Deadline(); ok {
+			if rem := time.Until(deadline); rem > 10*time.Millisecond {
+				listenerCtx, listenerCancel = context.WithTimeout(ctx, rem/2)
+			}
+		}
+	}
+	if a.httpServer != nil {
+		err = joinShutdownErr(err, a.httpServer.Shutdown(listenerCtx))
+	}
 	if a.grpcServer != nil {
-		err = errors.Join(err, a.grpcServer.Shutdown(ctx))
+		err = joinShutdownErr(err, a.grpcServer.Shutdown(listenerCtx))
+	}
+	if listenerCancel != nil {
+		listenerCancel()
 	}
 
 	if a.cron != nil {
 		a.cron.Stop()
 	}
 
+	if len(a.subscriberSlots()) > 0 {
+		intakeStopBudget := 2 * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			if rem := time.Until(deadline); rem > 4*time.Millisecond {
+				if quarter := rem / 4; quarter < intakeStopBudget {
+					intakeStopBudget = quarter
+				}
+			} else {
+				intakeStopBudget = time.Millisecond
+			}
+		}
+		intakeStopCtx, cancelIntakeWait := context.WithTimeout(ctx, intakeStopBudget)
+		_ = a.waitSubscribersIntakeStopped(intakeStopCtx)
+		cancelIntakeWait()
+	}
+
+	// Phase B: drain finite in-flight business work while drainExecCtx remains un-canceled.
+	// Respect caller ctx directly so an already-expired Stop(ctx) advances immediately to Phase C cancellation.
+	if needsPhaseB {
+		err = joinShutdownErr(err, a.waitCronInFlight(ctx))
+		err = joinShutdownErr(err, a.waitSubscribersDrained(ctx))
+		err = joinShutdownErr(err, a.runPhaseBDrain(ctx))
+	}
+
+	// Phase C: cancel residual drain execution scope, stop Actor supervision tree, and wait for all tracked tasks.
+	a.cancelDrainExec(context.Canceled)
+	a.sweepSubscribersUnstarted("drain_timeout_abandoned")
+	actorStopCtx := ctx
+	if callerErr := ctx.Err(); callerErr != nil {
+		err = joinShutdownErr(err, callerErr)
+		actorStopCtx = getCleanupFallbackCtx()
+	}
+	err = joinShutdownErr(err, a.stopActorRuntime(actorStopCtx))
+	a.stopCompatWSServices()
+
 	if waitErr := a.waitForRuntimeTasks(ctx); waitErr != nil {
-		err = errors.Join(err, waitErr)
+		err = joinShutdownErr(err, waitErr)
 		// Do not close dependencies while workers still use them. Stop waiters
 		// can time out independently while this sole cleanup owner keeps waiting.
 		a.runtimeTasks.Wait()
 	}
-	err = errors.Join(err, a.runOnStopHooks(ctx))
+	a.controllerStopTasks.Wait()
+	if a.container != nil {
+		if waitErr := a.container.WaitHandlers(ctx); waitErr != nil {
+			err = joinShutdownErr(err, waitErr)
+			a.container.WaitHandlersAll()
+		}
+		a.container.CloseHealthAdmission()
+		if waitErr := a.container.WaitHealthSamplers(ctx); waitErr != nil {
+			err = joinShutdownErr(err, waitErr)
+			a.container.WaitHealthSamplersAll()
+		}
+	}
+	err = joinShutdownErr(err, a.takeLateRuntimeError())
+
+	// Step 5: execute OnStop hooks in reverse order without silently skipping cleanup on caller timeout.
+	err = joinShutdownErr(err, a.runShutdownOnStopHooks(ctx, getCleanupFallbackCtx))
+
+	// Step 6: close middleware/service background loops, Owned resources (or legacy container), and Metrics server.
+	cleanupCtx := ctx
+	if callerErr := ctx.Err(); callerErr != nil {
+		err = joinShutdownErr(err, callerErr)
+		cleanupCtx = getCleanupFallbackCtx()
+	}
+
+	err = joinShutdownErr(err, a.closeMiddlewareClosers())
 
 	if a.pureBuild {
-		err = errors.Join(err, a.stopResources(ctx))
-		for _, conn := range a.container.WSManager.ListConnections() {
-			a.container.WSManager.CloseConnection(conn)
+		if a.container != nil {
+			for _, svc := range a.container.Services {
+				if svc != nil {
+					err = joinShutdownErr(err, service.CloseService(svc))
+				}
+			}
 		}
-	} else if a.container != nil {
-		err = errors.Join(err, a.container.Close())
+		err = joinShutdownErr(err, a.stopResources(cleanupCtx))
+		if a.container != nil && a.container.WSManager != nil {
+			for _, connID := range a.container.WSManager.ListConnections() {
+				conn := a.container.WSManager.GetConnectionByServiceName(connID)
+				a.container.WSManager.CloseConnection(connID)
+				if conn != nil {
+					_ = conn.WaitAsyncWrites(cleanupCtx)
+				}
+			}
+		}
+	} else {
+		if a.ownedTracerShutdown != nil {
+			err = joinShutdownErr(err, a.ownedTracerShutdown(cleanupCtx))
+		}
+		if a.container != nil {
+			err = joinShutdownErr(err, a.container.Close())
+		}
 	}
 
 	if a.metricServer != nil {
-		err = errors.Join(err, a.metricServer.Shutdown(ctx))
+		err = joinShutdownErr(err, a.metricServer.Shutdown(cleanupCtx))
 	}
 
 	if err != nil {
 		return err
 	}
 
-	if a.container != nil && a.container.Logger != nil {
-		a.container.Logger.Info("Application shutdown complete")
+	if l := a.safeLogger(); l != nil {
+		l.Info("Application shutdown complete")
 	}
 
-	return err
+	return nil
 }
 
 func isPortAvailable(port int) bool {
@@ -230,11 +455,40 @@ func isPortAvailable(port int) bool {
 	return false
 }
 
-func (a *App) httpServerSetup() {
-	a.httpSetup.Do(a.setupHTTPRoutes)
+func (a *App) validateRoutesPreStart() error {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		return nil
+	}
+	reg := a.httpServer.registry
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	return a.syncAndValidateRoutesLocked(false)
 }
 
-func (a *App) setupHTTPRoutes() {
+func (a *App) validateRoutesForStart() error {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		return nil
+	}
+	reg := a.httpServer.registry
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	return a.syncAndValidateRoutesLocked(a.hasOpenAPIConfig)
+}
+
+func (a *App) ensureHTTPCompiled() error {
+	a.httpSetupMu.Lock()
+	defer a.httpSetupMu.Unlock()
+	if a.httpSetupDone {
+		return nil
+	}
+	if err := a.setupHTTPRoutes(); err != nil {
+		return err
+	}
+	a.httpSetupDone = true
+	return nil
+}
+
+func (a *App) setupHTTPRoutes() error {
 	// TODO: find a way to read REQUEST_TIMEOUT config only once and log it there. currently doing it twice one for populating
 	// the value and other for logging
 	requestTimeout := a.Config.Get("REQUEST_TIMEOUT")
@@ -245,17 +499,9 @@ func (a *App) setupHTTPRoutes() {
 		}
 	}
 
-	// Register default routes - these are only added when HTTP server is actually starting
-	a.add(http.MethodGet, service.HealthPath, healthHandler)
-	a.add(http.MethodGet, service.AlivePath, liveHandler)
-	a.add(http.MethodGet, "/favicon.ico", faviconHandler)
-
-	// Add OpenAPI/Swagger routes if openapi.json exists
-	a.checkAndAddOpenAPIDocumentation()
-
-	// Compile the route registry: walks the GroupNode tree and registers
-	// all routes and middleware onto the chi router.
-	a.httpServer.registry.compile(a.httpServer.router.Mux(), a.container, a.getRequestTimeout())
+	if err := a.setupAndCompileHTTPRoutes(); err != nil {
+		return err
+	}
 
 	for dirName, endpoint := range a.httpServer.staticFiles {
 		a.httpServer.router.AddStaticFiles(a.Logger(), endpoint, dirName)
@@ -276,6 +522,32 @@ func (a *App) setupHTTPRoutes() {
 	})
 
 	*a.httpServer.router.RegisteredRoutes = registeredMethods
+	return nil
+}
+
+func (a *App) setupAndCompileHTTPRoutes() error {
+	reg := a.httpServer.registry
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+
+	if err := a.syncAndValidateRoutesLocked(a.hasOpenAPIConfig); err != nil {
+		return err
+	}
+
+	// Register default routes - these are only added when HTTP server is actually starting
+	a.addSystemRouteLocked(http.MethodGet, service.StartupPath, a.startupProbeHandler)
+	a.addSystemRouteLocked(http.MethodGet, service.ReadyPath, a.readyProbeHandler)
+	a.addSystemRouteLocked(http.MethodGet, service.HealthPath, a.deepHealthHandler)
+	a.addSystemRouteLocked(http.MethodGet, service.AlivePath, a.aliveProbeHandler)
+	a.addSystemRouteLocked(http.MethodGet, "/favicon.ico", faviconHandler)
+
+	// Add OpenAPI/Swagger routes
+	a.checkAndAddOpenAPIDocumentationLocked()
+
+	// Compile the route registry: walks the GroupNode tree and registers
+	// all routes and middleware onto the chi router.
+	reg.compileLocked(a.httpServer.router.Mux(), a.container, a.getRequestTimeout())
+	return nil
 }
 
 func (a *App) startSubscriptions(ctx context.Context) error {
@@ -319,13 +591,105 @@ func (a *App) AddHTTPService(serviceName, serviceAddress string, options ...serv
 		a.container.Services = make(map[string]service.HTTP)
 	}
 
-	if _, ok := a.container.Services[serviceName]; ok {
+	if prev, ok := a.container.Services[serviceName]; ok {
 		a.container.Debugf("Service already registered Name: %v", serviceName)
+		if prev != nil {
+			_ = service.CloseService(prev)
+		}
 	}
 
 	options = append([]service.Options{service.WithAttributes(map[string]string{"name": serviceName})}, options...)
 
-	a.container.Services[serviceName] = service.NewHTTPService(serviceAddress, a.container.Logger, a.container.Metrics(), options...)
+	a.container.Services[serviceName] = service.NewHTTPServiceWithTracerProvider(
+		serviceAddress,
+		a.container.Logger,
+		a.container.Metrics(),
+		a.container.GetTracerProvider(),
+		options...,
+	)
+}
+
+func (a *App) ensureRateLimitMetrics() {
+	if a == nil || a.container == nil {
+		return
+	}
+	m := a.container.Metrics()
+	if m == nil {
+		return
+	}
+	if _, isStrictMock := m.(*infra.MockMetrics); isStrictMock {
+		return
+	}
+	a.rateLimitMetricsOnce.Do(func() {
+		m.NewCounter("app_http_rate_limit_exceeded_total", "Total number of HTTP requests rejected due to rate limiting.")
+	})
+}
+
+// UseRateLimiter registers an HTTP rate-limiting middleware whose background bucket sweeper
+// is automatically stopped during App.Stop.
+func (a *App) UseRateLimiter(cfg middleware.RateLimiterConfig) {
+	if a == nil {
+		return
+	}
+	a.ensureRateLimitMetrics()
+	var (
+		mw     func(http.Handler) http.Handler
+		closer func() error
+	)
+	if a.pureBuild {
+		var start func(context.Context)
+		mw, start, closer = middleware.RateLimiterDeferred(cfg, a.Metrics())
+		a.OnStart(func(*Context) error {
+			start(a.intakeContext())
+			return nil
+		})
+	} else {
+		mw, closer = middleware.RateLimiterWithCloser(cfg, a.Metrics())
+	}
+	a.registerMiddlewareCloser(closer)
+	if a.httpServer != nil {
+		a.Use(mw)
+	}
+}
+
+func (a *App) registerMiddlewareCloser(fn func() error) {
+	if a == nil || fn == nil {
+		return
+	}
+	a.runtimeMu.Lock()
+	if a.runtimeState == lifecycleStopping || a.runtimeState == lifecycleStopped || a.stopDone != nil {
+		a.runtimeMu.Unlock()
+		_ = fn()
+		return
+	}
+	a.middlewareClosers = append(a.middlewareClosers, fn)
+	a.runtimeMu.Unlock()
+}
+
+func (a *App) closeMiddlewareClosers() error {
+	if a == nil {
+		return nil
+	}
+	a.runtimeMu.Lock()
+	closers := a.middlewareClosers
+	a.middlewareClosers = nil
+	a.runtimeMu.Unlock()
+
+	var err error
+	for i := len(closers) - 1; i >= 0; i-- {
+		if closers[i] != nil {
+			closerFn := closers[i]
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err = joinShutdownErr(err, fmt.Errorf("middleware closer panicked: %v", r))
+					}
+				}()
+				err = joinShutdownErr(err, closerFn())
+			}()
+		}
+	}
+	return err
 }
 
 // Metrics returns the metrics manager associated with the App.
@@ -371,7 +735,7 @@ func (a *App) MigrateContext(
 ) (result migration.Result, err error) {
 	defer func() {
 		if re := recover(); re != nil {
-			panicRecovery(re, a.container.Logger)
+			panicRecovery(re, a.safeLogger())
 			err = fmt.Errorf("migration panic: %v", re)
 		}
 	}()
@@ -422,39 +786,68 @@ func (a *App) MigrationStatusContext(
 // the subscription is not registered.
 func (a *App) Subscribe(topic string, handler SubscribeFunc) {
 	if topic == "" || handler == nil {
-		a.container.Logger.Errorf("invalid subscription: topic and handler must not be empty or nil")
+		if l := a.safeLogger(); l != nil {
+			l.Errorf("invalid subscription: topic and handler must not be empty or nil")
+		}
 
 		return
 	}
 
-	if a.container.GetSubscriber() == nil {
-		a.container.Logger.Errorf("subscriber not initialized in the container")
+	if a.container == nil || a.container.GetSubscriber() == nil {
+		if l := a.safeLogger(); l != nil {
+			l.Errorf("subscriber not initialized in the container")
+		}
 
 		return
 	}
 
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	if a.runtimeState != lifecycleNew {
+		if l := a.safeLogger(); l != nil {
+			l.Errorf("%v", errSubscriberRegisterTooLate)
+		}
+		return
+	}
+	if a.subscriptionManager.subscriptions == nil {
+		a.subscriptionManager.subscriptions = make(map[string]SubscribeFunc)
+	}
 	a.subscriptionManager.subscriptions[topic] = handler
 }
 
 // Use registers HTTP middleware (func(http.Handler) http.Handler) at the global level.
 // These run at the HTTP layer before the pi Context is created.
 func (a *App) Use(middlewares ...func(http.Handler) http.Handler) {
-	if !a.canMutateRoutes("register HTTP middlewares") {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		return
+	}
+	reg := a.httpServer.registry
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	if !a.canMutateRoutesLocked("register HTTP middlewares") {
 		return
 	}
 
-	a.httpServer.registry.root.httpMWs = append(a.httpServer.registry.root.httpMWs, middlewares...)
+	reg.root.httpMWs = append(reg.root.httpMWs, middlewares...)
+	reg.markDirtyLocked()
 }
 
 // UseMiddleware registers PiMiddleware that runs at the application layer with *Context access.
 // This is a BREAKING CHANGE: the signature changed from func(http.Handler) http.Handler
 // to func(next Handler) Handler (PiMiddleware).
 func (a *App) UseMiddleware(middlewares ...PiMiddleware) {
-	if !a.canMutateRoutes("register Pi middlewares") {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		return
+	}
+	reg := a.httpServer.registry
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	if !a.canMutateRoutesLocked("register Pi middlewares") {
 		return
 	}
 
-	a.httpServer.registry.root.piMWs = append(a.httpServer.registry.root.piMWs, middlewares...)
+	reg.root.piMWs = append(reg.root.piMWs, middlewares...)
+	reg.markDirtyLocked()
 }
 
 // UseMiddlewareWithContainer adds a middleware that has access to the container
@@ -473,16 +866,16 @@ func (a *App) UseMiddlewareWithContainer(middlewareHandler func(c *infra.Contain
 // Group creates or gets a route group with the given prefix and returns it.
 // An optional callback can be provided for backward-compatible inline registration.
 func (a *App) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGroup {
-	if !a.canMutateRoutes("create route groups") {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
 		return a.rootRouteGroup()
 	}
-
-	a.ensureHTTPAvailable()
 
 	validCallbacks := make([]func(sub *RouteGroup), 0, len(fns))
 	for _, fn := range fns {
 		if fn == nil {
-			a.container.Logger.Error("route group callback cannot be nil")
+			if a.container != nil && a.container.Logger != nil {
+				a.container.Logger.Error("route group callback cannot be nil")
+			}
 			continue
 		}
 
@@ -495,22 +888,31 @@ func (a *App) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGroup {
 	}
 
 	normalizedPrefix := normalizeGroupPrefix(prefix)
+
+	reg := a.httpServer.registry
+	reg.mu.Lock()
+	if !a.canMutateRoutesLocked("create route groups") {
+		reg.mu.Unlock()
+		return a.rootRouteGroup()
+	}
+
+	a.ensureHTTPAvailable()
+
+	var targetGroup *RouteGroup
 	if normalizedPrefix == "" {
-		root := a.rootRouteGroup()
-		for _, fn := range validCallbacks {
-			fn(root)
-		}
-
-		return root
+		targetGroup = &RouteGroup{node: reg.root, app: a}
+	} else {
+		child := reg.root.getOrCreateChild(normalizedPrefix)
+		reg.markDirtyLocked()
+		targetGroup = &RouteGroup{node: child, app: a}
 	}
+	reg.mu.Unlock()
 
-	child := a.httpServer.registry.root.getOrCreateChild(normalizedPrefix)
-	sub := &RouteGroup{node: child, app: a}
 	for _, fn := range validCallbacks {
-		fn(sub)
+		fn(targetGroup)
 	}
 
-	return sub
+	return targetGroup
 }
 
 func (a *App) rootRouteGroup() *RouteGroup {
@@ -521,15 +923,12 @@ func (a *App) rootRouteGroup() *RouteGroup {
 	return &RouteGroup{node: a.httpServer.registry.root, app: a}
 }
 
-// AddCronJob registers a cron job to the cron table.
+// AddCronJob registers a cron job to the cron table without starting background goroutines;
+// scheduling starts when the application starts, using CronSkipIfRunning overlap protection.
 // The cron expression can be either a 5-part or 6-part format. The 6-part format includes an
 // optional second field (in beginning) and others being minute, hour, day, month and day of week respectively.
 func (a *App) AddCronJob(schedule, jobName string, job CronFunc) {
-	if a.cron == nil {
-		a.cron = NewCron(a.container)
-	}
-
-	if err := a.cron.AddJob(schedule, jobName, job); err != nil {
+	if err := a.Cron().AddJob(schedule, jobName, job); err != nil {
 		a.Logger().Errorf("error adding cron job, err: %v", err)
 	}
 }

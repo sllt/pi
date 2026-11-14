@@ -1,11 +1,46 @@
 package create
 
+// DTO template for Pi typed HTTP contracts
+const dtoTemplate = `package v1
+
+import (
+	"time"
+
+	"github.com/sllt/pi/pkg/pi"
+)
+
+type Get{{ .StructName }}Req struct {
+	pi.Meta ` + "`path:\"/{id}\" method:\"GET\" tags:\"{{ .StructName }}\" summary:\"Get {{ .StructName }}\"`" + `
+
+	ID string ` + "`path:\"id\" validate:\"required\" dc:\"{{ .StructName }} ID\"`" + `
+}
+
+type Get{{ .StructName }}Res struct {
+	ID        uint      ` + "`json:\"id\"`" + `
+	CreatedAt time.Time ` + "`json:\"createdAt\"`" + `
+	UpdatedAt time.Time ` + "`json:\"updatedAt\"`" + `
+}
+
+type Create{{ .StructName }}Req struct {
+	pi.Meta ` + "`path:\"\" method:\"POST\" status:\"201\" tags:\"{{ .StructName }}\" summary:\"Create {{ .StructName }}\"`" + `
+}
+
+type Create{{ .StructName }}Res struct {
+	ID uint ` + "`json:\"id\"`" + `
+}
+`
+
 // Handler template for Pi framework
 const handlerTemplate = `package handler
 
 import (
+	"net/http"
+
+	v1 "{{ .ProjectName }}/api/v1"
+	"{{ .ProjectName }}/internal/model"
 	"{{ .ProjectName }}/internal/service"
 	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/apperror"
 )
 
 type {{ .StructName }}Handler struct {
@@ -23,31 +58,44 @@ func New{{ .StructName }}Handler(
 	}
 }
 
-// Get{{ .StructName }} godoc
-// @Summary Get {{ .StructName }}
-// @Description Get {{ .StructName }} by ID
-// @Tags {{ .StructName }}
-// @Accept json
-// @Produce json
-// @Param id path string true "{{ .StructName }} ID"
-// @Success 200 {object} any
-// @Router /{{ .StructNameSnakeCase }}/:id [get]
-func (h *{{ .StructName }}Handler) Get{{ .StructName }}(ctx *pi.Context) (any, error) {
-	id := ctx.PathParam("id")
-	return h.{{ .StructNameLowerFirst }}Service.Get{{ .StructName }}(ctx, id)
+func (h *{{ .StructName }}Handler) Get{{ .StructName }}(ctx *pi.Context, req *v1.Get{{ .StructName }}Req) (*v1.Get{{ .StructName }}Res, error) {
+	item, err := h.{{ .StructNameLowerFirst }}Service.Get{{ .StructName }}(ctx, req.ID)
+	if err != nil {
+		return nil, err
+	}
+	if item == nil {
+		return nil, apperror.New(apperror.NotFound, http.StatusNotFound, "{{ .StructNameLowerFirst }} not found")
+	}
+	return &v1.Get{{ .StructName }}Res{
+		ID:        item.Id,
+		CreatedAt: item.CreatedAt,
+		UpdatedAt: item.UpdatedAt,
+	}, nil
 }
 
-// Create{{ .StructName }} godoc
-// @Summary Create {{ .StructName }}
-// @Description Create a new {{ .StructName }}
-// @Tags {{ .StructName }}
-// @Accept json
-// @Produce json
-// @Success 200 {object} any
-// @Router /{{ .StructNameSnakeCase }} [post]
-func (h *{{ .StructName }}Handler) Create{{ .StructName }}(ctx *pi.Context) (any, error) {
-	// TODO: implement create logic
-	return nil, nil
+func (h *{{ .StructName }}Handler) Create{{ .StructName }}(ctx *pi.Context, _ *v1.Create{{ .StructName }}Req) (*v1.Create{{ .StructName }}Res, error) {
+	item := &model.{{ .StructName }}{}
+	if err := h.{{ .StructNameLowerFirst }}Service.Create{{ .StructName }}(ctx, item); err != nil {
+		return nil, err
+	}
+	return &v1.Create{{ .StructName }}Res{
+		ID: item.Id,
+	}, nil
+}
+`
+
+// Router template for Pi framework
+const routerTemplate = `package router
+
+import (
+	"{{ .ProjectName }}/internal/handler"
+	"github.com/sllt/pi/pkg/pi"
+)
+
+func Init{{ .StructName }}Router(deps RouterDeps, h *handler.{{ .StructName }}Handler) {
+	group := deps.App.Group("/api/v1").Group("/{{ .StructNameSnakeCase }}")
+	_ = pi.Register(group, h.Get{{ .StructName }})
+	_ = pi.Register(group, h.Create{{ .StructName }})
 }
 `
 
@@ -177,8 +225,12 @@ func (m *{{ .StructName }}) TableName() string {
 // GetTemplate returns the template content for the given type.
 func GetTemplate(createType string) string {
 	switch createType {
+	case "dto":
+		return dtoTemplate
 	case "handler":
 		return handlerTemplate
+	case "router":
+		return routerTemplate
 	case "service":
 		return serviceTemplate
 	case "repository":

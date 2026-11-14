@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"io"
 	"net/http"
 )
 
@@ -108,12 +109,17 @@ func (rp *retryProvider) doWithRetry(reqFunc func() (*http.Response, error)) (*h
 
 	for i := 0; i <= rp.maxRetries; i++ {
 		resp, err = reqFunc()
-		if err == nil && resp.StatusCode <= 500 {
+		if err == nil && resp != nil && resp.StatusCode <= 500 {
 			return resp, nil
 		}
 
 		if i > 0 && rp.metrics != nil {
 			rp.metrics.IncrementCounter(context.Background(), "app_http_retry_count", "service", rp.serviceName)
+		}
+
+		if i < rp.maxRetries && resp != nil && resp.Body != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
 		}
 	}
 

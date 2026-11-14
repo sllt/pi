@@ -565,7 +565,8 @@ func TestNewKafkaClient(t *testing.T) {
 			if tc.expectNil {
 				assert.Nil(t, k)
 			} else {
-				assert.NotNil(t, k)
+				require.NotNil(t, k)
+				t.Cleanup(func() { _ = k.Close() })
 			}
 		})
 	}

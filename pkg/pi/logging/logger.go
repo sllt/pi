@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -44,6 +45,8 @@ type Logger interface {
 }
 
 type logger struct {
+	mu         sync.RWMutex
+	writeMu    sync.Mutex
 	level      Level
 	normalOut  io.Writer
 	errorOut   io.Writer
@@ -66,13 +69,21 @@ func (l *logger) logf(level Level, format string, args ...any) {
 }
 
 func (l *logger) logfWithSkip(skip int, level Level, format string, args ...any) {
-	if level < l.level {
+	l.mu.RLock()
+	currLevel := l.level
+	showCaller := l.showCaller
+	normalOut := l.normalOut
+	errorOut := l.errorOut
+	isTerminal := l.isTerminal
+	l.mu.RUnlock()
+
+	if level < currLevel {
 		return
 	}
 
-	out := l.normalOut
+	out := normalOut
 	if level >= ERROR {
-		out = l.errorOut
+		out = errorOut
 	}
 
 	entry := logEntry{
@@ -82,7 +93,7 @@ func (l *logger) logfWithSkip(skip int, level Level, format string, args ...any)
 	}
 
 	// Get caller information
-	if l.showCaller {
+	if showCaller {
 		if _, file, line, ok := runtime.Caller(skip); ok {
 			entry.Caller = fmt.Sprintf("%s:%d", filepath.Base(file), line)
 		}
@@ -100,10 +111,12 @@ func (l *logger) logfWithSkip(skip int, level Level, format string, args ...any)
 		entry.Message = fmt.Sprintf(format, filteredArgs...)
 	}
 
-	if l.isTerminal {
+	if isTerminal {
 		l.prettyPrint(&entry, out)
 	} else {
+		l.writeMu.Lock()
 		_ = json.NewEncoder(out).Encode(entry)
+		l.writeMu.Unlock()
 	}
 }
 
@@ -280,12 +293,16 @@ func checkIfTerminal(w io.Writer) bool {
 // ChangeLevel changes the log level of the logger.
 // This allows dynamic adjustment of the logging verbosity.
 func (l *logger) ChangeLevel(level Level) {
+	l.mu.Lock()
 	l.level = level
+	l.mu.Unlock()
 }
 
 // SetShowCaller enables or disables caller information (file:line) in log output.
 func (l *logger) SetShowCaller(show bool) {
+	l.mu.Lock()
 	l.showCaller = show
+	l.mu.Unlock()
 }
 
 // CallerConfigurer is an optional interface for loggers that support

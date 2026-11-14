@@ -59,6 +59,9 @@ func TestMQTT_New(t *testing.T) {
 		mockLogger := logging.NewMockLogger(logging.ERROR)
 		client = New(&conf, mockLogger, nil)
 	})
+	if client != nil {
+		defer client.Close()
+	}
 
 	assert.NotNil(t, client.Client)
 	assert.Contains(t, out, "could not connect to MQTT")
@@ -73,6 +76,9 @@ func TestMQTT_EmptyConfigs(t *testing.T) {
 		mockLogger := logging.NewMockLogger(logging.DEBUG)
 		client = New(&Config{Username: "pi-mqtt-test"}, mockLogger, nil)
 	})
+	if client != nil {
+		defer client.Close()
+	}
 
 	assert.NotNil(t, client)
 	assert.Contains(t, out, "connected to MQTT")
@@ -236,11 +242,24 @@ func TestMQTT_SubscribeSuccess(t *testing.T) {
 	mockToken.EXPECT().Error().Return(nil)
 
 	go func() {
-		client.subscriptions["test/topic"].msgs <- &pubsub.Message{
-			Topic:     "test/topic",
-			Value:     msg,
-			MetaData:  nil,
-			Committer: &message{msg: mockMessage{}},
+		for {
+			client.mu.RLock()
+			sub, ok := client.subscriptions["test/topic"]
+			client.mu.RUnlock()
+			if ok {
+				sub.msgs <- &pubsub.Message{
+					Topic:     "test/topic",
+					Value:     msg,
+					MetaData:  nil,
+					Committer: &message{msg: mockMessage{}},
+				}
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
 		}
 	}()
 
@@ -571,7 +590,14 @@ func getMockMQTT(t *testing.T, conf *Config) (*gomock.Controller, *MQTT, *MockCl
 	mockLogger := logging.NewMockLogger(logging.DEBUG)
 	mockMetrics := NewMockMetrics(ctrl)
 
-	mq := &MQTT{mockClient, mockLogger, mockMetrics, conf, make(map[string]subscription), &sync.RWMutex{}}
+	mq := &MQTT{
+		Client:        mockClient,
+		logger:        mockLogger,
+		metrics:       mockMetrics,
+		config:        conf,
+		subscriptions: make(map[string]subscription),
+		mu:            &sync.RWMutex{},
+	}
 
 	return ctrl, mq, mockClient, mockMetrics, mockToken
 }
@@ -753,11 +779,11 @@ func TestMQTT_Query_SuccessCases(t *testing.T) {
 
 			mockClient.EXPECT().IsConnected().Return(true)
 
-			var capturedHandler mqtt.MessageHandler
+			handlerCh := make(chan mqtt.MessageHandler, 1)
 
 			mockClient.EXPECT().Subscribe(topic, mockConfigs.QoS, gomock.Any()).
 				DoAndReturn(func(_ string, _ byte, h mqtt.MessageHandler) mqtt.Token {
-					capturedHandler = h
+					handlerCh <- h
 					return mockSubToken
 				})
 
@@ -770,6 +796,7 @@ func TestMQTT_Query_SuccessCases(t *testing.T) {
 
 			// Simulate message publishing
 			go func() {
+				capturedHandler := <-handlerCh
 				time.Sleep(10 * time.Millisecond)
 
 				for _, msg := range tc.messages {

@@ -3,6 +3,8 @@ package azure
 import (
 	"context"
 	"errors"
+	"io"
+	"sync"
 	"time"
 
 	"github.com/sllt/pi/pkg/pi/datasource/file"
@@ -18,6 +20,11 @@ const defaultTimeout = 10 * time.Second
 
 type azureFileSystem struct {
 	*file.CommonFileSystem
+
+	retryMu   sync.Mutex
+	stopCh    chan struct{}
+	retryDone chan struct{}
+	closed    bool
 }
 
 // Config represents the Azure File Storage configuration.
@@ -56,6 +63,7 @@ func New(config *Config) (file.FileSystemProvider, error) {
 			Location:     config.ShareName,
 			ProviderName: "Azure", // Set provider name for observability
 		},
+		stopCh: make(chan struct{}),
 	}
 
 	return fs, nil
@@ -81,7 +89,7 @@ func (f *azureFileSystem) Connect() {
 			f.CommonFileSystem.Logger.Warnf("Azure File Share %s not available, starting background retry: %v", f.CommonFileSystem.Location, err)
 		}
 
-		go f.startRetryConnect()
+		f.launchRetryConnect()
 
 		return
 	}
@@ -92,8 +100,90 @@ func (f *azureFileSystem) Connect() {
 	}
 }
 
-// startRetryConnect repeatedly calls provider.Connect until success.
+func (f *azureFileSystem) ensureStopCh() <-chan struct{} {
+	f.retryMu.Lock()
+	defer f.retryMu.Unlock()
+
+	if f.stopCh == nil {
+		f.stopCh = make(chan struct{})
+	}
+
+	return f.stopCh
+}
+
+func (f *azureFileSystem) launchRetryConnect() {
+	f.retryMu.Lock()
+	if f.closed || f.retryDone != nil {
+		f.retryMu.Unlock()
+		return
+	}
+
+	if f.stopCh == nil {
+		f.stopCh = make(chan struct{})
+	}
+
+	done := make(chan struct{})
+	f.retryDone = done
+	f.retryMu.Unlock()
+
+	go func() {
+		defer func() {
+			close(done)
+			f.retryMu.Lock()
+			if f.retryDone == done {
+				f.retryDone = nil
+			}
+			f.retryMu.Unlock()
+		}()
+
+		f.startRetryConnect()
+	}()
+}
+
+// Close stops background connection retries and closes the underlying provider if closable.
+func (f *azureFileSystem) Close() error {
+	if f == nil {
+		return nil
+	}
+
+	if f.CommonFileSystem != nil {
+		f.CommonFileSystem.SetDisableRetry(true)
+	}
+
+	f.retryMu.Lock()
+	if !f.closed {
+		f.closed = true
+		if f.stopCh == nil {
+			f.stopCh = make(chan struct{})
+		}
+		close(f.stopCh)
+	}
+	done := f.retryDone
+	f.retryMu.Unlock()
+
+	if done != nil {
+		<-done
+	}
+
+	if f.CommonFileSystem != nil && f.CommonFileSystem.Provider != nil {
+		if closer, ok := f.CommonFileSystem.Provider.(io.Closer); ok {
+			return closer.Close()
+		}
+	}
+
+	return nil
+}
+
+// startRetryConnect repeatedly calls provider.Connect until success or shutdown.
 func (f *azureFileSystem) startRetryConnect() {
+	stopCh := f.ensureStopCh()
+
+	select {
+	case <-stopCh:
+		return
+	default:
+	}
+
 	f.logRetryStart()
 
 	ticker := time.NewTicker(time.Minute)
@@ -101,18 +191,23 @@ func (f *azureFileSystem) startRetryConnect() {
 
 	retryCount := 0
 
-	for range ticker.C {
-		if f.shouldExitRetry() {
-			f.logRetryExit()
+	for {
+		select {
+		case <-stopCh:
 			return
-		}
+		case <-ticker.C:
+			if f.shouldExitRetry() {
+				f.logRetryExit()
+				return
+			}
 
-		retryCount++
+			retryCount++
 
-		f.logRetryAttempt(retryCount)
+			f.logRetryAttempt(retryCount)
 
-		if f.attemptConnection(retryCount) {
-			return
+			if f.attemptConnectionWithStop(retryCount, stopCh) {
+				return
+			}
 		}
 	}
 }
@@ -165,10 +260,26 @@ func (f *azureFileSystem) logRetryAttempt(retryCount int) {
 
 // attemptConnection attempts to connect and returns true if successful.
 func (f *azureFileSystem) attemptConnection(retryCount int) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancel()
+	return f.attemptConnectionWithStop(retryCount, f.ensureStopCh())
+}
 
+func (f *azureFileSystem) attemptConnectionWithStop(retryCount int, stopCh <-chan struct{}) bool {
+	baseCtx, stopCancel := context.WithCancel(context.Background())
+	attemptDone := make(chan struct{})
+	go func() {
+		select {
+		case <-stopCh:
+			stopCancel()
+		case <-attemptDone:
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(baseCtx, defaultTimeout)
 	err := f.CommonFileSystem.Connect(ctx)
+	cancel()
+	close(attemptDone)
+	stopCancel()
+
 	if err == nil {
 		f.logRetrySuccess(retryCount)
 		return true

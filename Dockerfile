@@ -1,4 +1,4 @@
-FROM golang:1.24
+FROM golang:1.27
 
 RUN mkdir -p /go/src/github.com/sllt/pi
 WORKDIR /go/src/github.com/sllt/pi

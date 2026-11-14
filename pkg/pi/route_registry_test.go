@@ -533,6 +533,245 @@ func TestRouteRegistry_MutationsAfterCompileAreBlocked(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestRouteRegistry_NestedAndFlatParameterGroupsCoexistWithMiddlewareIsolation(t *testing.T) {
+	runCase := func(t *testing.T, nestedFirst bool) {
+		t.Helper()
+		app := newRouteRegistryTestApp()
+
+		var piTrace []string
+		recordPi := func(label string) PiMiddleware {
+			return func(next Handler) Handler {
+				return func(c *Context) (any, error) {
+					piTrace = append(piTrace, label)
+					return next(c)
+				}
+			}
+		}
+		headerMW := func(key, val string) func(http.Handler) http.Handler {
+			return func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set(key, val)
+					next.ServeHTTP(w, r)
+				})
+			}
+		}
+
+		app.Use(headerMW("X-Root-HTTP", "root"))
+		app.UseMiddleware(recordPi("root-pi"))
+
+		registerNested := func() {
+			usersGroup := app.Group("/users")
+			usersGroup.Use(headerMW("X-Nested-Parent-HTTP", "1"))
+			usersGroup.UseMiddleware(recordPi("nested-parent-pi"))
+
+			idGroup := usersGroup.Group("/{id}")
+			idGroup.Use(headerMW("X-Nested-Child-HTTP", "1"))
+			idGroup.UseMiddleware(recordPi("nested-child-pi"))
+			idGroup.GET("/profile", func(c *Context) (any, error) {
+				return "profile:" + c.PathParam("id"), nil
+			})
+		}
+
+		registerFlat := func() {
+			flatGroup := app.Group("/users/{id}")
+			flatGroup.Use(headerMW("X-Flat-HTTP", "1"))
+			flatGroup.UseMiddleware(recordPi("flat-pi"))
+			flatGroup.GET("/settings", func(c *Context) (any, error) {
+				return "settings:" + c.PathParam("id"), nil
+			})
+		}
+
+		if nestedFirst {
+			registerNested()
+			registerFlat()
+		} else {
+			registerFlat()
+			registerNested()
+		}
+
+		assert.NotPanics(t, func() {
+			app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+		})
+
+		piTrace = nil
+		req := httptest.NewRequest(http.MethodGet, "/users/42/profile", http.NoBody)
+		rec := httptest.NewRecorder()
+		app.httpServer.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		body, _ := io.ReadAll(rec.Body)
+		assert.Contains(t, string(body), "profile:42")
+		assert.Equal(t, "root", rec.Header().Get("X-Root-HTTP"))
+		assert.Equal(t, "1", rec.Header().Get("X-Nested-Parent-HTTP"))
+		assert.Equal(t, "1", rec.Header().Get("X-Nested-Child-HTTP"))
+		assert.Empty(t, rec.Header().Get("X-Flat-HTTP"))
+		assert.Equal(t, []string{"root-pi", "nested-parent-pi", "nested-child-pi"}, piTrace)
+
+		piTrace = nil
+		req = httptest.NewRequest(http.MethodGet, "/users/99/settings", http.NoBody)
+		rec = httptest.NewRecorder()
+		app.httpServer.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		body, _ = io.ReadAll(rec.Body)
+		assert.Contains(t, string(body), "settings:99")
+		assert.Equal(t, "root", rec.Header().Get("X-Root-HTTP"))
+		assert.Equal(t, "1", rec.Header().Get("X-Flat-HTTP"))
+		assert.Empty(t, rec.Header().Get("X-Nested-Parent-HTTP"))
+		assert.Empty(t, rec.Header().Get("X-Nested-Child-HTTP"))
+		assert.Equal(t, []string{"root-pi", "flat-pi"}, piTrace)
+	}
+
+	t.Run("nested first then flat", func(t *testing.T) {
+		runCase(t, true)
+	})
+	t.Run("flat first then nested", func(t *testing.T) {
+		runCase(t, false)
+	})
+}
+
+func TestRouteRegistry_OverlappingStaticPrefixGroupsAndRecursiveEmptyFolding(t *testing.T) {
+	t.Run("overlapping static prefix groups all resolve without shadowing", func(t *testing.T) {
+		app := newRouteRegistryTestApp()
+
+		apiGroup := app.Group("/api")
+		apiGroup.GET("/v1/orders", func(c *Context) (any, error) {
+			return "orders", nil
+		})
+
+		apiV1Group := app.Group("/api/v1")
+		apiV1Group.GET("/users", func(c *Context) (any, error) {
+			return "users", nil
+		})
+
+		apiV1Admin := app.Group("/api/v1/admin")
+		apiV1Admin.GET("/audit", func(c *Context) (any, error) {
+			return "audit", nil
+		})
+
+		assert.NotPanics(t, func() {
+			app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+		})
+
+		for _, tc := range []struct {
+			path string
+			want string
+		}{
+			{path: "/api/v1/orders", want: "orders"},
+			{path: "/api/v1/users", want: "users"},
+			{path: "/api/v1/admin/audit", want: "audit"},
+		} {
+			req := httptest.NewRequest(http.MethodGet, tc.path, http.NoBody)
+			rec := httptest.NewRecorder()
+			app.httpServer.router.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code, tc.path)
+			body, _ := io.ReadAll(rec.Body)
+			assert.Contains(t, string(body), tc.want, tc.path)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/missing", http.NoBody)
+		rec := httptest.NewRecorder()
+		app.httpServer.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("recursive empty-prefix GroupNode folding preserves middlewares and routes", func(t *testing.T) {
+		reg := newRouteRegistry()
+		mux := chi.NewRouter()
+		container := infra.NewContainer(config.NewMockConfig(nil))
+
+		var piOrder []string
+		appendPi := func(name string) PiMiddleware {
+			return func(next Handler) Handler {
+				return func(c *Context) (any, error) {
+					piOrder = append(piOrder, name)
+					return next(c)
+				}
+			}
+		}
+		headerMW := func(key, val string) func(http.Handler) http.Handler {
+			return func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set(key, val)
+					next.ServeHTTP(w, r)
+				})
+			}
+		}
+
+		emptyGrandchild := &GroupNode{
+			prefix:  "",
+			httpMWs: []func(http.Handler) http.Handler{headerMW("X-Empty-2", "2")},
+			piMWs:   []PiMiddleware{appendPi("empty-2")},
+			routes: []RouteDef{
+				{Method: http.MethodGet, Pattern: "/e2", Handler: func(c *Context) (any, error) { return "e2", nil }},
+			},
+			children: []*GroupNode{
+				{
+					prefix: "/nested",
+					routes: []RouteDef{
+						{Method: http.MethodGet, Pattern: "/item", Handler: func(c *Context) (any, error) { return "nested-item", nil }},
+					},
+				},
+			},
+		}
+		emptyChild := &GroupNode{
+			prefix:   "/",
+			httpMWs:  []func(http.Handler) http.Handler{headerMW("X-Empty-1", "1")},
+			piMWs:    []PiMiddleware{appendPi("empty-1")},
+			routes:   []RouteDef{{Method: http.MethodGet, Pattern: "/e1", Handler: func(c *Context) (any, error) { return "e1", nil }}},
+			children: []*GroupNode{emptyGrandchild},
+		}
+
+		scopedEmptyLeaf := &GroupNode{
+			prefix:  "",
+			httpMWs: []func(http.Handler) http.Handler{headerMW("X-Scoped-Empty", "deep")},
+			piMWs:   []PiMiddleware{appendPi("scoped-empty")},
+			routes: []RouteDef{
+				{Method: http.MethodGet, Pattern: "/deep", Handler: func(c *Context) (any, error) { return "deep", nil }},
+			},
+		}
+		scoped := &GroupNode{
+			prefix: "/scoped",
+			children: []*GroupNode{
+				{prefix: "", children: []*GroupNode{scopedEmptyLeaf}},
+			},
+		}
+
+		reg.root.children = append(reg.root.children, emptyChild, scoped)
+
+		assert.NotPanics(t, func() {
+			reg.compile(mux, container, 0)
+		})
+
+		piOrder = nil
+		req := httptest.NewRequest(http.MethodGet, "/e2", http.NoBody)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "1", rec.Header().Get("X-Empty-1"))
+		assert.Equal(t, "2", rec.Header().Get("X-Empty-2"))
+		assert.Empty(t, rec.Header().Get("X-Scoped-Empty"))
+		assert.Equal(t, []string{"empty-1", "empty-2"}, piOrder)
+
+		piOrder = nil
+		req = httptest.NewRequest(http.MethodGet, "/nested/item", http.NoBody)
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		body, _ := io.ReadAll(rec.Body)
+		assert.Contains(t, string(body), "nested-item")
+		assert.Equal(t, []string{"empty-1", "empty-2"}, piOrder)
+
+		piOrder = nil
+		req = httptest.NewRequest(http.MethodGet, "/scoped/deep", http.NoBody)
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		body, _ = io.ReadAll(rec.Body)
+		assert.Contains(t, string(body), "deep")
+		assert.Equal(t, "deep", rec.Header().Get("X-Scoped-Empty"))
+		assert.Equal(t, []string{"empty-1", "empty-2", "scoped-empty"}, piOrder)
+	})
+}
+
 func newRouteRegistryTestApp() *App {
 	return &App{
 		httpServer: &httpServer{

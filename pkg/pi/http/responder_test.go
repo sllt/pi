@@ -790,3 +790,33 @@ func TestResponder_ValidEncodableData(t *testing.T) {
 		assert.NotEmpty(t, body.String(), "TEST[%d] Failed: %s", i, tc.desc)
 	}
 }
+
+func TestResponder_FileWithHeaders(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	r := NewResponder(recorder, http.MethodGet)
+
+	payload := []byte("compressed-js-bytes")
+	r.Respond(resTypes.File{
+		Content:     payload,
+		ContentType: "text/javascript; charset=utf-8",
+		StatusCode:  http.StatusOK,
+		Headers: map[string]string{
+			"Content-Encoding": "gzip",
+			"Vary":             "Accept-Encoding",
+			"":                 "ignored-empty-key",
+			"X-Empty-Value":    "",
+		},
+	}, nil)
+
+	result := recorder.Result()
+	t.Cleanup(func() {
+		require.NoError(t, result.Body.Close())
+	})
+
+	assert.Equal(t, http.StatusOK, result.StatusCode)
+	assert.Equal(t, "text/javascript; charset=utf-8", result.Header.Get("Content-Type"))
+	assert.Equal(t, "gzip", result.Header.Get("Content-Encoding"))
+	assert.Equal(t, "Accept-Encoding", result.Header.Get("Vary"))
+	assert.Empty(t, result.Header.Get("X-Empty-Value"))
+	assert.Equal(t, payload, recorder.Body.Bytes())
+}

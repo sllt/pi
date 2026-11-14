@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"go/format"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -25,16 +26,40 @@ type CreateData struct {
 	ProjectName, CreateType, FilePath, FileName, StructName, StructNameLowerFirst, StructNameSnakeCase string
 }
 
+// Options configures component generation behavior.
+type Options struct {
+	DryRun bool
+}
+
+func DTO(name string) (string, error)        { return CreateComponent(name, "dto") }
 func Handler(name string) (string, error)    { return CreateComponent(name, "handler") }
+func Router(name string) (string, error)     { return CreateComponent(name, "router") }
 func Service(name string) (string, error)    { return CreateComponent(name, "service") }
 func Repository(name string) (string, error) { return CreateComponent(name, "repository") }
 func Model(name string) (string, error)      { return CreateComponent(name, "model") }
-func All(name string) (string, error) {
-	return generate(name, []string{"handler", "service", "repository", "model"})
+func All(name string) (string, error)        { return AllWithOptions(name, Options{}) }
+func AllWithOptions(name string, opts Options) (string, error) {
+	return generateWithOptions(name, []string{"dto", "handler", "router", "service", "repository", "model"}, opts)
 }
-func CreateComponent(name, kind string) (string, error) { return generate(name, []string{kind}) }
+func CreateComponent(name, kind string) (string, error) {
+	return CreateComponentWithOptions(name, kind, Options{})
+}
+func CreateComponentWithOptions(name, kind string, opts Options) (string, error) {
+	return generateWithOptions(name, []string{kind}, opts)
+}
 
-func generate(name string, kinds []string) (string, error) {
+func defaultOutputDir(kind string) string {
+	switch kind {
+	case "dto":
+		return filepath.Join("api", "v1")
+	case "router":
+		return filepath.Join("internal", "router")
+	default:
+		return filepath.Join("internal", kind)
+	}
+}
+
+func generateWithOptions(name string, kinds []string, opts Options) (string, error) {
 	if name == "" {
 		return "", ErrNameEmpty
 	}
@@ -67,13 +92,21 @@ func generate(name string, kinds []string) (string, error) {
 		if err = tmpl.Execute(&buf, &data); err != nil {
 			return "", err
 		}
+		formatted, err := format.Source(buf.Bytes())
+		if err != nil {
+			return "", fmt.Errorf("format %s: %w", kind, err)
+		}
 		outDir := dir
 		if outDir == "" {
-			outDir = filepath.Join("internal", kind)
+			outDir = defaultOutputDir(kind)
 		}
 		file := filepath.Join(outDir, strings.ToLower(base)+".go")
 		if _, err = os.Lstat(file); err == nil {
-			messages = append(messages, "Preserved: "+file)
+			if opts.DryRun {
+				messages = append(messages, "Would preserve: "+file)
+			} else {
+				messages = append(messages, "Preserved: "+file)
+			}
 			continue
 		} else if !os.IsNotExist(err) {
 			return "", err
@@ -81,11 +114,17 @@ func generate(name string, kinds []string) (string, error) {
 		if _, exists := files[file]; exists {
 			return "", fmt.Errorf("component output collision: %s; omit the custom directory for create all", file)
 		}
-		files[file] = helper.File{Data: buf.Bytes()}
-		messages = append(messages, "Created: "+file)
+		files[file] = helper.File{Data: formatted}
+		if opts.DryRun {
+			messages = append(messages, "Would create: "+file)
+		} else {
+			messages = append(messages, "Created: "+file)
+		}
 	}
-	if err := helper.WriteFiles(files); err != nil {
-		return "", fmt.Errorf("%w: %w", ErrCreateFile, err)
+	if !opts.DryRun && len(files) > 0 {
+		if err := helper.WriteFiles(files); err != nil {
+			return "", fmt.Errorf("%w: %w", ErrCreateFile, err)
+		}
 	}
 	return strings.Join(messages, "\n"), nil
 }

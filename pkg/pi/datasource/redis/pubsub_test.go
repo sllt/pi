@@ -148,6 +148,12 @@ func setupTest(t *testing.T, conf map[string]string) (*testRedisClient, *minired
 	require.NotNil(t, ps)
 	psClient, ok := ps.(*PubSub)
 	require.True(t, ok)
+	t.Cleanup(func() {
+		_ = psClient.Close()
+		if client != nil {
+			_ = client.Close()
+		}
+	})
 
 	return &testRedisClient{Redis: client, PubSub: psClient}, s
 }
@@ -179,6 +185,10 @@ func setupMockTest(t *testing.T, conf map[string]string) (*testRedisClient, redi
 		logger: mockLogger,
 	}
 	ps := newPubSub(db, redisConfig, mockLogger, mockMetrics)
+	t.Cleanup(func() {
+		_ = ps.Close()
+		_ = r.Close()
+	})
 
 	return &testRedisClient{Redis: r, PubSub: ps}, mock
 }

@@ -10,14 +10,39 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
 )
 
+// UseTracer sets the OpenTelemetry tracer for Redis PubSub operations.
+func (ps *PubSub) UseTracer(tracer any) {
+	if ps == nil {
+		return
+	}
+	if t, ok := tracer.(trace.Tracer); ok && t != nil {
+		ps.mu.Lock()
+		ps.tracer = t
+		ps.mu.Unlock()
+	}
+}
+
+func (ps *PubSub) getTracer() trace.Tracer {
+	if ps != nil {
+		ps.mu.RLock()
+		t := ps.tracer
+		ps.mu.RUnlock()
+		if t != nil {
+			return t
+		}
+	}
+	return otel.GetTracerProvider().Tracer("pi")
+}
+
 // Publish publishes a message to a Redis channel or stream.
 func (ps *PubSub) Publish(ctx context.Context, topic string, message []byte) error {
-	ctx, span := ps.tracer.Start(ctx, "redis-publish")
+	ctx, span := ps.getTracer().Start(ctx, "redis-publish")
 	defer span.End()
 
 	ps.metrics.IncrementCounter(ctx, "app_pubsub_publish_total_count", "topic", topic)
@@ -120,7 +145,7 @@ func (ps *PubSub) Subscribe(ctx context.Context, topic string) (*pubsub.Message,
 		}
 	}
 
-	spanCtx, span := ps.tracer.Start(ctx, "redis-subscribe")
+	spanCtx, span := ps.getTracer().Start(ctx, "redis-subscribe")
 	defer span.End()
 
 	// Determine mode and consumer group for metrics
@@ -177,7 +202,15 @@ func (ps *PubSub) ensureSubscription(_ context.Context, topic string) chan *pubs
 	ps.closeOnce[topic] = &sync.Once{}
 
 	// Create cancel context for this subscription
-	_, cancel := context.WithCancel(context.Background())
+	parentCtx := context.Background()
+	if ps.ctx != nil {
+		parentCtx = ps.ctx
+	}
+	subCtx, cancel := context.WithCancel(parentCtx)
+	if ps.subCtx == nil {
+		ps.subCtx = make(map[string]context.Context)
+	}
+	ps.subCtx[topic] = subCtx
 	ps.subCancel[topic] = cancel
 
 	// Create WaitGroup for this subscription
@@ -206,7 +239,8 @@ func (ps *PubSub) runSubscriptionLoop(topic string, wg *sync.WaitGroup, cancel c
 	permanentFailure := false
 
 	for {
-		if !ps.shouldContinueSubscription(topic) {
+		currentCtx, ok := ps.currentSubscriptionContext(topic)
+		if !ok {
 			return
 		}
 
@@ -216,7 +250,6 @@ func (ps *PubSub) runSubscriptionLoop(topic string, wg *sync.WaitGroup, cancel c
 			return
 		}
 
-		currentCtx := context.Background()
 		err := ps.subscribeWithMode(currentCtx, topic, mode)
 
 		if err != nil && ps.isPermanentError(err) {
@@ -227,10 +260,44 @@ func (ps *PubSub) runSubscriptionLoop(topic string, wg *sync.WaitGroup, cancel c
 			continue
 		}
 
+		nextCtx, stillActive := ps.currentSubscriptionContext(topic)
+		if !stillActive {
+			return
+		}
+		// If resubscribeAll replaced the topic context, reconnect immediately without sleeping.
+		if nextCtx != currentCtx {
+			continue
+		}
+
 		// If subscription stopped (not due to permanent failure), restart after delay
 		ps.logger.Debugf("Subscription stopped for topic '%s', restarting...", topic)
-		time.Sleep(defaultRetryTimeout)
+		timer := time.NewTimer(defaultRetryTimeout)
+		select {
+		case <-nextCtx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
 	}
+}
+
+func (ps *PubSub) currentSubscriptionContext(topic string) (context.Context, bool) {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	_, stillSubscribed := ps.subStarted[topic]
+	_, hasCancel := ps.subCancel[topic]
+	if !stillSubscribed || !hasCancel {
+		return nil, false
+	}
+	if ps.subCtx != nil {
+		if ctx, ok := ps.subCtx[topic]; ok && ctx != nil {
+			return ctx, true
+		}
+	}
+	if ps.ctx != nil {
+		return ps.ctx, true
+	}
+	return context.Background(), true
 }
 
 // shouldContinueSubscription checks if subscription should continue.
@@ -595,7 +662,12 @@ func (ps *PubSub) readNewMessages(ctx context.Context, topic, group, consumer st
 		}
 
 		ps.logger.Errorf("failed to read from stream '%s': %v", topic, err)
-		time.Sleep(defaultRetryTimeout)
+		timer := time.NewTimer(defaultRetryTimeout)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
 
 		return
 	}
@@ -848,6 +920,7 @@ func (ps *PubSub) cancelSubscription(topic string) {
 		cancel()
 		delete(ps.subCancel, topic)
 	}
+	delete(ps.subCtx, topic)
 }
 
 // waitForGoroutine waits for the subscription goroutine to finish.
@@ -1104,29 +1177,84 @@ func (ps *PubSub) isConnected() bool {
 
 // Close closes all active subscriptions and cleans up resources.
 func (ps *PubSub) Close() error {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
+	if ps == nil {
+		return nil
+	}
+	if ps.stopCh != nil {
+		ps.stopOnce.Do(func() {
+			close(ps.stopCh)
+		})
+	}
+	if ps.retryDone != nil {
+		<-ps.retryDone
+	}
+	if ps.cancel != nil {
+		ps.cancel() // Stop monitorConnection before taking ps.mu to avoid deadlock with resubscribeAll
+	}
+	if ps.monitorDone != nil {
+		<-ps.monitorDone
+	}
 
-	// Cancel all subscriptions
+	ps.mu.Lock()
+
+	// Cancel all subscriptions and clear active markers first so loops exit immediately.
 	for topic, cancel := range ps.subCancel {
 		cancel()
 		delete(ps.subCancel, topic)
 	}
+	for topic := range ps.subCtx {
+		delete(ps.subCtx, topic)
+	}
+	ps.subStarted = make(map[string]struct{})
 
 	// Close all PubSub connections
+	var pubSubsToClose []*redis.PubSub
 	for topic, pubSub := range ps.subPubSub {
 		if pubSub != nil {
-			pubSub.Close()
+			pubSubsToClose = append(pubSubsToClose, pubSub)
 		}
 
 		delete(ps.subPubSub, topic)
 	}
 
-	// Wait for all goroutines
-	ps.waitForAllGoroutines()
+	// Clean up stream consumers before waiting so blocked stream loops exit promptly.
+	for topic, consumer := range ps.streamConsumers {
+		if consumer.cancel != nil {
+			consumer.cancel()
+		}
 
+		delete(ps.streamConsumers, topic)
+	}
+
+	wgs := make(map[string]*sync.WaitGroup, len(ps.subWg))
+	for topic, wg := range ps.subWg {
+		wgs[topic] = wg
+		delete(ps.subWg, topic)
+	}
+	ps.mu.Unlock()
+
+	for _, pubSub := range pubSubsToClose {
+		_ = pubSub.Close()
+	}
+
+	// Wait for all goroutines outside ps.mu so exiting loops can acquire ps.mu in defers.
+	for topic, wg := range wgs {
+		done := make(chan struct{})
+		go func(w *sync.WaitGroup) {
+			w.Wait()
+			close(done)
+		}(wg)
+		select {
+		case <-done:
+		case <-time.After(goroutineWaitTimeout):
+			ps.logger.Debugf("timeout waiting for subscription goroutine for topic '%s'", topic)
+		}
+	}
+
+	ps.mu.Lock()
 	// Close all channels
 	for topic, ch := range ps.receiveChan {
+		ps.chanClosed[topic] = true
 		if closeOnce, ok := ps.closeOnce[topic]; ok {
 			closeOnce.Do(func() {
 				close(ch)
@@ -1137,25 +1265,37 @@ func (ps *PubSub) Close() error {
 		delete(ps.closeOnce, topic)
 	}
 
-	// Clean up stream consumers
-	for topic, consumer := range ps.streamConsumers {
-		if consumer.cancel != nil {
-			consumer.cancel()
-		}
-
-		delete(ps.streamConsumers, topic)
-	}
-
 	// Clear all maps
-	ps.subStarted = make(map[string]struct{})
 	ps.chanClosed = make(map[string]bool)
 	ps.closeOnce = make(map[string]*sync.Once)
+	ownsClient := ps.ownsClient
+	rc := ps.client
+	ps.mu.Unlock()
 
-	if ps.cancel != nil {
-		ps.cancel() // Stop monitorConnection
+	if ownsClient && rc != nil {
+		if err := rc.Close(); err != nil && !errors.Is(err, redis.ErrClosed) {
+			return err
+		}
 	}
 
 	return nil
+}
+
+// AckSemantics declares acknowledgment semantics for the configured Redis PubSub mode.
+func (ps *PubSub) AckSemantics() pubsub.AckSemantics {
+	mode := modeStreams
+	if ps != nil && ps.config.PubSubMode != "" {
+		mode = ps.config.PubSubMode
+	}
+	if mode == modeStreams {
+		return pubsub.AckSemantics{
+			Mode:                  pubsub.AckModeIndependent,
+			SupportsContextCommit: true,
+		}
+	}
+	return pubsub.AckSemantics{
+		Mode: pubsub.AckModeAuto,
+	}
 }
 
 func (ps *PubSub) waitForAllGoroutines() {
@@ -1178,11 +1318,15 @@ func (ps *PubSub) waitForAllGoroutines() {
 }
 
 // monitorConnection periodically checks the connection status and triggers resubscription if connection is restored.
-func (ps *PubSub) monitorConnection(ctx context.Context) {
+func (ps *PubSub) monitorConnection(ctx context.Context, initialConnected bool, done chan<- struct{}) {
+	if done != nil {
+		defer close(done)
+	}
+
 	ticker := time.NewTicker(defaultRetryTimeout)
 	defer ticker.Stop()
 
-	wasConnected := ps.isConnected()
+	wasConnected := initialConnected
 
 	for {
 		select {
@@ -1227,7 +1371,15 @@ func (ps *PubSub) resubscribeAll() {
 			cancel()
 
 			// Create new context for restart
-			_, newCancel := context.WithCancel(context.Background())
+			parentCtx := context.Background()
+			if ps.ctx != nil {
+				parentCtx = ps.ctx
+			}
+			newCtx, newCancel := context.WithCancel(parentCtx)
+			if ps.subCtx == nil {
+				ps.subCtx = make(map[string]context.Context)
+			}
+			ps.subCtx[topic] = newCtx
 			ps.subCancel[topic] = newCancel
 
 			// Reset pendingRead so pending messages are read again

@@ -40,6 +40,7 @@ func TestNew_ConnectionFailure_StartsRetry(t *testing.T) {
 
 	fs := New(config)
 	require.NotNil(t, fs)
+	defer func() { _ = fs.(*fileSystem).Close() }()
 
 	fs.UseLogger(mockLogger)
 	fs.UseMetrics(mockMetrics)
@@ -78,6 +79,7 @@ func TestNew_Success(t *testing.T) {
 
 	fs := New(config)
 	require.NotNil(t, fs)
+	defer func() { _ = fs.(*fileSystem).Close() }()
 
 	// Inject logger and metrics (mimicking AddFileStore behavior)
 	fs.UseLogger(mockLogger)
@@ -210,17 +212,13 @@ func TestStartRetryConnect_Success(t *testing.T) {
 	// If connection fails, expect debug retry log
 	mockLogger.EXPECT().Debugf("GCS retry attempt failed, will try again in 30s").AnyTimes()
 
-	// Start retry with short interval
-	done := make(chan bool)
-
+	retryExited := make(chan struct{})
 	go func() {
-		time.Sleep(2 * time.Second)
-		fs.CommonFileSystem.SetDisableRetry(true)
-
-		done <- true
+		defer close(retryExited)
+		fs.startRetryConnect()
 	}()
 
-	go fs.startRetryConnect()
-
-	<-done
+	time.Sleep(50 * time.Millisecond)
+	_ = fs.Close()
+	<-retryExited
 }

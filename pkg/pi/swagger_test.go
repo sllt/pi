@@ -2,8 +2,10 @@ package pi
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -77,52 +79,116 @@ func TestSwaggerHandler(t *testing.T) {
 	testContainer, _ := infra.NewMockContainer(t)
 
 	tests := []struct {
-		desc        string
-		fileName    string
-		contentType string
+		desc           string
+		fileName       string
+		acceptEncoding string
+		contentType    string
+		wantGzip       bool
 	}{
-		{"fetch index.html", "", "text/html"},
-		{"fetch favicon image", "favicon-16x16.png", "image/png"},
-		{"fetch js files", "swagger-ui.js", "text/javascript"},
+		{desc: "fetch index.html", fileName: "", contentType: "text/html"},
+		{desc: "fetch favicon image", fileName: "favicon-16x16.png", contentType: "image/png"},
+		{desc: "fetch scalar.js uncompressed", fileName: "scalar.js", contentType: "text/javascript"},
+		{desc: "fetch scalar.js gzip", fileName: "scalar.js", acceptEncoding: "gzip", contentType: "text/javascript", wantGzip: true},
 	}
 
+	var uncompressedScalarJS []byte
 	for _, tc := range tests {
-		testReq := httptest.NewRequest(http.MethodGet, "/.well-known/swagger"+"/"+tc.fileName, http.NoBody)
-		rctx := chi.NewRouteContext()
-		rctx.URLParams.Add("name", tc.fileName)
-		testReq = testReq.WithContext(context.WithValue(testReq.Context(), chi.RouteCtxKey, rctx))
-		piReq := piHTTP.NewRequest(testReq)
+		t.Run(tc.desc, func(t *testing.T) {
+			testReq := httptest.NewRequest(http.MethodGet, "/.well-known/swagger/"+tc.fileName, http.NoBody)
+			if tc.acceptEncoding != "" {
+				testReq.Header.Set("Accept-Encoding", tc.acceptEncoding)
+			}
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("name", tc.fileName)
+			testReq = testReq.WithContext(context.WithValue(testReq.Context(), chi.RouteCtxKey, rctx))
+			piReq := piHTTP.NewRequest(testReq)
 
-		ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piReq, testContainer)
+			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piReq, testContainer)
 
-		resp, err := SwaggerUIHandler(ctx)
-		require.NoError(t, err, "Expected err to be nil")
+			resp, err := SwaggerUIHandler(ctx)
+			require.NoError(t, err, "Expected err to be nil")
 
-		fileResponse, ok := resp.(response.File)
-		if !ok {
-			t.Errorf("Expected a FileResponse")
-		}
+			fileResponse, ok := resp.(response.File)
+			require.True(t, ok, "Expected a response.File")
+			assert.Equal(t, tc.contentType, strings.Split(fileResponse.ContentType, ";")[0])
 
-		if strings.Split(fileResponse.ContentType, ";")[0] != tc.contentType {
-			t.Errorf("Expected content type '%s', got '%s'", tc.contentType, fileResponse.ContentType)
-		}
+			if tc.fileName == "scalar.js" {
+				assert.Equal(t, "Accept-Encoding", fileResponse.Headers["Vary"])
+				if tc.wantGzip {
+					assert.Equal(t, "gzip", fileResponse.Headers["Content-Encoding"])
+					gr, gzErr := gzip.NewReader(bytes.NewReader(fileResponse.Content))
+					require.NoError(t, gzErr)
+					plain, readErr := io.ReadAll(gr)
+					require.NoError(t, readErr)
+					require.NoError(t, gr.Close())
+					assert.Contains(t, string(plain), "createApiReference")
+					assert.NotContains(t, string(plain), "sourceMappingURL")
+					if len(uncompressedScalarJS) > 0 {
+						assert.Equal(t, uncompressedScalarJS, plain)
+					}
+				} else {
+					assert.Empty(t, fileResponse.Headers["Content-Encoding"])
+					assert.Contains(t, string(fileResponse.Content), "createApiReference")
+					assert.NotContains(t, string(fileResponse.Content), "sourceMappingURL")
+					uncompressedScalarJS = fileResponse.Content
+				}
+			}
+		})
+	}
+}
+
+func TestRequestAcceptsGzip(t *testing.T) {
+	testContainer, _ := infra.NewMockContainer(t)
+
+	cases := []struct {
+		name    string
+		headers []string
+		want    bool
+	}{
+		{name: "no header", headers: nil, want: false},
+		{name: "exact gzip", headers: []string{"gzip"}, want: true},
+		{name: "x-gzip uppercase", headers: []string{"X-GZIP"}, want: true},
+		{name: "weighted gzip", headers: []string{"br, gzip;q=0.8"}, want: true},
+		{name: "q equals one", headers: []string{"deflate, gzip;Q=1.000"}, want: true},
+		{name: "explicit q=0 rejection", headers: []string{"gzip;q=0, deflate"}, want: false},
+		{name: "explicit q=0.000 rejection", headers: []string{"gzip;q=0.000"}, want: false},
+		{name: "bare wildcard not treated as gzip", headers: []string{"*"}, want: false},
+		{name: "weighted wildcard not treated as gzip", headers: []string{"*;q=1"}, want: false},
+		{name: "multi header with gzip", headers: []string{"br", "gzip;q=0.5"}, want: true},
+		{name: "multi header explicit reject overrides", headers: []string{"gzip;q=0.5", "gzip;q=0"}, want: false},
+		{name: "invalid qvalue rejected", headers: []string{"gzip;q=1.5"}, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/.well-known/swagger/scalar.js", http.NoBody)
+			for _, h := range tc.headers {
+				req.Header.Add("Accept-Encoding", h)
+			}
+			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piHTTP.NewRequest(req), testContainer)
+			assert.Equal(t, tc.want, requestAcceptsGzip(ctx))
+		})
 	}
 }
 
 func TestSwaggerUIHandler_Error(t *testing.T) {
 	testContainer, _ := infra.NewMockContainer(t)
 
-	testReq := httptest.NewRequest(http.MethodGet, "/.well-known/swagger"+"/abc.abc", http.NoBody)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("name", "abc.abc")
-	testReq = testReq.WithContext(context.WithValue(testReq.Context(), chi.RouteCtxKey, rctx))
+	for _, badFile := range []string{"abc.abc", "scalar.js.gz", "files.go"} {
+		t.Run(badFile, func(t *testing.T) {
+			testReq := httptest.NewRequest(http.MethodGet, "/.well-known/swagger/"+badFile, http.NoBody)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("name", badFile)
+			testReq = testReq.WithContext(context.WithValue(testReq.Context(), chi.RouteCtxKey, rctx))
 
-	piReq := piHTTP.NewRequest(testReq)
-	ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piReq, testContainer)
-	ctx.ContextLogger = *logging.NewContextLogger(ctx, testContainer.Logger)
+			piReq := piHTTP.NewRequest(testReq)
+			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piReq, testContainer)
+			ctx.ContextLogger = *logging.NewContextLogger(ctx, testContainer.Logger)
 
-	resp, err := SwaggerUIHandler(ctx)
+			resp, err := SwaggerUIHandler(ctx)
 
-	assert.Nil(t, resp)
-	errors.Is(err, &os.PathError{Path: "/Users/raramuri/Projects/github.com/sllt/pi/pi/pkg/pi/static/abc.abc"})
+			assert.Nil(t, resp)
+			require.Error(t, err)
+		})
+	}
 }

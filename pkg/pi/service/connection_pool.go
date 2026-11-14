@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -111,6 +112,38 @@ func (c *ConnectionPoolConfig) AddOption(h HTTP) HTTP {
 	httpSvc.Client.Transport = transport
 
 	return h
+}
+
+// CloseService stops background loops (circuit breaker probes, rate-limiter bucket
+// cleanup, OAuth refreshers) across a decorated HTTP service chain and closes idle connections.
+func CloseService(h HTTP) error {
+	if h == nil {
+		return nil
+	}
+	switch v := h.(type) {
+	case *httpService:
+		if v != nil && v.Client != nil {
+			v.Client.CloseIdleConnections()
+		}
+		return nil
+	case *circuitBreaker:
+		return v.Close()
+	case *rateLimiter:
+		return v.Close()
+	case *retryProvider:
+		return CloseService(v.HTTP)
+	case *authProvider:
+		return CloseService(v.HTTP)
+	case *customHealthService:
+		return CloseService(v.HTTP)
+	case *customHeader:
+		return CloseService(v.HTTP)
+	default:
+		if closer, ok := h.(io.Closer); ok {
+			return closer.Close()
+		}
+		return nil
+	}
 }
 
 // extractHTTPService attempts to extract the base *httpService from a potentially wrapped HTTP service.

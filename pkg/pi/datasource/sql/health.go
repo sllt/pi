@@ -24,6 +24,10 @@ type DBStats struct {
 }
 
 func (d *DB) HealthCheck() *datasource.Health {
+	return d.HealthCheckContext(context.Background())
+}
+
+func (d *DB) HealthCheckContext(ctx context.Context) *datasource.Health {
 	h := datasource.Health{
 		Details: make(map[string]any),
 	}
@@ -36,8 +40,14 @@ func (d *DB) HealthCheck() *datasource.Health {
 		return &h
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		ctx, cancel = context.WithTimeout(ctx, time.Second)
+		defer cancel()
+	}
 
 	err := d.PingContext(ctx)
 	if err != nil {

@@ -17,14 +17,25 @@ const (
 
 // HealthCheck returns the health status of the Redis connection.
 func (r *Redis) HealthCheck() datasource.Health {
+	return r.HealthCheckContext(context.Background())
+}
+
+// HealthCheckContext returns the health status of the Redis connection bounded by ctx.
+func (r *Redis) HealthCheckContext(ctx context.Context) datasource.Health {
 	h := datasource.Health{
 		Details: make(map[string]any),
 	}
 
 	h.Details["host"] = r.config.HostName + ":" + strconv.Itoa(r.config.Port)
 
-	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		ctx, cancel = context.WithTimeout(ctx, healthCheckTimeout)
+		defer cancel()
+	}
 
 	if r.Client == nil {
 		h.Status = datasource.StatusDown
@@ -49,6 +60,11 @@ func (r *Redis) HealthCheck() datasource.Health {
 
 // Health returns the health status of the Redis PubSub connection.
 func (ps *PubSub) Health() datasource.Health {
+	return ps.HealthContext(context.Background())
+}
+
+// HealthContext returns the health status of the Redis PubSub connection bounded by ctx.
+func (ps *PubSub) HealthContext(ctx context.Context) datasource.Health {
 	res := datasource.Health{
 		Status: datasource.StatusDown,
 		Details: map[string]any{
@@ -66,11 +82,23 @@ func (ps *PubSub) Health() datasource.Health {
 
 	res.Details["mode"] = mode
 
-	ctx, cancel := context.WithTimeout(context.Background(), defaultRetryTimeout)
-	defer cancel()
+	if ps.client == nil {
+		res.Details["error"] = "redis pubsub not connected"
+		return res
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		ctx, cancel = context.WithTimeout(ctx, defaultRetryTimeout)
+		defer cancel()
+	}
 
 	if err := ps.client.Ping(ctx).Err(); err != nil {
 		ps.logger.Errorf("PubSub health check failed: %v", err)
+		res.Details["error"] = err.Error()
 		return res
 	}
 

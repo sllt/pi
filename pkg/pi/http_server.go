@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
@@ -15,6 +17,19 @@ import (
 	"github.com/sllt/pi/pkg/pi/websocket"
 )
 
+type idempotentListener struct {
+	net.Listener
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (l *idempotentListener) Close() error {
+	l.closeOnce.Do(func() {
+		l.closeErr = l.Listener.Close()
+	})
+	return l.closeErr
+}
+
 type httpServer struct {
 	listenerState
 	router      *piHTTP.Router
@@ -22,6 +37,7 @@ type httpServer struct {
 	port        int
 	ws          *websocket.Manager
 	srv         *http.Server
+	listener    atomic.Pointer[idempotentListener]
 	certFile    string
 	keyFile     string
 	staticFiles map[string]string
@@ -34,6 +50,9 @@ var (
 
 func newHTTPServer(c *infra.Container, port int, middlewareConfigs middleware.Config) *httpServer {
 	r := piHTTP.NewRouter()
+	if c != nil {
+		r.SetTelemetry(c.GetTracerProvider, c.IsIsolated())
+	}
 	wsManager := c.WSManager
 	if wsManager == nil {
 		wsManager = websocket.New()
@@ -41,7 +60,7 @@ func newHTTPServer(c *infra.Container, port int, middlewareConfigs middleware.Co
 	}
 
 	r.Use(
-		middleware.Tracer,
+		middleware.TracerWithProvider(c.GetTracerProvider),
 		middleware.Logging(middlewareConfigs.LogProbes, c.Logger),
 		middleware.CORS(middlewareConfigs.CorsHeaders, r.RegisteredRoutes),
 		middleware.Metrics(c.Metrics()),
@@ -87,10 +106,12 @@ func (s *httpServer) start(c *infra.Container, onError func(error)) error {
 		ReadHeaderTimeout: 5 * time.Second,
 		TLSConfig:         tlsConfig,
 	}
-	listener, err := net.Listen("tcp", addr)
+	rawListener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on HTTP address %s: %w", addr, err)
 	}
+	listener := &idempotentListener{Listener: rawListener}
+	s.listener.Store(listener)
 
 	s.boundTo(listener.Addr())
 	c.Infof("HTTP server listening on %s", listener.Addr())
@@ -118,7 +139,7 @@ func (s *httpServer) Shutdown(ctx context.Context) error {
 		return nil
 	}
 
-	return ShutdownWithContext(ctx, func(ctx context.Context) error {
+	err := ShutdownWithContext(ctx, func(ctx context.Context) error {
 		return s.srv.Shutdown(ctx)
 	}, func() error {
 		if err := s.srv.Close(); err != nil {
@@ -127,6 +148,10 @@ func (s *httpServer) Shutdown(ctx context.Context) error {
 
 		return nil
 	})
+	if l := s.listener.Load(); l != nil {
+		_ = l.Close()
+	}
+	return err
 }
 
 func validateCertificateAndKeyFiles(certificateFile, keyFile string) error {

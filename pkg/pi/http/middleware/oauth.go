@@ -31,8 +31,15 @@ const jwtRegexPattern = "^[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+$"
 
 // PublicKeys stores a map of public keys identified by their key ID (kid).
 type PublicKeys struct {
-	mu   sync.RWMutex
-	keys map[string]*rsa.PublicKey
+	mu          sync.RWMutex
+	keys        map[string]*rsa.PublicKey
+	lifecycleMu sync.Mutex
+	deferredCfg *OauthConfigs
+	started     bool
+	closed      bool
+	ctxCancel   context.CancelFunc
+	stopCh      chan struct{}
+	doneCh      chan struct{}
 }
 
 // JWKNotFound is an error type indicating a missing JSON Web Key Set (JWKS).
@@ -53,6 +60,91 @@ func (p *PublicKeys) Get(kid string) *rsa.PublicKey {
 	return key
 }
 
+// Close stops the background JWKS refresh loop and waits for it to exit.
+func (p *PublicKeys) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.lifecycleMu.Lock()
+	if !p.closed {
+		p.closed = true
+		if p.ctxCancel != nil {
+			p.ctxCancel()
+		}
+		if p.stopCh != nil {
+			close(p.stopCh)
+		}
+	}
+	doneCh := p.doneCh
+	p.lifecycleMu.Unlock()
+
+	if doneCh != nil {
+		<-doneCh
+	}
+	return nil
+}
+
+// NewDeferredOAuth creates an unstarted PublicKeys provider so pure constructors (such as pi.Build)
+// can wire OAuth middleware without performing network I/O or starting goroutines before Start.
+func NewDeferredOAuth(config OauthConfigs) *PublicKeys {
+	return &PublicKeys{
+		deferredCfg: &config,
+	}
+}
+
+// Start activates the JWKS fetch/refresh background loop on a PublicKeys provider created via NewDeferredOAuth.
+// Calling Start multiple times or after Close is a safe no-op.
+func (p *PublicKeys) Start(ctx context.Context) {
+	if p == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	p.lifecycleMu.Lock()
+	if p.closed || p.started || p.deferredCfg == nil {
+		p.lifecycleMu.Unlock()
+		return
+	}
+	cfg := *p.deferredCfg
+	loopCtx, cancel := context.WithCancel(ctx)
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	p.started = true
+	p.ctxCancel = cancel
+	p.stopCh = stopCh
+	p.doneCh = doneCh
+	p.lifecycleMu.Unlock()
+
+	if cfg.RefreshInterval <= 0 {
+		go func() {
+			defer close(doneCh)
+			p.updateKeysContext(loopCtx, cfg)
+		}()
+		return
+	}
+
+	go func() {
+		defer close(doneCh)
+		p.updateKeysContext(loopCtx, cfg)
+
+		ticker := time.NewTicker(cfg.RefreshInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-loopCtx.Done():
+				return
+			case <-ticker.C:
+				p.updateKeysContext(loopCtx, cfg)
+			}
+		}
+	}()
+}
+
 type JWKSProvider interface {
 	GetWithHeaders(ctx context.Context, path string, queryParams map[string]any,
 		headers map[string]string) (*http.Response, error)
@@ -67,25 +159,27 @@ type OauthConfigs struct {
 
 // NewOAuth creates a PublicKeyProvider that periodically fetches and updates public keys from a JWKS endpoint.
 func NewOAuth(config OauthConfigs) PublicKeyProvider {
-	var publicKeys PublicKeys
+	return NewOAuthContext(context.Background(), config)
+}
 
-	go func() {
-		publicKeys.updateKeys(config)
-
-		ticker := time.NewTicker(config.RefreshInterval)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			publicKeys.updateKeys(config)
-		}
-	}()
-
-	return &publicKeys
+// NewOAuthContext creates a PublicKeyProvider whose background JWKS refresh loop stops
+// when ctx is canceled or Close() is invoked on the returned provider.
+func NewOAuthContext(ctx context.Context, config OauthConfigs) PublicKeyProvider {
+	publicKeys := NewDeferredOAuth(config)
+	publicKeys.Start(ctx)
+	return publicKeys
 }
 
 // updateKeys updates keys using PublicKeyProvider.
 func (p *PublicKeys) updateKeys(config OauthConfigs) {
-	jwks, err := getPublicKeys(context.Background(), config.Provider, config.Path)
+	p.updateKeysContext(context.Background(), config)
+}
+
+func (p *PublicKeys) updateKeysContext(ctx context.Context, config OauthConfigs) {
+	if config.Provider == nil || ctx.Err() != nil {
+		return
+	}
+	jwks, err := getPublicKeys(ctx, config.Provider, config.Path)
 	if err != nil {
 		return
 	}
@@ -108,6 +202,9 @@ func getPublicKeys(ctx context.Context, provider JWKSProvider, path string) (JWK
 	if err != nil || resp == nil {
 		return keys, err
 	}
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return keys, errInvalidURL
@@ -121,8 +218,6 @@ func getPublicKeys(ctx context.Context, provider JWKSProvider, path string) (JWK
 	if err != nil {
 		return keys, err
 	}
-
-	resp.Body.Close()
 
 	err = json.Unmarshal(body, &keys)
 
@@ -140,6 +235,7 @@ func OAuth(key PublicKeyProvider, options ...jwt.ParserOption) func(http.Handler
 	function, _ := getPublicKeyFunc(key)
 	provider := OAuthProvider{
 		publicKeyFunc: function,
+		keyProvider:   key,
 		options:       append(options, jwt.WithIssuedAt()),
 		regex:         regexp.MustCompile(jwtRegexPattern),
 	}
@@ -212,13 +308,18 @@ func (jwk *JSONWebKey) rsaPublicKey() (*rsa.PublicKey, error) {
 
 type OAuthProvider struct {
 	publicKeyFunc func(token *jwt.Token) (any, error)
-	// keyProvider PublicKeyProvider
-	options []jwt.ParserOption
-	regex   *regexp.Regexp
+	keyProvider   PublicKeyProvider
+	options       []jwt.ParserOption
+	regex         *regexp.Regexp
 }
 
 // NewOAuthProvider generates a OAuthProvider for the given OauthConfigs and jwt.ParserOption.
 func NewOAuthProvider(config OauthConfigs, options ...jwt.ParserOption) (AuthProvider, error) {
+	return NewOAuthProviderContext(context.Background(), config, options...)
+}
+
+// NewOAuthProviderContext generates an OAuthProvider bound to ctx for graceful JWKS refresh shutdown.
+func NewOAuthProviderContext(ctx context.Context, config OauthConfigs, options ...jwt.ParserOption) (AuthProvider, error) {
 	// Validate configuration before proceeding
 	if config.Provider == nil {
 		return nil, errEmptyProvider
@@ -228,16 +329,32 @@ func NewOAuthProvider(config OauthConfigs, options ...jwt.ParserOption) (AuthPro
 		return nil, errInvalidInterval
 	}
 
-	function, err := getPublicKeyFunc(NewOAuth(config))
+	keyProvider := NewOAuthContext(ctx, config)
+	function, err := getPublicKeyFunc(keyProvider)
 	if err != nil {
+		if closer, ok := keyProvider.(io.Closer); ok {
+			_ = closer.Close()
+		}
 		return nil, err
 	}
 
 	return &OAuthProvider{
 		publicKeyFunc: function,
+		keyProvider:   keyProvider,
 		regex:         regexp.MustCompile(jwtRegexPattern),
 		options:       append(options, jwt.WithIssuedAt()),
 	}, nil
+}
+
+// Close stops the underlying PublicKeyProvider refresh loop when supported.
+func (p *OAuthProvider) Close() error {
+	if p == nil || p.keyProvider == nil {
+		return nil
+	}
+	if closer, ok := p.keyProvider.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func (p *OAuthProvider) ExtractAuthHeader(r *http.Request) (any, ErrorHTTP) {

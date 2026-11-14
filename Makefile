@@ -1,5 +1,5 @@
 GO ?= go
-.PHONY: build unit race integration generator generator-integration modules
+.PHONY: build unit race integration generator generator-integration modules openapi-verify
 build:
 	$(GO) build -mod=readonly ./...
 unit:
@@ -15,3 +15,5 @@ generator-integration:
 # Independent adapter modules need their own module graph; root ./... excludes them.
 modules:
 	./scripts/check-modules.sh
+openapi-verify:
+	cd internal/openapiverify && GOWORK=off $(GO) test -race -count=1 ./...

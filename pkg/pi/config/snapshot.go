@@ -41,18 +41,32 @@ func (s *Snapshot) Values() map[string]string {
 	}
 	return m
 }
-func (s *Snapshot) Redacted() map[string]string {
-	m := s.Values()
-	for k := range m {
+func RedactMap(values map[string]string) map[string]string {
+	m := make(map[string]string, len(values))
+	for k, v := range values {
 		u := strings.ToUpper(k)
-		for _, word := range []string{"SECRET", "PASSWORD", "TOKEN", "KEY", "DSN", "CREDENTIAL", "URL"} {
+		redacted := false
+		isPublicHeaderList := u == "CORS_ALLOWED_HEADERS" || u == "CORS_EXPOSE_HEADERS"
+		for _, word := range []string{"SECRET", "PASSWORD", "PASS", "PRIVATE", "TOKEN", "KEY", "DSN", "CREDENTIAL", "URL", "AUTH", "HEADER"} {
+			if word == "HEADER" && isPublicHeaderList {
+				continue
+			}
 			if strings.Contains(u, word) {
-				m[k] = "[redacted]"
+				redacted = true
 				break
 			}
 		}
+		if redacted {
+			m[k] = "[redacted]"
+		} else {
+			m[k] = v
+		}
 	}
 	return m
+}
+
+func (s *Snapshot) Redacted() map[string]string {
+	return RedactMap(s.Values())
 }
 
 // LoadSnapshot uses .env < .<APP_ENV>.env (or .local.env) < explicit environment.

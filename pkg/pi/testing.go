@@ -13,7 +13,9 @@ func (a *App) HTTPHandler() (http.Handler, error) {
 	if a.httpServer == nil {
 		return nil, errors.New("application has no HTTP router")
 	}
-	a.httpServerSetup()
+	if err := a.ensureHTTPCompiled(); err != nil {
+		return nil, err
+	}
 	return a.httpServer.router, nil
 }
 

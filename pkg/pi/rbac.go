@@ -1,8 +1,6 @@
 package pi
 
 import (
-	"go.opentelemetry.io/otel"
-
 	"github.com/sllt/pi/pkg/pi/rbac"
 )
 
@@ -37,7 +35,7 @@ func (a *App) EnableRBAC(configPath ...string) {
 	// Get dependencies
 	logger := a.Logger()
 	metrics := a.Metrics()
-	tracer := otel.GetTracerProvider().Tracer("pi-rbac")
+	tracer := a.tracerProvider().Tracer("pi-rbac")
 
 	// Load configuration directly with dependencies
 	config, err := rbac.LoadPermissions(path, logger, metrics, tracer)

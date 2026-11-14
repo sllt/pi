@@ -53,6 +53,7 @@ func Test_ClickHouse_ConnectAndMetricRegistrationAndPingFailure(t *testing.T) {
 	mockLogger.EXPECT().Errorf("ping failed with error %v", gomock.Any())
 
 	cl.Connect()
+	t.Cleanup(func() { _ = cl.Close() })
 
 	time.Sleep(100 * time.Millisecond)
 

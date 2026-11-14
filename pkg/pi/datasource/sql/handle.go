@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sync"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/sllt/pi/pkg/pi/config"
 	"github.com/sllt/pi/pkg/pi/datasource"
 )
@@ -16,17 +18,23 @@ var ErrNotStarted = errors.New("sql: managed connection has not started")
 // Handle has stable identity during dependency injection. Construction opens no
 // connection and starts no goroutines; Start activates it before application hooks.
 type Handle struct {
-	mu      sync.RWMutex
-	db      *DB
-	closed  bool
-	config  config.Config
-	logger  datasource.Logger
-	metrics Metrics
+	mu             sync.RWMutex
+	db             *DB
+	closed         bool
+	config         config.Config
+	logger         datasource.Logger
+	metrics        Metrics
+	tracerProvider trace.TracerProvider
 }
 
 func NewHandle(c config.Config, l datasource.Logger, m Metrics) *Handle {
 	return &Handle{config: c, logger: l, metrics: m}
 }
+
+func NewHandleWithTracerProvider(c config.Config, l datasource.Logger, m Metrics, tp trace.TracerProvider) *Handle {
+	return &Handle{config: c, logger: l, metrics: m, tracerProvider: tp}
+}
+
 func (h *Handle) Start(ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -36,7 +44,7 @@ func (h *Handle) Start(ctx context.Context) error {
 	if h.db != nil {
 		return nil
 	}
-	db, err := OpenContext(ctx, h.config, h.logger, h.metrics)
+	db, err := OpenContextWithTracerProvider(ctx, h.config, h.logger, h.metrics, h.tracerProvider)
 	if err != nil {
 		return err
 	}
@@ -125,11 +133,15 @@ func (h *Handle) Select(ctx context.Context, dest any, q string, a ...any) error
 	return d.Select(ctx, dest, q, a...)
 }
 func (h *Handle) HealthCheck() *datasource.Health {
+	return h.HealthCheckContext(context.Background())
+}
+
+func (h *Handle) HealthCheckContext(ctx context.Context) *datasource.Health {
 	d, e := h.ready()
 	if e != nil {
 		return &datasource.Health{Status: datasource.StatusDown, Details: map[string]any{"error": e.Error()}}
 	}
-	return d.HealthCheck()
+	return d.HealthCheckContext(ctx)
 }
 
 type errorConnector struct{ err error }

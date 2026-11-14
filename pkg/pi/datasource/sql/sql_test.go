@@ -1,9 +1,12 @@
 package sql
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -83,6 +86,9 @@ func TestNewSQL_GetDBDialect(t *testing.T) {
 	mockMetrics.EXPECT().SetGauge(gomock.Any(), gomock.Any()).AnyTimes()
 
 	db := NewSQL(mockConfig, mockLogger, mockMetrics)
+	if db != nil {
+		t.Cleanup(func() { _ = db.Close() })
+	}
 
 	dialect := db.Dialect()
 
@@ -370,7 +376,10 @@ func Test_SQLRetryConnectionInfoLog(t *testing.T) {
 		mockMetrics.EXPECT().SetGauge("app_sql_open_connections", gomock.Any()).AnyTimes()
 		mockMetrics.EXPECT().SetGauge("app_sql_inUse_connections", gomock.Any()).AnyTimes()
 
-		_ = NewSQL(mockConfig, mockLogger, mockMetrics)
+		db := NewSQL(mockConfig, mockLogger, mockMetrics)
+		if db != nil {
+			defer db.Close()
+		}
 
 		time.Sleep(500 * time.Millisecond)
 	})
@@ -401,6 +410,7 @@ func TestNewSQL_CockroachDB(t *testing.T) {
 		assert.NotNil(t, db, "Expected a non-nil DB object for cockroachdb")
 
 		if db != nil {
+			defer db.Close()
 			assert.Equal(t, "cockroachdb", db.Dialect(), "Expected dialect to be cockroachdb")
 		}
 	})
@@ -815,5 +825,68 @@ func createInvalidCert(t *testing.T) string {
 func cleanupCerts(certPaths map[string]string) {
 	for _, path := range certPaths {
 		os.Remove(path)
+	}
+}
+
+func TestNewSQL_CloseStopsBackgroundLoops(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockMetrics := NewMockMetrics(ctrl)
+
+	var gaugeCalls atomic.Int32
+	var closedFlag atomic.Bool
+
+	mockMetrics.EXPECT().SetGauge(gomock.Any(), gomock.Any()).Do(func(string, float64, ...string) {
+		if closedFlag.Load() {
+			t.Errorf("SetGauge called after DB.Close returned")
+		}
+		gaugeCalls.Add(1)
+	}).AnyTimes()
+
+	dbFile := filepath.Join(t.TempDir(), "legacy-close")
+	mockConfig := config.NewMockConfig(map[string]string{
+		"DB_DIALECT": "sqlite",
+		"DB_NAME":    dbFile,
+	})
+	mockLogger := logging.NewMockLogger(logging.ERROR)
+
+	db := NewSQL(mockConfig, mockLogger, mockMetrics)
+	require.NotNil(t, db)
+
+	require.Eventually(t, func() bool {
+		return gaugeCalls.Load() >= 2
+	}, time.Second, 10*time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- db.Close()
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("DB.Close blocked waiting for background loops")
+	}
+
+	closedFlag.Store(true)
+	// Idempotent second Close must also succeed without panic.
+	require.NoError(t, db.Close())
+}
+
+func TestPushDBMetrics_NilGuardsAndCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	// Must return immediately without busy-spinning or panicking when db or metrics is nil.
+	done := make(chan struct{})
+	go func() {
+		pushDBMetrics(ctx, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("pushDBMetrics did not return promptly on nil db/metrics")
 	}
 }

@@ -35,6 +35,8 @@ type Context struct {
 	Out terminal.Output
 
 	logging.ContextLogger
+
+	workerExec *workerExecHandle
 }
 
 type AuthInfo interface {
@@ -60,7 +62,11 @@ but End will be called after function ends.
 Developer Note: If you chain methods in a defer statement, everything except the last function will be evaluated at call time.
 */
 func (c *Context) Trace(name string) trace.Span {
-	tr := otel.GetTracerProvider().Tracer("pi-context")
+	tp := otel.GetTracerProvider()
+	if c.Container != nil {
+		tp = c.Container.GetTracerProvider()
+	}
+	tr := tp.Tracer("pi-context")
 	ctx, span := tr.Start(c.Context, name)
 	// TODO: If we don't close the span using `defer` and run the http-server example by hitting `/trace` endpoint, we are
 	// getting incomplete redis spans when viewing the trace using correlationID. If we remove assigning the ctx to Pi
@@ -158,12 +164,16 @@ func (a *authInfo) GetAPIKey() string {
 // }
 
 func newContext(w Responder, r Request, c *infra.Container) *Context {
+	var logger logging.Logger
+	if c != nil {
+		logger = c.Logger
+	}
 	return &Context{
 		Context:       r.Context(),
 		Request:       r,
 		responder:     w,
 		Container:     c,
-		ContextLogger: *logging.NewContextLogger(r.Context(), c.Logger),
+		ContextLogger: *logging.NewContextLogger(r.Context(), logger),
 	}
 }
 

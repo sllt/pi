@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+
 	piHttp "github.com/sllt/pi/pkg/pi/http"
 )
 
@@ -41,6 +43,7 @@ type RateLimiterConfig struct {
 	Store             RateLimiterStore // Optional: defaults to in-memory store
 	TrustedProxies    bool             // If true, trust X-Forwarded-For and X-Real-IP headers
 	MaxKeys           int64            // Maximum unique rate limit keys (0 = default 100000)
+	Context           context.Context  // Optional lifecycle context for background bucket cleanup
 }
 
 // Validate checks if the configuration values are valid.
@@ -111,6 +114,28 @@ func getRemoteAddr(r *http.Request) string {
 
 // RateLimiter creates a middleware that limits requests based on the configuration.
 func RateLimiter(config RateLimiterConfig, m metrics) func(http.Handler) http.Handler {
+	mw, _ := RateLimiterWithCloser(config, m)
+	return mw
+}
+
+// RateLimiterWithCloser creates a rate-limiting middleware and returns a cleanup closer
+// that stops the store's background bucket sweeper on application shutdown.
+func RateLimiterWithCloser(config RateLimiterConfig, m metrics) (func(http.Handler) http.Handler, func() error) {
+	mw, start, closer := RateLimiterDeferred(config, m)
+	ctx := config.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	start(ctx)
+	return mw, closer
+}
+
+// RateLimiterDeferred validates config and constructs a rate-limiting middleware without
+// starting background cleanup until start is invoked.
+func RateLimiterDeferred(
+	config RateLimiterConfig,
+	m metrics,
+) (func(http.Handler) http.Handler, func(context.Context), func() error) {
 	// Validate configuration
 	if err := config.Validate(); err != nil {
 		panic(fmt.Sprintf("invalid rate limiter config: %v", err))
@@ -121,11 +146,21 @@ func RateLimiter(config RateLimiterConfig, m metrics) func(http.Handler) http.Ha
 		config.Store = NewMemoryRateLimiterStore(config)
 	}
 
-	// Start cleanup routine with context.Background().
-	// The cleanup goroutine runs for the application lifetime.
-	// For graceful shutdown, call config.Store.StopCleanup() in your shutdown handler.
-	ctx := context.Background()
-	config.Store.StartCleanup(ctx)
+	store := config.Store
+	start := func(ctx context.Context) {
+		if config.Context != nil {
+			ctx = config.Context
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		store.StartCleanup(ctx)
+	}
+
+	closer := func() error {
+		store.StopCleanup()
+		return nil
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +182,7 @@ func RateLimiter(config RateLimiterConfig, m metrics) func(http.Handler) http.Ha
 			}
 
 			// Check rate limit
-			allowed, retryAfter, err := config.Store.Allow(r.Context(), key, config)
+			allowed, retryAfter, err := store.Allow(r.Context(), key, config)
 			if err != nil {
 				// Fail open on errors
 				next.ServeHTTP(w, r)
@@ -159,10 +194,10 @@ func RateLimiter(config RateLimiterConfig, m metrics) func(http.Handler) http.Ha
 				// Use math.Ceil to ensure at least 1 second for sub-second delays
 				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", math.Ceil(retryAfter.Seconds())))
 
-				// Increment rate limit exceeded metric
+				// Increment rate limit exceeded metric using low-cardinality route pattern
 				if m != nil {
 					m.IncrementCounter(r.Context(), "app_http_rate_limit_exceeded_total",
-						"path", r.URL.Path, "method", r.Method)
+						"path", rateLimitRouteLabel(r), "method", r.Method)
 				}
 
 				// Return 429 Too Many Requests
@@ -174,5 +209,27 @@ func RateLimiter(config RateLimiterConfig, m metrics) func(http.Handler) http.Ha
 
 			next.ServeHTTP(w, r)
 		})
+	}, start, closer
+}
+
+func rateLimitRouteLabel(r *http.Request) string {
+	if r == nil {
+		return "unmatched"
 	}
+	if rctx := chi.RouteContext(r.Context()); rctx != nil {
+		if pattern := strings.TrimSuffix(rctx.RoutePattern(), "/"); pattern != "" {
+			return pattern
+		}
+		if rctx.Routes != nil {
+			probe := chi.NewRouteContext()
+			if rctx.Routes.Match(probe, r.Method, r.URL.Path) {
+				if pattern := strings.TrimSuffix(probe.RoutePattern(), "/"); pattern != "" {
+					return pattern
+				}
+				return "/"
+			}
+		}
+		return "unmatched"
+	}
+	return "unmatched"
 }

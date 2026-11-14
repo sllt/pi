@@ -10,7 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/sllt/pi/pkg/pi/config"
+	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
 	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/middleware"
@@ -47,9 +50,17 @@ type buildOptions struct {
 	metrics            metrics.Manager
 	metricsHandler     http.Handler
 	validate           func(any) error
+	customValidate     func(any) error
+	typedBind          TypedBindConfig
+	openAPI            OpenAPIConfig
+	hasOpenAPI         bool
 	db                 infra.DB
 	dbOwnership        Ownership
 	managedSQL         bool
+	pubsubClient       pubsub.Client
+	pubsubOwnership    Ownership
+	tracerProvider     trace.TracerProvider
+	tracerOwnership    Ownership
 	resources          []Resource
 }
 type Option func(*buildOptions) error
@@ -97,6 +108,7 @@ func WithValidator(v func(any) error) Option {
 			return errors.New("validator must not be nil")
 		}
 		o.validate = v
+		o.customValidate = v
 		return nil
 	}
 }
@@ -110,6 +122,34 @@ func WithSQL(db infra.DB, ownership Ownership) Option {
 		}
 		o.db = db
 		o.dbOwnership = ownership
+		return nil
+	}
+}
+
+func WithPubSub(client pubsub.Client, ownership Ownership) Option {
+	return func(o *buildOptions) error {
+		if nilOptionValue(client) {
+			return errors.New("PubSub client must not be nil")
+		}
+		o.pubsubClient = client
+		o.pubsubOwnership = ownership
+		return nil
+	}
+}
+
+// WithTracerProvider configures an instance-scoped OpenTelemetry TracerProvider
+// without mutating global otel.SetTracerProvider. When ownership is Owned and tp
+// implements Shutdown(context.Context) error, App.Stop flushes and shuts it down.
+func WithTracerProvider(tp trace.TracerProvider, ownership Ownership) Option {
+	return func(o *buildOptions) error {
+		if nilOptionValue(tp) {
+			return errors.New("tracer provider must not be nil")
+		}
+		if ownership != Owned && ownership != Borrowed {
+			return errors.New("tracer provider requires Owned or Borrowed")
+		}
+		o.tracerProvider = tp
+		o.tracerOwnership = ownership
 		return nil
 	}
 }
@@ -166,7 +206,13 @@ func Build(options ...Option) (*App, error) {
 	if o.db != nil {
 		o.resources = append([]Resource{{Name: "sql", Ownership: o.dbOwnership, Stop: func(context.Context) error { return o.db.Close() }}}, o.resources...)
 	}
+	if o.pubsubClient != nil {
+		o.resources = append([]Resource{{Name: "pubsub", Ownership: o.pubsubOwnership, Stop: func(context.Context) error { return o.pubsubClient.Close() }}}, o.resources...)
+	}
 	names := map[string]bool{}
+	if o.tracerProvider != nil {
+		names["tracer"] = true
+	}
 	for _, r := range o.resources {
 		if r.Name == "" || names[r.Name] || (o.managedSQL && r.Name == "sql") {
 			return nil, fmt.Errorf("empty or duplicate resource name %q", r.Name)
@@ -206,23 +252,69 @@ func Build(options ...Option) (*App, error) {
 	if err := middleware.ValidateCORS(mw.CorsHeaders); err != nil {
 		return nil, err
 	}
+	var normalizedOpenAPI OpenAPIConfig
+	if o.hasOpenAPI {
+		var err error
+		normalizedOpenAPI, err = validateAndNormalizeOpenAPIConfig(o.openAPI)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if o.validate == nil {
 		o.validate = piHTTP.NewValidator(cfg.GetOrDefault("VALIDATION_LOCALE", "en"))
 	}
 	c := infra.NewIsolated(cfg, o.logger, o.metrics)
+	if o.tracerProvider != nil {
+		c.TracerProvider = o.tracerProvider
+	}
 	c.Validate = o.validate
 	c.ExplicitHTTPStatus = o.explicitHTTPStatus
 	c.MaxBodyBytes = 1 << 20
 	if v := cfg.Get("HTTP_MAX_BODY_BYTES"); v != "" {
 		c.MaxBodyBytes, _ = strconv.ParseInt(v, 10, 64)
 	}
-	a := &App{Config: cfg, container: c, pureBuild: true, httpDisabled: !httpEnabled, grpcDisabled: !grpcEnabled, waitDone: make(chan struct{})}
+	a := &App{
+		Config:           cfg,
+		container:        c,
+		pureBuild:        true,
+		httpDisabled:     !httpEnabled,
+		grpcDisabled:     !grpcEnabled,
+		waitDone:         make(chan struct{}),
+		customValidate:   o.customValidate,
+		typedBind:        o.typedBind,
+		openAPI:          normalizedOpenAPI,
+		hasOpenAPIConfig: o.hasOpenAPI,
+	}
+	if o.tracerProvider != nil {
+		tp := o.tracerProvider
+		a.resources = append(a.resources, managedResource{
+			Resource: Resource{
+				Name:      "tracer",
+				Ownership: o.tracerOwnership,
+				Stop: func(ctx context.Context) error {
+					if sd, ok := tp.(interface{ Shutdown(context.Context) error }); ok {
+						return sd.Shutdown(ctx)
+					}
+					return nil
+				},
+			},
+			active: true,
+		})
+	}
 	if o.managedSQL {
-		h := piSQL.NewHandle(cfg, c.Logger, c.Metrics())
+		h := piSQL.NewHandleWithTracerProvider(cfg, c.Logger, c.Metrics(), o.tracerProvider)
 		c.SQL = h
 		a.resources = append(a.resources, managedResource{Resource: Resource{Name: "sql", Ownership: Owned, Start: h.Start, Stop: func(context.Context) error { return h.Close() }}})
 	} else {
 		c.SQL = o.db
+	}
+	if o.pubsubClient != nil {
+		if o.pubsubOwnership == Owned {
+			if tr, ok := o.pubsubClient.(interface{ UseTracer(any) }); ok {
+				tr.UseTracer(c.GetTracerProvider().Tracer("pi"))
+			}
+		}
+		c.PubSub = o.pubsubClient
 	}
 	for _, r := range o.resources {
 		a.resources = append(a.resources, managedResource{Resource: r, active: r.Start == nil})
@@ -230,7 +322,11 @@ func Build(options ...Option) (*App, error) {
 	a.httpServer = newHTTPServer(c, defaultHTTPPort, mw)
 	a.httpServer.address = address
 	a.httpServer.certFile = cfg.Get("CERT_FILE")
+	if a.hasOpenAPIConfig && a.openAPI.ServeSpec {
+		a.ensureHTTPAvailable()
+	}
 	a.httpServer.keyFile = cfg.Get("KEY_FILE")
+	a.bindWSManagerHooks()
 	a.grpcServer, err = newGRPCServer(c, defaultGRPCPort, cfg)
 	if err != nil {
 		return nil, err

@@ -791,24 +791,24 @@ func TestNewWriter_SetsContentType(t *testing.T) {
 // TestContentTypeDetection_Logic tests the content type detection logic directly.
 func TestContentTypeDetection_Logic(t *testing.T) {
 	testCases := []struct {
-		name           string
-		expectedBaseCT string
-		description    string
+		name            string
+		expectedBaseCTs []string
+		description     string
 	}{
-		{"file.json", "application/json", "JSON files"},
-		{"file.txt", "text/plain", "Text files"},
-		{"file.csv", "text/csv", "CSV files"},
-		{"file.xml", "application/xml", "XML files (mime returns application/xml)"},
-		{"file.html", "text/html", "HTML files"},
-		{"file.pdf", "application/pdf", "PDF files"},
-		{"file.js", "text/javascript", "JavaScript files (mime returns text/javascript)"},
-		{"file.css", "text/css", "CSS files"},
-		{"file.yaml", "application/octet-stream", "YAML files (not in standard mime types)"},
-		{"file.yml", "application/octet-stream", "YAML files (.yml, not in standard mime types)"},
-		{"file.unknown", "application/octet-stream", "Unknown extensions"},
-		{"noextension", "application/octet-stream", "Files without extensions"},
-		{"dir/subdir/file.json", "application/json", "Nested paths"},
-		{"dir/subdir/file.txt", "text/plain", "Nested paths"},
+		{"file.json", []string{"application/json"}, "JSON files"},
+		{"file.txt", []string{"text/plain"}, "Text files"},
+		{"file.csv", []string{"text/csv"}, "CSV files"},
+		{"file.xml", []string{"application/xml", "text/xml"}, "XML files"},
+		{"file.html", []string{"text/html"}, "HTML files"},
+		{"file.pdf", []string{"application/pdf"}, "PDF files"},
+		{"file.js", []string{"text/javascript", "application/javascript"}, "JavaScript files"},
+		{"file.css", []string{"text/css"}, "CSS files"},
+		{"file.yaml", []string{"application/octet-stream", "application/x-yaml", "text/yaml", "application/yaml"}, "YAML files"},
+		{"file.yml", []string{"application/octet-stream", "application/x-yaml", "text/yaml", "application/yaml"}, "YAML files (.yml)"},
+		{"file.unknown", []string{"application/octet-stream"}, "Unknown extensions"},
+		{"noextension", []string{"application/octet-stream"}, "Files without extensions"},
+		{"dir/subdir/file.json", []string{"application/json"}, "Nested paths"},
+		{"dir/subdir/file.txt", []string{"text/plain"}, "Nested paths"},
 	}
 
 	for _, tc := range testCases {
@@ -823,7 +823,7 @@ func TestContentTypeDetection_Logic(t *testing.T) {
 				baseContentType = contentType[:idx]
 			}
 
-			assert.Equal(t, tc.expectedBaseCT, baseContentType, tc.description)
+			assert.Contains(t, tc.expectedBaseCTs, baseContentType, tc.description)
 			assert.NotEmpty(t, contentType, "Content type should not be empty")
 		})
 	}

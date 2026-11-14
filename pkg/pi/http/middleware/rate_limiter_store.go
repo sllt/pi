@@ -22,13 +22,16 @@ type RateLimiterStore interface {
 
 // memoryRateLimiterStore implements RateLimiterStore using in-memory token buckets.
 type memoryRateLimiterStore struct {
-	limiters    sync.Map // map[string]*limiterEntry
-	keyCount    int64    // atomic counter for tracking number of keys
-	maxKeys     int64    // maximum allowed keys (0 = unlimited)
-	stopCh      chan struct{}
-	cleanupOnce sync.Once
-	stopOnce    sync.Once
-	config      RateLimiterConfig // Store config for consistency
+	limiters sync.Map // map[string]*limiterEntry
+	keyCount int64    // atomic counter for tracking number of keys
+	maxKeys  int64    // maximum allowed keys (0 = unlimited)
+
+	mu      sync.Mutex
+	running bool
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+
+	config RateLimiterConfig // Store config for consistency
 }
 
 type limiterEntry struct {
@@ -130,41 +133,69 @@ func (*memoryRateLimiterStore) calculateSafeDelay(requestsPerSecond float64) tim
 }
 
 // StartCleanup starts a background goroutine to clean up stale limiters.
-// This method is safe to call multiple times - only one cleanup goroutine will be started.
+// This method is safe to call multiple times - only one cleanup goroutine runs at a time.
 func (m *memoryRateLimiterStore) StartCleanup(ctx context.Context) {
-	m.cleanupOnce.Do(func() {
-		m.stopCh = make(chan struct{})
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-		go func() {
-			const cleanupInterval = 5 * time.Minute
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	m.running = true
+	m.stopCh = stopCh
+	m.doneCh = doneCh
+	m.mu.Unlock()
 
-			const staleThreshold = 10 * time.Minute
+	go func() {
+		defer close(doneCh)
 
-			ticker := time.NewTicker(cleanupInterval)
-			defer ticker.Stop()
+		const cleanupInterval = 5 * time.Minute
+		const staleThreshold = 10 * time.Minute
 
-			for {
-				select {
-				case <-ticker.C:
-					m.cleanup(staleThreshold)
-				case <-m.stopCh:
-					return
-				case <-ctx.Done():
-					return
-				}
+		ticker := time.NewTicker(cleanupInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				m.cleanup(staleThreshold)
+			case <-stopCh:
+				return
+			case <-ctx.Done():
+				return
 			}
-		}()
-	})
+		}
+	}()
 }
 
-// StopCleanup stops the cleanup goroutine.
+// StopCleanup stops the cleanup goroutine and waits for it to exit.
 // This method is safe to call multiple times.
 func (m *memoryRateLimiterStore) StopCleanup() {
-	m.stopOnce.Do(func() {
-		if m.stopCh != nil {
-			close(m.stopCh)
-		}
-	})
+	m.mu.Lock()
+	if !m.running {
+		m.mu.Unlock()
+		return
+	}
+	stopCh := m.stopCh
+	doneCh := m.doneCh
+	m.running = false
+	m.stopCh = nil
+	m.doneCh = nil
+	m.mu.Unlock()
+
+	close(stopCh)
+	<-doneCh
+}
+
+// Close stops the cleanup goroutine, satisfying io.Closer.
+func (m *memoryRateLimiterStore) Close() error {
+	m.StopCleanup()
+	return nil
 }
 
 // cleanup removes stale limiters that haven't been accessed recently.

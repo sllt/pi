@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -12,21 +13,20 @@ var (
 	mu sync.RWMutex
 )
 
-const duration = 3
+const duration = 2500 * time.Millisecond
 
 func main() {
 	app := pi.New()
 
-	// runs every second
+	// runs every second once the application starts
 	app.AddCronJob("* * * * * *", "counter", count)
 
-	// setting the maximum duration of this application
-	time.Sleep(duration * time.Second)
+	// setting the maximum duration of this example application
+	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	defer cancel()
 
-	// not running the app to close after we have completed the crons running
-	// since this is an example the cron will not be running forever
-	// to run cron forever, users can start the metric server or normal HTTP server
-	// app.Run()
+	// Cron jobs execute under Pi's supervised runtime after Start/RunContext.
+	_ = app.RunContext(ctx)
 }
 
 func count(c *pi.Context) {

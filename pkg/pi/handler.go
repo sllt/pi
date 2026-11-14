@@ -76,6 +76,10 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	responder := piHTTP.NewResponderForRequest(w, r, policy)
 	// The asynchronous Handler owns a request snapshot. The net/http server may
 	// close/reuse the original body and routing context after a timeout response.
+	var (
+		snapshotBytes []byte
+		hasSnapshot   bool
+	)
 	if !websocket.IsWebSocketUpgrade(r) {
 		owned := r.Clone(r.Context())
 		if route := chi.RouteContext(r.Context()); route != nil {
@@ -113,6 +117,8 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
+			snapshotBytes = body
+			hasSnapshot = true
 			owned.Body = io.NopCloser(bytes.NewReader(body))
 			if contentType != "" {
 				owned.Header.Set("Content-Type", contentType)
@@ -121,10 +127,12 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				owned.PostForm = nil
 				owned.MultipartForm = nil
 			}
+		} else {
+			hasSnapshot = true
 		}
 		r = owned
 	}
-	c := newContext(responder, piHTTP.NewRequestWithValidator(r, h.container.Validate), h.container)
+	c := newContext(responder, piHTTP.NewRequestWithSnapshot(r, h.container.Validate, snapshotBytes, hasSnapshot), h.container)
 
 	if websocket.IsWebSocketUpgrade(r) {
 		// If the request is a WebSocket upgrade, do not apply the timeout
@@ -136,6 +144,14 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.Context = ctx
 	}
 
+	// The websocket middleware has already hijacked this connection. Execute
+	// directly so ServeHTTP stays bound to the WebSocket loop lifetime and
+	// WSHandlerUpgrade's deferred cleanup never fires while the loop is active.
+	if r.Context().Value(piWS.WSConnectionKey) != nil {
+		_ = h.execute(c, traceID)
+		return
+	}
+
 	// Handler middleware and Context.Trace may replace c.Context. The response
 	// goroutine owns this original cancellation context and never reads c again.
 	requestCtx := c.Context
@@ -143,7 +159,9 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	responseDone := make(chan struct{})
 	defer close(responseDone)
 
+	doneHandler := h.container.BeginHandlerExecution()
 	go func() {
+		defer doneHandler()
 		defer func() {
 			<-responseDone
 			if r.MultipartForm != nil {
@@ -169,11 +187,6 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			result.err = piHTTP.ErrorClientClosedRequest{}
 		}
 	case result = <-results:
-	}
-	// The websocket middleware has already hijacked this connection. There is
-	// no remaining HTTP response to write, even if the user handler returns error.
-	if r.Context().Value(piWS.WSConnectionKey) != nil {
-		return
 	}
 	if result.err == nil {
 		result.data = h.guardStream(result.data, traceID)
@@ -212,10 +225,12 @@ func (h handler) execute(c *Context, traceID string) (result handlerResult) {
 	defer func() {
 		if re := recover(); re != nil {
 			result = handlerResult{err: piHTTP.ErrorPanicRecovery{}}
-			h.container.Logger.Error(panicLog{
-				Error:      fmt.Sprint(re),
-				StackTrace: string(debug.Stack()),
-			})
+			if h.container != nil && h.container.Logger != nil {
+				h.container.Logger.Error(panicLog{
+					Error:      fmt.Sprint(re),
+					StackTrace: string(debug.Stack()),
+				})
+			}
 		}
 	}()
 
@@ -253,7 +268,7 @@ func catchAllHandler(*Context) (any, error) {
 
 // Log the error(if any) with traceID and errorMessage.
 func (h handler) logError(traceID string, err error) {
-	if err != nil {
+	if err != nil && h.container != nil && h.container.Logger != nil {
 		errorLog := &ErrorLogEntry{TraceID: traceID, Error: err.Error()}
 
 		// define the default log level for error

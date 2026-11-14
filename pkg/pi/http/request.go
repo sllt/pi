@@ -28,8 +28,10 @@ var (
 // Request is an abstraction over the underlying http.Request. This abstraction is useful because it allows us
 // to create applications without being aware of the transport. cmd.Request is another such abstraction.
 type Request struct {
-	req      *http.Request
-	validate func(any) error
+	req        *http.Request
+	validate   func(any) error
+	rawBody    []byte
+	hasRawBody bool
 }
 
 // NewRequest creates a new Pi Request instance from the given http.Request.
@@ -123,6 +125,16 @@ func (r *Request) Params(key string) []string {
 }
 
 func (r *Request) body() ([]byte, error) {
+	if r == nil || r.req == nil {
+		return nil, nil
+	}
+	if r.hasRawBody {
+		return r.rawBody, nil
+	}
+	if r.req.Body == nil {
+		return nil, nil
+	}
+
 	bodyBytes, err := io.ReadAll(r.req.Body)
 	if err != nil {
 		return nil, err

@@ -147,7 +147,12 @@ func New(level logging.Level, remoteConfigURL string, loggerFetchInterval time.D
 	}
 
 	if remoteConfigURL != "" {
-		go l.UpdateLogLevel()
+		if ctx, ok := l.acquireLoopContext(); ok {
+			go func() {
+				defer l.wg.Done()
+				l.runUpdateLoop(ctx)
+			}()
+		}
 	}
 
 	return l
@@ -159,6 +164,45 @@ type remoteLogger struct {
 	mu                 sync.RWMutex
 	currentLevel       logging.Level
 	logging.Logger
+
+	lifecycleMu sync.Mutex
+	ctx         context.Context
+	cancel      context.CancelFunc
+	closed      bool
+	wg          sync.WaitGroup
+}
+
+func (r *remoteLogger) acquireLoopContext() (context.Context, bool) {
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+
+	if r.closed {
+		return nil, false
+	}
+	if r.ctx == nil {
+		r.ctx, r.cancel = context.WithCancel(context.Background())
+	}
+	r.wg.Add(1)
+	return r.ctx, true
+}
+
+// Close stops background remote log-level polling and waits for any active
+// polling goroutines to exit. The underlying local logger remains usable for
+// final shutdown diagnostics.
+func (r *remoteLogger) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.lifecycleMu.Lock()
+	r.closed = true
+	cancel := r.cancel
+	r.lifecycleMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	r.wg.Wait()
+	return nil
 }
 
 // SetShowCaller delegates to the underlying logger if it supports CallerConfigurer.
@@ -171,6 +215,22 @@ func (r *remoteLogger) SetShowCaller(show bool) {
 // UpdateLogLevel continuously fetches the log level from the remote configuration URL at the specified interval
 // and updates the underlying log level if it has changed.
 func (r *remoteLogger) UpdateLogLevel() {
+	ctx, ok := r.acquireLoopContext()
+	if !ok {
+		return
+	}
+	defer r.wg.Done()
+	r.runUpdateLoop(ctx)
+}
+
+func (r *remoteLogger) runUpdateLoop(ctx context.Context) {
+	const defaultFetchInterval = 15 * time.Second
+
+	interval := r.levelFetchInterval
+	if interval <= 0 {
+		interval = defaultFetchInterval
+	}
+
 	// Create filtered logger with proper initialization
 	filteredLogger := &httpLogFilter{
 		Logger:             r.Logger,
@@ -181,15 +241,22 @@ func (r *remoteLogger) UpdateLogLevel() {
 	remoteService := service.NewHTTPService(r.remoteURL, filteredLogger, nil)
 
 	r.Infof("Remote logger monitoring initialized with URL: %s, interval: %s",
-		r.remoteURL, r.levelFetchInterval)
+		r.remoteURL, interval)
 
 	checkAndUpdateLevel := func() {
+		if ctx.Err() != nil {
+			return
+		}
+
 		r.mu.RLock()
 		currentLevel := r.currentLevel
 		r.mu.RUnlock()
 
-		newLevel, err := fetchAndUpdateLogLevel(remoteService, currentLevel)
+		newLevel, err := fetchAndUpdateLogLevelContext(ctx, remoteService, currentLevel)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			r.Warnf("Failed to fetch log level: %v", err)
 			return
 		}
@@ -210,13 +277,21 @@ func (r *remoteLogger) UpdateLogLevel() {
 
 	// Perform initial check immediately
 	checkAndUpdateLevel()
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Setup ticker for periodic checks
-	ticker := time.NewTicker(r.levelFetchInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		checkAndUpdateLevel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			checkAndUpdateLevel()
+		}
 	}
 }
 
@@ -232,22 +307,29 @@ func logLevelChange(r *remoteLogger, oldLevel, newLevel logging.Level) {
 
 	switch logLevel {
 	case logging.FATAL:
-		r.Warnf(message)
+		r.Warnf("%s", message)
 	case logging.ERROR:
-		r.Errorf(message)
+		r.Errorf("%s", message)
 	case logging.WARN:
-		r.Warnf(message)
+		r.Warnf("%s", message)
 	case logging.NOTICE:
-		r.Noticef(message)
+		r.Noticef("%s", message)
 	case logging.INFO:
-		r.Infof(message)
+		r.Infof("%s", message)
 	case logging.DEBUG:
-		r.Infof(message) // Using Info for DEBUG to ensure visibility
+		r.Infof("%s", message) // Using Info for DEBUG to ensure visibility
 	}
 }
 
 func fetchAndUpdateLogLevel(remoteService service.HTTP, currentLevel logging.Level) (logging.Level, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout) // Set timeout for 5 seconds
+	return fetchAndUpdateLogLevelContext(context.Background(), remoteService, currentLevel)
+}
+
+func fetchAndUpdateLogLevelContext(parent context.Context, remoteService service.HTTP, currentLevel logging.Level) (logging.Level, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, requestTimeout) // Set timeout for 5 seconds
 	defer cancel()
 
 	resp, err := remoteService.Get(ctx, "", nil)

@@ -41,6 +41,9 @@ func Test_NewClient_InvalidPort(t *testing.T) {
 	).AnyTimes()
 
 	client := NewClient(mockConfig, mockLogger, mockMetrics)
+	if client != nil {
+		defer client.Close()
+	}
 	assert.NotNil(t, client.Client, "Test_NewClient_InvalidPort Failed! Expected redis client not to be nil")
 }
 

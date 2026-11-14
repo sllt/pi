@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -14,6 +15,8 @@ const (
 	OpenState
 )
 
+const minCircuitBreakerTickerInterval = 10 * time.Millisecond
+
 var (
 	// ErrCircuitOpen indicates that the circuit breaker is open.
 	ErrCircuitOpen                        = errors.New("unable to connect to server at host")
@@ -22,8 +25,9 @@ var (
 
 // CircuitBreakerConfig holds the configuration for the circuitBreaker.
 type CircuitBreakerConfig struct {
-	Threshold int           // Threshold represents the max no of retry before switching the circuit breaker state.
-	Interval  time.Duration // Interval represents the time interval duration between hitting the HealthURL
+	Threshold int             // Threshold represents the max no of retry before switching the circuit breaker state.
+	Interval  time.Duration   // Interval represents the time interval duration between hitting the HealthURL.
+	Context   context.Context // Optional host context; canceling stops background health probes.
 }
 
 // circuitBreaker represents a circuit breaker implementation.
@@ -34,8 +38,14 @@ type circuitBreaker struct {
 	threshold    int
 	interval     time.Duration
 	lastChecked  time.Time
+	probing      bool
 	metrics      Metrics
 	serviceName  string
+
+	stopOnce  sync.Once
+	ctxCancel context.CancelFunc
+	stopCh    chan struct{}
+	doneCh    chan struct{}
 
 	HTTP
 }
@@ -44,46 +54,93 @@ type circuitBreaker struct {
 //
 //nolint:revive // Allow returning unexported types as intended.
 func NewCircuitBreaker(config CircuitBreakerConfig, h HTTP) *circuitBreaker {
+	return NewCircuitBreakerWithContext(config.Context, config, h)
+}
+
+// NewCircuitBreakerWithContext creates a circuitBreaker whose background probe loop
+// terminates when ctx is canceled or Close() is invoked.
+//
+//nolint:revive // Allow returning unexported types as intended.
+func NewCircuitBreakerWithContext(ctx context.Context, config CircuitBreakerConfig, h HTTP) *circuitBreaker {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeCtx, cancel := context.WithCancel(ctx)
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+
 	cb := &circuitBreaker{
 		state:     ClosedState,
 		threshold: config.Threshold,
 		interval:  config.Interval,
+		ctxCancel: cancel,
+		stopCh:    stopCh,
+		doneCh:    doneCh,
 		HTTP:      h,
 	}
 
-	// Perform asynchronous health checks
-	go cb.startHealthChecks()
+	if httpSvc := extractHTTPService(h); httpSvc != nil {
+		cb.metrics = httpSvc.Metrics
+		cb.serviceName = httpSvc.name
+	}
+
+	if cb.interval <= 0 {
+		close(doneCh)
+		return cb
+	}
+
+	// Perform asynchronous health checks with a bounded ticker floor and clean stop channel.
+	go cb.startHealthChecks(probeCtx)
 
 	return cb
+}
+
+// Close stops the circuit breaker's background health check loop and waits for exit.
+func (cb *circuitBreaker) Close() error {
+	if cb == nil {
+		return nil
+	}
+	cb.stopOnce.Do(func() {
+		if cb.ctxCancel != nil {
+			cb.ctxCancel()
+		}
+		if cb.stopCh != nil {
+			close(cb.stopCh)
+		}
+	})
+	if cb.doneCh != nil {
+		<-cb.doneCh
+	}
+	return CloseService(cb.HTTP)
 }
 
 // executeWithCircuitBreaker executes the given function with circuit breaker protection.
 func (cb *circuitBreaker) executeWithCircuitBreaker(ctx context.Context, f func(ctx context.Context) (*http.Response,
 	error)) (*http.Response, error) {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	if cb.state == OpenState {
-		if time.Since(cb.lastChecked) > cb.interval {
-			// Check health before potentially closing the circuit
-			if cb.healthCheck(ctx) {
-				cb.resetCircuit()
-				return nil, nil
-			}
-		}
-
+	if cb.isOpen() && !cb.tryCircuitRecovery(ctx) {
 		return nil, ErrCircuitOpen
 	}
 
 	result, err := f(ctx)
+
+	cb.mu.Lock()
 	if err != nil || (result != nil && result.StatusCode > 500) {
 		cb.handleFailure()
 	} else {
 		cb.resetFailureCount()
 	}
 
-	if cb.failureCount > cb.threshold {
+	trip := cb.failureCount > cb.threshold
+	if trip {
 		cb.openCircuit()
+	}
+	cb.mu.Unlock()
+
+	if trip {
+		if result != nil && result.Body != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(result.Body, 4096))
+			_ = result.Body.Close()
+		}
 		return nil, ErrCircuitOpen
 	}
 
@@ -99,6 +156,9 @@ func (cb *circuitBreaker) isOpen() bool {
 }
 
 func (cb *circuitBreaker) healthCheck(ctx context.Context) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if httpSvc := extractHTTPService(cb.HTTP); httpSvc != nil && httpSvc.healthEndpoint != "" {
 		resp := cb.HTTP.getHealthResponseForEndpoint(ctx, httpSvc.healthEndpoint, httpSvc.healthTimeout)
 
@@ -110,20 +170,34 @@ func (cb *circuitBreaker) healthCheck(ctx context.Context) bool {
 	return resp.Status == serviceUp
 }
 
-// startHealthChecks initiates periodic health checks.
-func (cb *circuitBreaker) startHealthChecks() {
-	ticker := time.NewTicker(cb.interval)
+// startHealthChecks initiates periodic health checks in a single cancelable goroutine.
+func (cb *circuitBreaker) startHealthChecks(probeCtx context.Context) {
+	defer close(cb.doneCh)
 
-	for range ticker.C {
-		if cb.isOpen() {
-			go func() {
-				if cb.healthCheck(context.TODO()) {
-					cb.mu.Lock()
-					defer cb.mu.Unlock()
+	tickerPeriod := max(cb.interval, minCircuitBreakerTickerInterval)
+	ticker := time.NewTicker(tickerPeriod)
+	defer ticker.Stop()
 
+	for {
+		select {
+		case <-cb.stopCh:
+			return
+		case <-probeCtx.Done():
+			return
+		case <-ticker.C:
+			if probeCtx.Err() != nil {
+				return
+			}
+			if cb.isOpen() && cb.healthCheck(probeCtx) {
+				if probeCtx.Err() != nil {
+					return
+				}
+				cb.mu.Lock()
+				if cb.state == OpenState {
 					cb.resetCircuit()
 				}
-			}()
+				cb.mu.Unlock()
+			}
 		}
 	}
 }
@@ -162,39 +236,48 @@ func (cb *circuitBreaker) resetFailureCount() {
 }
 
 func (cb *CircuitBreakerConfig) AddOption(h HTTP) HTTP {
-	circuitBreaker := NewCircuitBreaker(*cb, h)
+	breaker := NewCircuitBreaker(*cb, h)
 
-	if httpSvc := extractHTTPService(h); httpSvc != nil {
-		circuitBreaker.metrics = httpSvc.Metrics
-		circuitBreaker.serviceName = httpSvc.name
-
-		if circuitBreaker.metrics != nil {
-			// Initialize the gauge to 0 (Closed) - gauge is already registered in infra.go
-			circuitBreaker.metrics.SetGauge("app_http_circuit_breaker_state", 0, "service", circuitBreaker.serviceName)
-		}
+	breaker.mu.Lock()
+	if breaker.metrics != nil {
+		// Initialize the gauge to 0 (Closed) - gauge is already registered in infra.go
+		breaker.metrics.SetGauge("app_http_circuit_breaker_state", 0, "service", breaker.serviceName)
 	}
+	breaker.mu.Unlock()
 
-	return circuitBreaker
+	return breaker
 }
 
-func (cb *circuitBreaker) tryCircuitRecovery() bool {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
+func (cb *circuitBreaker) tryCircuitRecovery(ctx context.Context) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
+	cb.mu.Lock()
 	if cb.state == ClosedState {
+		cb.mu.Unlock()
 		return true
 	}
-
-	if time.Since(cb.lastChecked) > cb.interval {
-		// Update lastChecked to prevent busy loop of health checks from other requests
-		cb.lastChecked = time.Now()
-
-		if cb.healthCheck(context.TODO()) {
-			cb.resetCircuit()
-			return true
-		}
+	if cb.probing || time.Since(cb.lastChecked) <= cb.interval {
+		cb.mu.Unlock()
+		return false
 	}
+	// Update lastChecked and set probing to prevent concurrent health-check stampedes
+	// while avoiding holding cb.mu across network I/O.
+	cb.lastChecked = time.Now()
+	cb.probing = true
+	cb.mu.Unlock()
 
+	healthy := cb.healthCheck(ctx)
+
+	cb.mu.Lock()
+	cb.probing = false
+	if healthy {
+		cb.resetCircuit()
+		cb.mu.Unlock()
+		return true
+	}
+	cb.mu.Unlock()
 	return false
 }
 
@@ -204,7 +287,7 @@ func (*circuitBreaker) handleCircuitBreakerResult(result any, err error) (*http.
 	}
 
 	response, ok := result.(*http.Response)
-	if !ok {
+	if !ok || response == nil {
 		return nil, ErrUnexpectedCircuitBreakerResultType
 	}
 
@@ -214,7 +297,7 @@ func (*circuitBreaker) handleCircuitBreakerResult(result any, err error) (*http.
 func (cb *circuitBreaker) doRequest(ctx context.Context, method, path string, queryParams map[string]any,
 	body []byte, headers map[string]string) (*http.Response, error) {
 	if cb.isOpen() {
-		if !cb.tryCircuitRecovery() {
+		if !cb.tryCircuitRecovery(ctx) {
 			return nil, ErrCircuitOpen
 		}
 	}

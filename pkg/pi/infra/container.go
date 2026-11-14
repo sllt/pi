@@ -15,11 +15,14 @@ package infra
 import (
 	"context"
 	"errors"
+	"io"
 	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // This is required to be blank import
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sllt/pi/pkg/pi/config"
 	"github.com/sllt/pi/pkg/pi/datasource/file"
@@ -81,16 +84,23 @@ type Container struct {
 	KVStore KVStore
 
 	File file.FileSystem
+
+	TracerProvider trace.TracerProvider
+
+	isolated    bool
+	loggerOwned bool
+	healthState *containerHealthState
 }
 
 func NewContainer(conf config.Config) *Container {
 	if conf == nil {
-		return &Container{}
+		return &Container{healthState: &containerHealthState{}}
 	}
 
 	c := &Container{
-		appName:    conf.GetOrDefault("APP_NAME", "pi-app"),
-		appVersion: conf.GetOrDefault("APP_VERSION", "dev"),
+		appName:     conf.GetOrDefault("APP_NAME", "pi-app"),
+		appVersion:  conf.GetOrDefault("APP_VERSION", "dev"),
+		healthState: &containerHealthState{},
 	}
 
 	c.Create(conf)
@@ -99,6 +109,9 @@ func NewContainer(conf config.Config) *Container {
 }
 
 func (c *Container) Create(conf config.Config) {
+	if c.healthState == nil {
+		c.healthState = &containerHealthState{}
+	}
 	if c.appName == "" {
 		c.appName = conf.GetOrDefault("APP_NAME", "pi-app")
 	}
@@ -115,6 +128,7 @@ func (c *Container) Create(conf config.Config) {
 
 		c.Logger = remotelogger.New(logging.GetLevelFromString(conf.Get("LOG_LEVEL")), conf.Get("REMOTE_LOG_URL"),
 			time.Duration(levelFetchConfig)*time.Second)
+		c.loggerOwned = true
 
 		if err != nil {
 			c.Logger.Error("invalid value for REMOTE_LOG_FETCH_INTERVAL. setting default of 15 sec.")
@@ -130,8 +144,6 @@ func (c *Container) Create(conf config.Config) {
 	c.Logger.Debug("Container is being created")
 
 	c.metricsManager = metrics.NewMetricsManager(exporters.Prometheus(c.GetAppName(), c.GetAppVersion()), c.Logger)
-
-	exporters.SendFrameworkStartupTelemetry(c.GetAppName(), c.GetAppVersion())
 
 	// Register framework metrics
 	c.registerFrameworkMetrics()
@@ -165,6 +177,9 @@ func (c *Container) createPubSub(conf config.Config) {
 }
 
 func (c *Container) Close() error {
+	c.CloseHealthAdmission()
+	c.WaitHealthSamplersAll()
+
 	var err error
 
 	if !isNil(c.SQL) {
@@ -179,9 +194,33 @@ func (c *Container) Close() error {
 		err = errors.Join(err, c.PubSub.Close())
 	}
 
+	if !isNil(c.File) {
+		if closer, ok := c.File.(io.Closer); ok {
+			err = errors.Join(err, closer.Close())
+		}
+	}
+
+	if !isNil(c.Clickhouse) {
+		if closer, ok := c.Clickhouse.(io.Closer); ok {
+			err = errors.Join(err, closer.Close())
+		}
+	}
+
+	for _, svc := range c.Services {
+		if !isNil(svc) {
+			err = errors.Join(err, service.CloseService(svc))
+		}
+	}
+
 	if c.WSManager != nil {
 		for _, conn := range c.WSManager.ListConnections() {
 			c.WSManager.CloseConnection(conn)
+		}
+	}
+
+	if c.loggerOwned && !isNil(c.Logger) {
+		if closer, ok := c.Logger.(io.Closer); ok {
+			err = errors.Join(err, closer.Close())
 		}
 	}
 
@@ -237,6 +276,18 @@ func (c *Container) GetHTTPService(serviceName string) service.HTTP {
 
 func (c *Container) Metrics() metrics.Manager {
 	return c.metricsManager
+}
+
+func (c *Container) GetTracerProvider() trace.TracerProvider {
+	if c != nil && c.TracerProvider != nil {
+		return c.TracerProvider
+	}
+	return otel.GetTracerProvider()
+}
+
+// IsIsolated reports whether the container was constructed via NewIsolated (pi.Build).
+func (c *Container) IsIsolated() bool {
+	return c != nil && c.isolated
 }
 
 func (c *Container) registerFrameworkMetrics() {

@@ -1,24 +1,44 @@
 package pi
 
 import (
+	"io"
+
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sllt/pi/pkg/pi/datasource/file"
 	"github.com/sllt/pi/pkg/pi/infra"
 )
+
+func (a *App) tracerProvider() trace.TracerProvider {
+	if a != nil && a.container != nil {
+		return a.container.GetTracerProvider()
+	}
+	return otel.GetTracerProvider()
+}
+
+func (a *App) registerExternalCloser(provider any) {
+	if a == nil || !a.pureBuild || provider == nil {
+		return
+	}
+	if closer, ok := provider.(io.Closer); ok {
+		a.registerMiddlewareCloser(closer.Close)
+	}
+}
 
 // AddMongo sets the Mongo datasource in the app's infra.
 func (a *App) AddMongo(db infra.MongoProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-mongo")
+	tracer := a.tracerProvider().Tracer("pi-mongo")
 
 	db.UseTracer(tracer)
 
 	db.Connect()
 
 	a.container.Mongo = db
+	a.registerExternalCloser(db)
 }
 
 // AddFTP sets the FTP datasource in the app's infra.
@@ -30,16 +50,23 @@ func (a *App) AddFTP(fs file.FileSystemProvider) {
 	fs.Connect()
 
 	a.container.File = fs
+	a.registerExternalCloser(fs)
 }
 
 // AddPubSub sets the PubSub client in the app's infra.
 func (a *App) AddPubSub(pubsub infra.PubSubProvider) {
 	pubsub.UseLogger(a.Logger())
 	pubsub.UseMetrics(a.Metrics())
+	if tr, ok := pubsub.(interface{ UseTracer(any) }); ok {
+		tr.UseTracer(a.tracerProvider().Tracer("pi-pubsub"))
+	}
 
 	pubsub.Connect()
 
 	a.container.PubSub = pubsub
+	if a.pureBuild {
+		a.registerMiddlewareCloser(pubsub.Close)
+	}
 }
 
 // AddFileStore sets the FTP, SFTP, S3, GCS, or Azure File Storage datasource in the app's infra.
@@ -50,6 +77,7 @@ func (a *App) AddFileStore(fs file.FileSystemProvider) {
 	fs.Connect()
 
 	a.container.File = fs
+	a.registerExternalCloser(fs)
 }
 
 // AddClickhouse initializes the clickhouse client.
@@ -58,13 +86,14 @@ func (a *App) AddClickhouse(db infra.ClickhouseProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-clickhouse")
+	tracer := a.tracerProvider().Tracer("pi-clickhouse")
 
 	db.UseTracer(tracer)
 
 	db.Connect()
 
 	a.container.Clickhouse = db
+	a.registerExternalCloser(db)
 }
 
 // AddOracle initializes the OracleDB client.
@@ -73,13 +102,14 @@ func (a *App) AddOracle(db infra.OracleProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-oracle")
+	tracer := a.tracerProvider().Tracer("pi-oracle")
 
 	db.UseTracer(tracer)
 
 	db.Connect()
 
 	a.container.Oracle = db
+	a.registerExternalCloser(db)
 }
 
 // UseMongo sets the Mongo datasource in the app's infra.
@@ -93,13 +123,14 @@ func (a *App) AddCassandra(db infra.CassandraProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-cassandra")
+	tracer := a.tracerProvider().Tracer("pi-cassandra")
 
 	db.UseTracer(tracer)
 
 	db.Connect()
 
 	a.container.Cassandra = db
+	a.registerExternalCloser(db)
 }
 
 // AddKVStore sets the KV-Store datasource in the app's infra.
@@ -107,13 +138,14 @@ func (a *App) AddKVStore(db infra.KVStoreProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-kvstore")
+	tracer := a.tracerProvider().Tracer("pi-kvstore")
 
 	db.UseTracer(tracer)
 
 	db.Connect()
 
 	a.container.KVStore = db
+	a.registerExternalCloser(db)
 }
 
 // AddSolr sets the Solr datasource in the app's infra.
@@ -121,13 +153,14 @@ func (a *App) AddSolr(db infra.SolrProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-solr")
+	tracer := a.tracerProvider().Tracer("pi-solr")
 
 	db.UseTracer(tracer)
 
 	db.Connect()
 
 	a.container.Solr = db
+	a.registerExternalCloser(db)
 }
 
 // AddDgraph sets the Dgraph datasource in the app's infra.
@@ -136,13 +169,14 @@ func (a *App) AddDgraph(db infra.DgraphProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-dgraph")
+	tracer := a.tracerProvider().Tracer("pi-dgraph")
 
 	db.UseTracer(tracer)
 
 	db.Connect()
 
 	a.container.DGraph = db
+	a.registerExternalCloser(db)
 }
 
 // AddOpenTSDB sets the OpenTSDB datasource in the app's infra.
@@ -151,13 +185,14 @@ func (a *App) AddOpenTSDB(db infra.OpenTSDBProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-opentsdb")
+	tracer := a.tracerProvider().Tracer("pi-opentsdb")
 
 	db.UseTracer(tracer)
 
 	db.Connect()
 
 	a.container.OpenTSDB = db
+	a.registerExternalCloser(db)
 }
 
 // AddScyllaDB sets the ScyllaDB datasource in the app's infra.
@@ -166,10 +201,11 @@ func (a *App) AddScyllaDB(db infra.ScyllaDBProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-scylladb")
+	tracer := a.tracerProvider().Tracer("pi-scylladb")
 	db.UseTracer(tracer)
 	db.Connect()
 	a.container.ScyllaDB = db
+	a.registerExternalCloser(db)
 }
 
 // AddArangoDB sets the ArangoDB datasource in the app's infra.
@@ -179,7 +215,7 @@ func (a *App) AddArangoDB(db infra.ArangoDBProvider) {
 	db.UseMetrics(a.Metrics())
 
 	// Get tracer from OpenTelemetry
-	tracer := otel.GetTracerProvider().Tracer("pi-arangodb")
+	tracer := a.tracerProvider().Tracer("pi-arangodb")
 	db.UseTracer(tracer)
 
 	// Connect to ArangoDB
@@ -187,38 +223,42 @@ func (a *App) AddArangoDB(db infra.ArangoDBProvider) {
 
 	// Add the ArangoDB provider to the container
 	a.container.ArangoDB = db
+	a.registerExternalCloser(db)
 }
 
 func (a *App) AddSurrealDB(db infra.SurrealBDProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-surrealdb")
+	tracer := a.tracerProvider().Tracer("pi-surrealdb")
 	db.UseTracer(tracer)
 	db.Connect()
 	a.container.SurrealDB = db
+	a.registerExternalCloser(db)
 }
 
 func (a *App) AddElasticsearch(db infra.ElasticsearchProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-elasticsearch")
+	tracer := a.tracerProvider().Tracer("pi-elasticsearch")
 	db.UseTracer(tracer)
 	db.Connect()
 
 	a.container.Elasticsearch = db
+	a.registerExternalCloser(db)
 }
 
 func (a *App) AddCouchbase(db infra.CouchbaseProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-couchbase")
+	tracer := a.tracerProvider().Tracer("pi-couchbase")
 	db.UseTracer(tracer)
 	db.Connect()
 
 	a.container.Couchbase = db
+	a.registerExternalCloser(db)
 }
 
 // AddDBResolver sets up database resolver with read/write splitting.
@@ -232,13 +272,14 @@ func (a *App) AddDBResolver(resolver infra.DBResolverProvider) {
 	resolver.UseLogger(a.Logger())
 	resolver.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-dbresolver")
+	tracer := a.tracerProvider().Tracer("pi-dbresolver")
 	resolver.UseTracer(tracer)
 
 	resolver.Connect()
 
 	// Replace the SQL connection with the resolver
 	a.container.SQL = resolver.GetResolver()
+	a.registerExternalCloser(a.container.SQL)
 
 	a.Logger().Logf("DB Resolver initialized successfully")
 }
@@ -247,11 +288,12 @@ func (a *App) AddInfluxDB(db infra.InfluxDBProvider) {
 	db.UseLogger(a.Logger())
 	db.UseMetrics(a.Metrics())
 
-	tracer := otel.GetTracerProvider().Tracer("pi-influxdb")
+	tracer := a.tracerProvider().Tracer("pi-influxdb")
 	db.UseTracer(tracer)
 	db.Connect()
 
 	a.container.InfluxDB = db
+	a.registerExternalCloser(db)
 }
 
 func (a *App) GetSQL() infra.DB {

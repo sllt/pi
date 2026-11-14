@@ -31,6 +31,7 @@ func New() *App {
 	app.httpServer.certFile = app.Config.GetOrDefault("CERT_FILE", "")
 	app.httpServer.keyFile = app.Config.GetOrDefault("KEY_FILE", "")
 	app.httpServer.staticFiles = make(map[string]string)
+	app.bindWSManagerHooks()
 
 	// Note: Default routes (health, alive, favicon, swagger) are registered in httpServerSetup()
 	// only when HTTP server actually starts. This prevents gRPC-only apps from starting HTTP server.

@@ -61,6 +61,11 @@ type Client struct {
 
 	connMu     sync.Mutex
 	isRetrying atomic.Bool
+
+	retryMu   sync.Mutex
+	stopCh    chan struct{}
+	retryDone chan struct{}
+	closed    bool
 }
 
 // New creates a new SQS client with the provided configuration.
@@ -139,14 +144,62 @@ func (c *Client) Connect() {
 		c.conn = nil
 
 		// Only start retry goroutine if not already retrying
-		if c.isRetrying.CompareAndSwap(false, true) {
-			go c.retryConnect()
-		}
+		c.startRetryConnect()
 
 		return
 	}
 
 	c.logger.Logf("connected to AWS SQS in region: %s", c.cfg.Region)
+}
+
+func (c *Client) ensureStopCh() <-chan struct{} {
+	c.retryMu.Lock()
+	defer c.retryMu.Unlock()
+
+	if c.stopCh == nil {
+		c.stopCh = make(chan struct{})
+	}
+
+	return c.stopCh
+}
+
+func (c *Client) isClosed() bool {
+	c.retryMu.Lock()
+	defer c.retryMu.Unlock()
+
+	return c.closed
+}
+
+func (c *Client) startRetryConnect() {
+	c.retryMu.Lock()
+	if c.closed || c.retryDone != nil {
+		c.retryMu.Unlock()
+		return
+	}
+
+	if c.stopCh == nil {
+		c.stopCh = make(chan struct{})
+	}
+
+	stopCh := c.stopCh
+	done := make(chan struct{})
+	c.retryDone = done
+	c.isRetrying.Store(true)
+	c.retryMu.Unlock()
+
+	go func() {
+		defer func() {
+			c.isRetrying.Store(false)
+			close(done)
+			c.retryMu.Lock()
+			if c.retryDone == done {
+				c.retryDone = nil
+			}
+			c.retryMu.Unlock()
+		}()
+
+		c.retryConnectWithStop(stopCh)
+	}()
 }
 
 // loadAWSConfig loads the AWS configuration with credentials.
@@ -171,16 +224,34 @@ func (c *Client) loadAWSConfig(ctx context.Context) (aws.Config, error) {
 // retryConnect attempts to reconnect to SQS on failure.
 func (c *Client) retryConnect() {
 	defer c.isRetrying.Store(false)
+	c.retryConnectWithStop(c.ensureStopCh())
+}
 
+func (c *Client) retryConnectWithStop(stopCh <-chan struct{}) {
 	for {
-		time.Sleep(defaultRetryDuration)
+		timer := time.NewTimer(defaultRetryDuration)
+		select {
+		case <-stopCh:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 
-		c.logger.Debugf("retrying connection to SQS...")
+		if c.isClosed() {
+			return
+		}
+
+		if c.logger != nil {
+			c.logger.Debugf("retrying connection to SQS...")
+		}
 
 		c.connectInternal()
 
 		if c.isConnected() {
-			c.logger.Logf("successfully reconnected to SQS")
+			if c.logger != nil {
+				c.logger.Logf("successfully reconnected to SQS")
+			}
+
 			return
 		}
 	}
@@ -188,8 +259,16 @@ func (c *Client) retryConnect() {
 
 // connectInternal establishes connection without spawning retry goroutine.
 func (c *Client) connectInternal() {
+	if c.isClosed() {
+		return
+	}
+
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
+
+	if c.isClosed() {
+		return
+	}
 
 	ctx := context.Background()
 
@@ -278,7 +357,15 @@ func (c *Client) Publish(ctx context.Context, topic string, message []byte) erro
 // The topic parameter is the queue name (not the full URL).
 func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, error) {
 	if !c.isConnected() {
-		time.Sleep(defaultRetryDuration)
+		timer := time.NewTimer(defaultRetryDuration)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-c.ensureStopCh():
+			timer.Stop()
+		case <-timer.C:
+		}
+
 		return nil, errClientNotConnected
 	}
 
@@ -467,13 +554,30 @@ func (c *Client) Query(ctx context.Context, query string, args ...any) ([]byte, 
 	return []byte("[" + strings.Join(messages, ",") + "]"), nil
 }
 
-// Close closes the SQS client connection.
-// SQS client doesn't require explicit closing, but we implement this for interface compliance.
+// Close closes the SQS client connection and stops any background reconnect loop.
 func (c *Client) Close() error {
+	c.retryMu.Lock()
+	if !c.closed {
+		c.closed = true
+		if c.stopCh == nil {
+			c.stopCh = make(chan struct{})
+		}
+		close(c.stopCh)
+	}
+	done := c.retryDone
+	c.retryMu.Unlock()
+
+	if done != nil {
+		<-done
+	}
+
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
-	c.logger.Debug("closing SQS client")
+	if c.logger != nil {
+		c.logger.Debug("closing SQS client")
+	}
+
 	c.conn = nil
 
 	return nil
@@ -509,9 +613,13 @@ func (c *Client) getQueueURL(ctx context.Context, queueName string) (string, err
 	return *result.QueueUrl, nil
 }
 
-// startTrace starts a new trace span using the global OpenTelemetry tracer provider.
+// startTrace starts a new trace span using the configured tracer or global OpenTelemetry tracer provider.
 // This ensures proper trace propagation from the incoming context.
-func (*Client) startTrace(ctx context.Context, name string) (context.Context, trace.Span) {
+func (c *Client) startTrace(ctx context.Context, name string) (context.Context, trace.Span) {
+	if c != nil && c.tracer != nil {
+		return c.tracer.Start(ctx, name)
+	}
+
 	return otel.GetTracerProvider().Tracer("pi").Start(ctx, name)
 }
 

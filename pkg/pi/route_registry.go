@@ -2,14 +2,17 @@ package pi
 
 import (
 	"net/http"
-	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
 
+	piHTTP "github.com/sllt/pi/pkg/pi/http"
+	"github.com/sllt/pi/pkg/pi/http/contract"
 	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/openapi"
 )
 
 // PiMiddleware operates at the application layer with full *Context access.
@@ -25,14 +28,31 @@ type RouteDef struct {
 	RequestTimeout time.Duration
 }
 
+type docConfig struct {
+	hasTags     bool
+	tags        []string
+	hasSecurity bool
+	security    []string
+}
+
+type routeMeta struct {
+	isSystem bool
+	httpMWs  []func(http.Handler) http.Handler
+	piMWs    []PiMiddleware
+	typed    *typedRouteEntry
+}
+
 // GroupNode is a node in the route group tree.
 // It holds middleware and routes for a given prefix, plus child groups.
 type GroupNode struct {
-	prefix   string
-	httpMWs  []func(http.Handler) http.Handler
-	piMWs    []PiMiddleware
-	routes   []RouteDef
-	children []*GroupNode
+	prefix     string
+	parent     *GroupNode
+	httpMWs    []func(http.Handler) http.Handler
+	piMWs      []PiMiddleware
+	routes     []RouteDef
+	routeMetas map[int]*routeMeta
+	doc        docConfig
+	children   []*GroupNode
 }
 
 // RouteGroup is the public API for declaring routes and middleware within a group.
@@ -43,14 +63,54 @@ type RouteGroup struct {
 
 // RouteRegistry holds the root GroupNode and compiles the tree into chi routes.
 type RouteRegistry struct {
-	root     *GroupNode
-	compiled bool
+	mu           sync.Mutex
+	root         *GroupNode
+	compiled     bool
+	revision     uint64
+	declErrors   []error
+	cachedDoc    *openapi.Document
+	cachedRev    uint64
+	hasCachedDoc bool
 }
 
 func newRouteRegistry() *RouteRegistry {
 	return &RouteRegistry{
 		root: &GroupNode{},
 	}
+}
+
+func (g *RouteGroup) routeGroupTarget() *RouteGroup {
+	return g
+}
+
+func (g *RouteGroup) registry() *RouteRegistry {
+	if g == nil || g.app == nil || g.app.httpServer == nil {
+		return nil
+	}
+	return g.app.httpServer.registry
+}
+
+func (reg *RouteRegistry) markDirtyLocked() {
+	reg.revision++
+	reg.hasCachedDoc = false
+	reg.cachedDoc = nil
+}
+
+func (n *GroupNode) routeMetaAt(idx int) *routeMeta {
+	if n == nil || n.routeMetas == nil {
+		return nil
+	}
+	return n.routeMetas[idx]
+}
+
+func (n *GroupNode) setRouteMeta(idx int, meta *routeMeta) {
+	if n == nil || meta == nil {
+		return
+	}
+	if n.routeMetas == nil {
+		n.routeMetas = make(map[int]*routeMeta)
+	}
+	n.routeMetas[idx] = meta
 }
 
 // ---------- RouteGroup: route registration helpers ----------
@@ -86,7 +146,22 @@ func (g *RouteGroup) PATCH(pattern string, h Handler) *RouteGroup {
 }
 
 func (g *RouteGroup) addRoute(method, pattern string, h Handler, timeout time.Duration) {
-	if !g.canMutate("register routes") {
+	if g == nil || g.node == nil {
+		return
+	}
+	if reg := g.registry(); reg != nil {
+		reg.mu.Lock()
+		defer reg.mu.Unlock()
+		if !g.app.canMutateRoutesLocked("register routes") {
+			return
+		}
+		g.node.routes = append(g.node.routes, RouteDef{
+			Method:         method,
+			Pattern:        pattern,
+			Handler:        h,
+			RequestTimeout: timeout,
+		})
+		reg.markDirtyLocked()
 		return
 	}
 
@@ -101,7 +176,17 @@ func (g *RouteGroup) addRoute(method, pattern string, h Handler, timeout time.Du
 // Use appends standard net/http middleware to this group.
 // These run at the HTTP layer before the pi Handler is invoked.
 func (g *RouteGroup) Use(mws ...func(http.Handler) http.Handler) *RouteGroup {
-	if !g.canMutate("register HTTP middlewares") {
+	if g == nil || g.node == nil {
+		return g
+	}
+	if reg := g.registry(); reg != nil {
+		reg.mu.Lock()
+		defer reg.mu.Unlock()
+		if !g.app.canMutateRoutesLocked("register HTTP middlewares") {
+			return g
+		}
+		g.node.httpMWs = append(g.node.httpMWs, mws...)
+		reg.markDirtyLocked()
 		return g
 	}
 
@@ -112,7 +197,17 @@ func (g *RouteGroup) Use(mws ...func(http.Handler) http.Handler) *RouteGroup {
 // UseMiddleware appends PiMiddleware to this group.
 // These run at the application layer with full *Context access.
 func (g *RouteGroup) UseMiddleware(mws ...PiMiddleware) *RouteGroup {
-	if !g.canMutate("register Pi middlewares") {
+	if g == nil || g.node == nil {
+		return g
+	}
+	if reg := g.registry(); reg != nil {
+		reg.mu.Lock()
+		defer reg.mu.Unlock()
+		if !g.app.canMutateRoutesLocked("register Pi middlewares") {
+			return g
+		}
+		g.node.piMWs = append(g.node.piMWs, mws...)
+		reg.markDirtyLocked()
 		return g
 	}
 
@@ -127,14 +222,10 @@ func (g *RouteGroup) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGr
 		return g
 	}
 
-	if !g.canMutate("create route groups") {
-		return g
-	}
-
 	validCallbacks := make([]func(sub *RouteGroup), 0, len(fns))
 	for _, fn := range fns {
 		if fn == nil {
-			if g.app != nil && g.app.container != nil {
+			if g.app != nil && g.app.container != nil && g.app.container.Logger != nil {
 				g.app.container.Logger.Error("route group callback cannot be nil")
 			}
 			continue
@@ -149,16 +240,31 @@ func (g *RouteGroup) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGr
 	}
 
 	normalizedPrefix := normalizeGroupPrefix(prefix)
-	if normalizedPrefix == "" {
-		for _, fn := range validCallbacks {
-			fn(g)
-		}
 
-		return g
+	var sub *RouteGroup
+	if reg := g.registry(); reg != nil {
+		reg.mu.Lock()
+		if !g.app.canMutateRoutesLocked("create route groups") {
+			reg.mu.Unlock()
+			return g
+		}
+		if normalizedPrefix == "" {
+			sub = g
+		} else {
+			child := g.node.getOrCreateChild(normalizedPrefix)
+			reg.markDirtyLocked()
+			sub = &RouteGroup{node: child, app: g.app}
+		}
+		reg.mu.Unlock()
+	} else {
+		if normalizedPrefix == "" {
+			sub = g
+		} else {
+			child := g.node.getOrCreateChild(normalizedPrefix)
+			sub = &RouteGroup{node: child, app: g.app}
+		}
 	}
 
-	child := g.node.getOrCreateChild(normalizedPrefix)
-	sub := &RouteGroup{node: child, app: g.app}
 	for _, fn := range validCallbacks {
 		fn(sub)
 	}
@@ -170,30 +276,39 @@ func (g *RouteGroup) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGr
 
 // compile walks the GroupNode tree and registers all routes and middleware on the chi router.
 func (reg *RouteRegistry) compile(router chi.Router, container *infra.Container, defaultTimeout time.Duration) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reg.compileLocked(router, container, defaultTimeout)
+}
+
+func (reg *RouteRegistry) compileLocked(router chi.Router, container *infra.Container, defaultTimeout time.Duration) {
 	if reg.compiled {
 		return
 	}
 	reg.compiled = true
-	reg.compileNode(reg.root, router, container, defaultTimeout, nil)
+	reg.compileNode(reg.root, router, container, defaultTimeout, "", nil)
 }
 
-func (reg *RouteRegistry) compileNode(
-	node *GroupNode,
-	router chi.Router,
-	container *infra.Container,
-	defaultTimeout time.Duration,
-	inheritedPiMWs []PiMiddleware,
+func collectFoldedNode(node *GroupNode) (
+	httpMWs []func(http.Handler) http.Handler,
+	piMWs []PiMiddleware,
+	routes []RouteDef,
+	metas []*routeMeta,
+	children []*GroupNode,
 ) {
 	if node == nil {
-		return
+		return nil, nil, nil, nil, nil
 	}
 
-	// RouteGroup APIs avoid creating empty-prefix children, but we still handle any
-	// legacy/malformed trees defensively by folding empty-prefix children into parent.
-	nodeHTTPMWs := append([]func(http.Handler) http.Handler{}, node.httpMWs...)
-	nodePiMWs := append([]PiMiddleware{}, node.piMWs...)
-	nodeRoutes := append([]RouteDef{}, node.routes...)
-	children := make([]*GroupNode, 0, len(node.children))
+	httpMWs = append(httpMWs, node.httpMWs...)
+	piMWs = append(piMWs, node.piMWs...)
+	routes = append(routes, node.routes...)
+	metas = make([]*routeMeta, 0, len(node.routes))
+	for i := range node.routes {
+		metas = append(metas, node.routeMetaAt(i))
+	}
+
+	children = make([]*GroupNode, 0, len(node.children))
 	for _, child := range node.children {
 		if child == nil {
 			continue
@@ -201,10 +316,12 @@ func (reg *RouteRegistry) compileNode(
 
 		childPrefix := normalizeGroupPrefix(child.prefix)
 		if childPrefix == "" {
-			nodeHTTPMWs = append(nodeHTTPMWs, child.httpMWs...)
-			nodePiMWs = append(nodePiMWs, child.piMWs...)
-			nodeRoutes = append(nodeRoutes, child.routes...)
-			children = append(children, child.children...)
+			cHTTP, cPi, cRoutes, cMetas, cChildren := collectFoldedNode(child)
+			httpMWs = append(httpMWs, cHTTP...)
+			piMWs = append(piMWs, cPi...)
+			routes = append(routes, cRoutes...)
+			metas = append(metas, cMetas...)
+			children = append(children, cChildren...)
 			continue
 		}
 
@@ -213,58 +330,159 @@ func (reg *RouteRegistry) compileNode(
 	}
 
 	children = mergeChildrenByPrefix(children)
+	return httpMWs, piMWs, routes, metas, children
+}
+
+func joinGroupPrefixes(parentPrefix, childPrefix string) string {
+	if parentPrefix == "" {
+		return childPrefix
+	}
+	if childPrefix == "" {
+		return parentPrefix
+	}
+	return parentPrefix + childPrefix
+}
+
+func joinGroupRoutePattern(fullPrefix, pattern string) string {
+	trimmed := strings.TrimSpace(pattern)
+	if trimmed == "" || trimmed == "/" {
+		if fullPrefix == "" {
+			return "/"
+		}
+		return fullPrefix
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = "/" + trimmed
+	}
+	return fullPrefix + trimmed
+}
+
+func (reg *RouteRegistry) compileNode(
+	node *GroupNode,
+	router chi.Router,
+	container *infra.Container,
+	defaultTimeout time.Duration,
+	fullPrefix string,
+	inheritedPiMWs []PiMiddleware,
+) {
+	if node == nil {
+		return
+	}
+
+	// Recursively fold any empty-prefix children into this node before compiling.
+	nodeHTTPMWs, nodePiMWs, nodeRoutes, nodeMetas, children := collectFoldedNode(node)
 
 	nodePrefix := normalizeGroupPrefix(node.prefix)
+	curPrefix := joinGroupPrefixes(fullPrefix, nodePrefix)
+
+	hasRoutes := len(nodeRoutes) > 0
+	if !hasRoutes {
+		for _, child := range children {
+			if groupNodeHasRoutes(child) {
+				hasRoutes = true
+				break
+			}
+		}
+	}
+	if curPrefix != "" && !hasRoutes {
+		return
+	}
 
 	// Accumulate pi middleware: inherited from parent + this node's own.
 	allPiMWs := make([]PiMiddleware, 0, len(inheritedPiMWs)+len(nodePiMWs))
 	allPiMWs = append(allPiMWs, inheritedPiMWs...)
 	allPiMWs = append(allPiMWs, nodePiMWs...)
 
-	if nodePrefix != "" {
-		// Scoped group: use chi's Route to create a sub-router.
-		router.Route(nodePrefix, func(r chi.Router) {
-			// Apply HTTP middleware to the sub-router.
-			for _, mw := range nodeHTTPMWs {
-				r.Use(mw)
-			}
+	validHTTPMWs := make([]func(http.Handler) http.Handler, 0, len(nodeHTTPMWs))
+	for _, mw := range nodeHTTPMWs {
+		if mw != nil {
+			validHTTPMWs = append(validHTTPMWs, mw)
+		}
+	}
 
-			// Register routes in this group.
-			reg.registerRoutes(r, nodeRoutes, container, defaultTimeout, allPiMWs)
-
-			// Recurse into children.
-			for _, child := range children {
-				reg.compileNode(child, r, container, defaultTimeout, allPiMWs)
-			}
-		})
-	} else {
-		// Root node or node without prefix: register directly on the router.
-		for _, mw := range nodeHTTPMWs {
+	if curPrefix == "" {
+		// Root node or node without prefix: apply HTTP middlewares via Use before any With/Method calls.
+		for _, mw := range validHTTPMWs {
 			router.Use(mw)
 		}
 
-		reg.registerRoutes(router, nodeRoutes, container, defaultTimeout, allPiMWs)
-
 		for _, child := range children {
-			reg.compileNode(child, router, container, defaultTimeout, allPiMWs)
+			if !groupNodeHasRoutes(child) {
+				continue
+			}
+			reg.compileNode(child, router, container, defaultTimeout, "", allPiMWs)
+		}
+
+		reg.registerRoutes(router, "", nodeRoutes, nodeMetas, container, defaultTimeout, allPiMWs)
+		return
+	}
+
+	// Scoped group: use chi's inline With() mux instead of Route() (chi.Mount)
+	// so nested and flat groups share the root radix tree without catch-all shadowing.
+	scoped := router
+	if len(validHTTPMWs) > 0 {
+		scoped = router.With(validHTTPMWs...)
+	}
+
+	for _, child := range children {
+		if !groupNodeHasRoutes(child) {
+			continue
+		}
+		reg.compileNode(child, scoped, container, defaultTimeout, curPrefix, allPiMWs)
+	}
+
+	reg.registerRoutes(scoped, curPrefix, nodeRoutes, nodeMetas, container, defaultTimeout, allPiMWs)
+}
+
+func groupNodeHasRoutes(node *GroupNode) bool {
+	if node == nil {
+		return false
+	}
+	if len(node.routes) > 0 {
+		return true
+	}
+	for _, child := range node.children {
+		if groupNodeHasRoutes(child) {
+			return true
 		}
 	}
+	return false
 }
 
 func (reg *RouteRegistry) registerRoutes(
 	router chi.Router,
+	fullPrefix string,
 	routes []RouteDef,
+	metas []*routeMeta,
 	container *infra.Container,
 	defaultTimeout time.Duration,
 	piMWs []PiMiddleware,
 ) {
-	for _, rd := range routes {
+	for i, rd := range routes {
+		var meta *routeMeta
+		if i < len(metas) {
+			meta = metas[i]
+		}
+
 		timeout := rd.RequestTimeout
 		if timeout == 0 {
 			timeout = defaultTimeout
 		}
 
-		composedFn := composePiMiddleware(piMWs, rd.Handler)
+		var routePiMWs []PiMiddleware
+		if len(piMWs) > 0 || (meta != nil && len(meta.piMWs) > 0) {
+			extra := 0
+			if meta != nil {
+				extra = len(meta.piMWs)
+			}
+			routePiMWs = make([]PiMiddleware, 0, len(piMWs)+extra)
+			routePiMWs = append(routePiMWs, piMWs...)
+			if meta != nil {
+				routePiMWs = append(routePiMWs, meta.piMWs...)
+			}
+		}
+
+		composedFn := composePiMiddleware(routePiMWs, rd.Handler)
 
 		h := handler{
 			function:       composedFn,
@@ -272,8 +490,22 @@ func (reg *RouteRegistry) registerRoutes(
 			requestTimeout: timeout,
 		}
 
-		otelH := otelhttp.NewHandler(h, "pi-router")
-		router.Method(rd.Method, rd.Pattern, otelH)
+		var providerFn func() trace.TracerProvider
+		isolateMetrics := false
+		if container != nil {
+			providerFn = container.GetTracerProvider
+			isolateMetrics = container.IsIsolated() || container.TracerProvider != nil
+		}
+		var routeHTTP http.Handler = piHTTP.NewRouteHTTPHandler(h, "pi-router", providerFn, isolateMetrics)
+		if meta != nil && len(meta.httpMWs) > 0 {
+			for j := len(meta.httpMWs) - 1; j >= 0; j-- {
+				if meta.httpMWs[j] != nil {
+					routeHTTP = meta.httpMWs[j](routeHTTP)
+				}
+			}
+		}
+		fullPattern := joinGroupRoutePattern(fullPrefix, rd.Pattern)
+		router.Method(rd.Method, fullPattern, routeHTTP)
 	}
 }
 
@@ -286,6 +518,9 @@ func composePiMiddleware(mws []PiMiddleware, final Handler) Handler {
 
 	h := final
 	for i := len(mws) - 1; i >= 0; i-- {
+		if mws[i] == nil {
+			continue
+		}
 		h = mws[i](h)
 	}
 
@@ -303,11 +538,12 @@ func (g *RouteGroup) canMutate(action string) bool {
 func (g *GroupNode) getOrCreateChild(prefix string) *GroupNode {
 	for _, child := range g.children {
 		if child != nil && child.prefix == prefix {
+			child.parent = g
 			return child
 		}
 	}
 
-	child := &GroupNode{prefix: prefix}
+	child := &GroupNode{prefix: prefix, parent: g}
 	g.children = append(g.children, child)
 
 	return child
@@ -318,10 +554,19 @@ func (g *GroupNode) mergeFrom(other *GroupNode) {
 		return
 	}
 
+	baseIdx := len(g.routes)
 	g.httpMWs = append(g.httpMWs, other.httpMWs...)
 	g.piMWs = append(g.piMWs, other.piMWs...)
 	g.routes = append(g.routes, other.routes...)
-	g.children = append(g.children, other.children...)
+	for idx, meta := range other.routeMetas {
+		g.setRouteMeta(baseIdx+idx, meta)
+	}
+	for _, child := range other.children {
+		if child != nil {
+			child.parent = g
+		}
+		g.children = append(g.children, child)
+	}
 }
 
 func mergeChildrenByPrefix(children []*GroupNode) []*GroupNode {
@@ -346,15 +591,5 @@ func mergeChildrenByPrefix(children []*GroupNode) []*GroupNode {
 }
 
 func normalizeGroupPrefix(prefix string) string {
-	trimmed := strings.TrimSpace(prefix)
-	if trimmed == "" {
-		return ""
-	}
-
-	normalized := path.Clean("/" + strings.TrimLeft(trimmed, "/"))
-	if normalized == "." || normalized == "/" {
-		return ""
-	}
-
-	return normalized
+	return contract.NormalizeGroupPrefix(prefix)
 }

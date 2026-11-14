@@ -15,11 +15,24 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+var defaultHTTPPropagator = propagation.NewCompositeTextMapPropagator(
+	propagation.TraceContext{},
+	propagation.Baggage{},
+)
+
+func resolveHTTPTextMapPropagator() propagation.TextMapPropagator {
+	if p := otel.GetTextMapPropagator(); p != nil && len(p.Fields()) > 0 {
+		return p
+	}
+	return defaultHTTPPropagator
+}
+
 type httpService struct {
 	*http.Client
 	trace.Tracer
-	url  string
-	name string
+	tracerProvider trace.TracerProvider
+	url            string
+	name           string
 	Logger
 	Metrics
 
@@ -72,13 +85,58 @@ type httpClient interface {
 // NewHTTPService function creates a new instance of the httpService struct, which implements the HTTP interface.
 // It initializes the http.Client, url, Tracer, and Logger fields of the httpService struct with the provided values.
 func NewHTTPService(serviceAddress string, logger Logger, metrics Metrics, options ...Options) HTTP {
+	return NewHTTPServiceWithTracer(serviceAddress, logger, metrics, otel.Tracer("pi-http-client"), options...)
+}
+
+// NewHTTPServiceWithTracer creates an HTTP service bound to an explicit trace.Tracer.
+func NewHTTPServiceWithTracer(
+	serviceAddress string,
+	logger Logger,
+	metrics Metrics,
+	tracer trace.Tracer,
+	options ...Options,
+) HTTP {
+	return newHTTPService(serviceAddress, logger, metrics, tracer, nil, options...)
+}
+
+// NewHTTPServiceWithTracerProvider creates an HTTP service bound to an explicit trace.TracerProvider.
+func NewHTTPServiceWithTracerProvider(
+	serviceAddress string,
+	logger Logger,
+	metrics Metrics,
+	tracerProvider trace.TracerProvider,
+	options ...Options,
+) HTTP {
+	var tracer trace.Tracer
+	if tracerProvider != nil {
+		tracer = tracerProvider.Tracer("pi-http-client")
+	}
+	return newHTTPService(serviceAddress, logger, metrics, tracer, tracerProvider, options...)
+}
+
+func newHTTPService(
+	serviceAddress string,
+	logger Logger,
+	metrics Metrics,
+	tracer trace.Tracer,
+	tracerProvider trace.TracerProvider,
+	options ...Options,
+) HTTP {
+	if tracer == nil {
+		if tracerProvider != nil {
+			tracer = tracerProvider.Tracer("pi-http-client")
+		} else {
+			tracer = otel.Tracer("pi-http-client")
+		}
+	}
 	h := &httpService{
 		// using default HTTP client to do HTTP communication
-		Client:  &http.Client{},
-		url:     serviceAddress,
-		Tracer:  otel.Tracer("pi-http-client"),
-		Logger:  logger,
-		Metrics: metrics,
+		Client:         &http.Client{},
+		url:            serviceAddress,
+		Tracer:         tracer,
+		tracerProvider: tracerProvider,
+		Logger:         logger,
+		Metrics:        metrics,
 	}
 
 	var svc HTTP
@@ -148,7 +206,11 @@ func (h *httpService) createAndSendRequest(ctx context.Context, method string, p
 	defer span.End()
 
 	// Attach client-side trace handling for HTTP request.
-	clientTraceCtx := httptrace.WithClientTrace(ctx, otelhttptrace.NewClientTrace(ctx))
+	var traceOpts []otelhttptrace.ClientTraceOption
+	if h.tracerProvider != nil {
+		traceOpts = append(traceOpts, otelhttptrace.WithTracerProvider(h.tracerProvider))
+	}
+	clientTraceCtx := httptrace.WithClientTrace(ctx, otelhttptrace.NewClientTrace(ctx, traceOpts...))
 
 	// Create the HTTP request with the tracing context.
 	req, err := http.NewRequestWithContext(clientTraceCtx, method, uri, bytes.NewBuffer(body))
@@ -171,7 +233,7 @@ func (h *httpService) createAndSendRequest(ctx context.Context, method string, p
 	}
 
 	// Inject tracing information into the request headers.
-	otel.GetTextMapPropagator().Inject(clientTraceCtx, propagation.HeaderCarrier(req.Header))
+	resolveHTTPTextMapPropagator().Inject(clientTraceCtx, propagation.HeaderCarrier(req.Header))
 
 	// encode the query parameters on the request.
 	encodeQueryParameters(req, queryParams)

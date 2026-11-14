@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -17,8 +18,11 @@ type Spinner struct {
 
 	// started denotes whether the spinner has started spinning and ticker
 	// is the time.Ticker for the continuous time update for the spinner.
+	mu      sync.Mutex
 	started bool
 	ticker  *time.Ticker
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 }
 
 func NewDotSpinner(o Output) *Spinner {
@@ -46,26 +50,48 @@ func NewGlobeSpinner(o Output) *Spinner {
 }
 
 func (s *Spinner) Spin(ctx context.Context) *Spinner {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return s
+	}
 	t := time.NewTicker(s.fps)
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
 	s.ticker = t
 	s.started = true
-	i := 0
+	s.stopCh = stopCh
+	s.doneCh = doneCh
+	s.mu.Unlock()
 
 	s.outStream.HideCursor()
 
 	go func() {
-		for range t.C {
+		defer close(doneCh)
+		i := 0
+		for {
 			select {
 			case <-ctx.Done():
 				t.Stop()
-			default:
-				if !s.started {
-					break
+				return
+			case <-stopCh:
+				t.Stop()
+				return
+			case <-t.C:
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return
+				case <-stopCh:
+					t.Stop()
+					return
+				default:
 				}
-
 				s.outStream.Print("\r")
 				s.outStream.Printf("%s", s.frames[i%len(s.frames)])
-
 				i++
 			}
 		}
@@ -75,8 +101,25 @@ func (s *Spinner) Spin(ctx context.Context) *Spinner {
 }
 
 func (s *Spinner) Stop() {
+	s.mu.Lock()
+	if !s.started {
+		s.mu.Unlock()
+		return
+	}
 	s.started = false
-	s.ticker.Stop()
+	stopCh := s.stopCh
+	doneCh := s.doneCh
+	if s.ticker != nil {
+		s.ticker.Stop()
+	}
+	s.mu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
+	}
+	if doneCh != nil {
+		<-doneCh
+	}
 
 	s.outStream.ClearLine()
 	s.outStream.ShowCursor()

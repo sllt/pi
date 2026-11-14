@@ -3,6 +3,7 @@ package remotelogger
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,6 +33,7 @@ func TestRemoteLogger_UpdateLevel(t *testing.T) {
 		body := `{ "data": { "serviceName": "test-service","logLevel":"DEBUG" } }`
 		_, _ = w.Write([]byte(body))
 	}))
+	t.Cleanup(mockServer.Close)
 
 	rl := remoteLogger{
 		remoteURL:          mockServer.URL,
@@ -39,12 +41,16 @@ func TestRemoteLogger_UpdateLevel(t *testing.T) {
 		currentLevel:       2,
 		Logger:             logging.NewMockLogger(logging.INFO),
 	}
+	t.Cleanup(func() { _ = rl.Close() })
 
 	go rl.UpdateLogLevel()
 
 	time.Sleep(200 * time.Millisecond)
 
-	assert.Equal(t, logging.DEBUG, rl.currentLevel)
+	rl.mu.RLock()
+	gotLevel := rl.currentLevel
+	rl.mu.RUnlock()
+	assert.Equal(t, logging.DEBUG, gotLevel)
 }
 
 func TestRemoteLogger_UpdateLevelError(t *testing.T) {
@@ -54,12 +60,16 @@ func TestRemoteLogger_UpdateLevelError(t *testing.T) {
 		currentLevel:       2,
 		Logger:             logging.NewMockLogger(logging.INFO),
 	}
+	t.Cleanup(func() { _ = rl.Close() })
 
 	go rl.UpdateLogLevel()
 
 	time.Sleep(100 * time.Millisecond)
 
-	assert.Equal(t, logging.INFO, rl.currentLevel)
+	rl.mu.RLock()
+	gotLevel := rl.currentLevel
+	rl.mu.RUnlock()
+	assert.Equal(t, logging.INFO, gotLevel)
 }
 
 func Test_fetchAndUpdateLogLevel_InvalidResponse(t *testing.T) {
@@ -125,6 +135,9 @@ func TestDynamicLoggerSuccess(t *testing.T) {
 	log := testutil.StdoutOutputForFunc(func() {
 		// Create a new remote logger with the mock server URL
 		rl := New(logging.INFO, mockServer.URL, 100*time.Millisecond)
+		if closer, ok := rl.(io.Closer); ok {
+			defer closer.Close()
+		}
 
 		// Wait for the remote logger to update the log level
 		time.Sleep(200 * time.Millisecond)
@@ -314,6 +327,7 @@ func TestRemoteLogger_ConcurrentLevelAccess(t *testing.T) {
 		currentLevel:       logging.INFO,
 		Logger:             logging.NewMockLogger(logging.INFO),
 	}
+	t.Cleanup(func() { _ = rl.Close() })
 
 	// Run UpdateLogLevel in multiple goroutines
 	for i := 0; i < 5; i++ {
@@ -341,6 +355,9 @@ func TestLogLevelChangeToFatal_NoExit(t *testing.T) {
 	// This test succeeds if it completes without the process exiting
 	log := testutil.StdoutOutputForFunc(func() {
 		rl := New(logging.INFO, mockServer.URL, 10*time.Millisecond)
+		if closer, ok := rl.(io.Closer); ok {
+			defer closer.Close()
+		}
 
 		time.Sleep(20 * time.Millisecond)
 
@@ -421,4 +438,50 @@ func TestHTTPDebugMsg_PrettyPrint(t *testing.T) {
 			assert.Contains(t, out, "\u001B[0m")
 		})
 	}
+}
+
+func TestRemoteLogger_CloseCancelsInFlightFetchAndIdempotent(t *testing.T) {
+	inFlight := make(chan struct{}, 1)
+	var afterClose atomic.Int32
+	var closedFlag atomic.Bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if closedFlag.Load() {
+			afterClose.Add(1)
+		}
+		select {
+		case inFlight <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	rl := New(logging.INFO, srv.URL, 10*time.Millisecond)
+	closer, ok := rl.(io.Closer)
+	require.True(t, ok)
+
+	select {
+	case <-inFlight:
+	case <-time.After(time.Second):
+		t.Fatal("remoteLogger never issued initial fetch")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- closer.Close()
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("remoteLogger.Close did not abort in-flight request promptly")
+	}
+
+	closedFlag.Store(true)
+	require.NoError(t, closer.Close())
+	time.Sleep(30 * time.Millisecond)
+	assert.Zero(t, afterClose.Load(), "no requests should fire after Close")
 }

@@ -7,6 +7,7 @@ import (
 	"net"
 	"reflect"
 	"strings"
+	"sync"
 
 	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
 	"google.golang.org/grpc"
@@ -29,6 +30,7 @@ type pendingService struct {
 
 type grpcServer struct {
 	listenerState
+	mu                 sync.Mutex
 	server             *grpc.Server
 	interceptors       []grpc.UnaryServerInterceptor
 	streamInterceptors []grpc.StreamServerInterceptor
@@ -37,6 +39,7 @@ type grpcServer struct {
 	config             config.Config
 	serverCreated      bool
 	pendingServices    []pendingService
+	serviceNames       []string
 	health             *health.Server
 }
 
@@ -127,7 +130,7 @@ func newGRPCServer(c *infra.Container, port int, cfg config.Config) (*grpcServer
 			c.Errorf("gRPC handler panic: %v", p)
 			return status.Error(codes.Internal, "internal server error")
 		})),
-		pi_grpc.ObservabilityInterceptor(c.Logger, c.Metrics()))
+		pi_grpc.ObservabilityInterceptorWithProvider(c.Logger, c.Metrics(), c.GetTracerProvider))
 
 	streamMiddleware := make([]grpc.StreamServerInterceptor, 0)
 	streamMiddleware = append(streamMiddleware,
@@ -135,7 +138,7 @@ func newGRPCServer(c *infra.Container, port int, cfg config.Config) (*grpcServer
 			c.Errorf("gRPC stream panic: %v", p)
 			return status.Error(codes.Internal, "internal server error")
 		})),
-		pi_grpc.StreamObservabilityInterceptor(c.Logger, c.Metrics()))
+		pi_grpc.StreamObservabilityInterceptorWithProvider(c.Logger, c.Metrics(), c.GetTracerProvider))
 
 	return &grpcServer{
 		port:               port,
@@ -251,6 +254,9 @@ func (g *grpcServer) start(c *infra.Container, onError func(error)) error {
 }
 
 func (g *grpcServer) Shutdown(ctx context.Context) error {
+	if g == nil || (g.server == nil && g.health == nil) {
+		return nil
+	}
 	if g.health != nil {
 		g.health.Shutdown()
 	}
@@ -273,32 +279,79 @@ func (g *grpcServer) Shutdown(ctx context.Context) error {
 func (a *App) RegisterService(desc *grpc.ServiceDesc, impl any) {
 	a.container.Logger.Infof("queuing gRPC Service for registration: %s", desc.ServiceName)
 
+	a.grpcServer.mu.Lock()
 	a.grpcServer.pendingServices = append(a.grpcServer.pendingServices, pendingService{
 		desc: desc,
 		impl: impl,
 	})
+	if desc != nil && desc.ServiceName != "" && desc.ServiceName != healthpb.Health_ServiceDesc.ServiceName {
+		if !contains(a.grpcServer.serviceNames, desc.ServiceName) {
+			a.grpcServer.serviceNames = append(a.grpcServer.serviceNames, desc.ServiceName)
+		}
+	}
+	a.grpcServer.mu.Unlock()
 
 	a.grpcRegistered = true
+	a.syncGRPCHealth()
 	a.container.Logger.Infof("gRPC service %s queued for registration", desc.ServiceName)
 }
 
 // GRPCHealthServer registers one health service per application. Call during
 // composition, before Start, as with other service registration methods.
 func (a *App) GRPCHealthServer() *health.Server {
+	a.grpcServer.mu.Lock()
 	if a.grpcServer.health != nil {
-		return a.grpcServer.health
+		h := a.grpcServer.health
+		a.grpcServer.mu.Unlock()
+		return h
 	}
 	if a.grpcServer.serverCreated {
+		a.grpcServer.mu.Unlock()
 		panic("register gRPC health before Start")
 	}
 	h := health.NewServer()
 	a.grpcServer.health = h
+	a.grpcServer.mu.Unlock()
+
+	a.grpcHealthEnabled.Store(true)
 	a.RegisterService(&healthpb.Health_ServiceDesc, h)
-	h.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	a.syncGRPCHealth()
+	a.runtimeMu.Lock()
+	active := a.runtimeState == lifecycleStarting || a.runtimeState == lifecycleRunning
+	a.runtimeMu.Unlock()
+	if active {
+		a.startGRPCHealthSyncWorker()
+	}
 	buckets := []float64{0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10}
 	a.Metrics().NewHistogram("app_gRPC-Server_stats", "gRPC server response duration", buckets...)
 	a.Metrics().NewHistogram("app_gRPC-Stream_stats", "gRPC stream duration", buckets...)
 	return h
+}
+
+func (a *App) ensureDefaultGRPCHealth() {
+	if a == nil || a.grpcDisabled || !a.grpcRegistered || a.grpcServer == nil {
+		return
+	}
+	a.grpcServer.mu.Lock()
+	if a.grpcServer.health != nil || a.grpcServer.serverCreated {
+		a.grpcServer.mu.Unlock()
+		return
+	}
+	for _, pending := range a.grpcServer.pendingServices {
+		if pending.desc != nil && pending.desc.ServiceName == healthpb.Health_ServiceDesc.ServiceName {
+			a.grpcServer.mu.Unlock()
+			return
+		}
+	}
+	h := health.NewServer()
+	a.grpcServer.health = h
+	a.grpcServer.pendingServices = append(a.grpcServer.pendingServices, pendingService{
+		desc: &healthpb.Health_ServiceDesc,
+		impl: h,
+	})
+	a.grpcServer.mu.Unlock()
+
+	a.grpcHealthEnabled.Store(true)
 }
 
 func injectContainer(impl any, c *infra.Container) error {

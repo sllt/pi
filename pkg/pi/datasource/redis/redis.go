@@ -82,8 +82,11 @@ type StreamsConfig struct {
 
 type Redis struct {
 	*redis.Client
-	logger datasource.Logger
-	config *Config
+	logger    datasource.Logger
+	config    *Config
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	retryDone chan struct{}
 }
 
 // PubSub handles Redis PubSub operations.
@@ -102,6 +105,7 @@ type PubSub struct {
 	// Subscription management
 	receiveChan     map[string]chan *pubsub.Message
 	subStarted      map[string]struct{}
+	subCtx          map[string]context.Context
 	subCancel       map[string]context.CancelFunc
 	subPubSub       map[string]*redis.PubSub // Track active PubSub connections for unsubscribe
 	subWg           map[string]*sync.WaitGroup
@@ -112,6 +116,11 @@ type PubSub struct {
 	mu              sync.RWMutex
 	ctx             context.Context
 	cancel          context.CancelFunc
+	monitorDone     chan struct{}
+	stopCh          chan struct{}
+	stopOnce        sync.Once
+	retryDone       chan struct{}
+	ownsClient      bool
 }
 
 // streamConsumer represents a consumer in a Redis Stream consumer group.
@@ -139,6 +148,9 @@ func NewClient(c config.Config, logger datasource.Logger, metrics Metrics) *Redi
 	ctx, cancel := context.WithTimeout(context.TODO(), redisPingTimeout)
 	defer cancel()
 
+	stopCh := make(chan struct{})
+	var retryDone chan struct{}
+
 	if err := rc.Ping(ctx).Err(); err == nil {
 		if err = otel.InstrumentTracing(rc); err != nil {
 			logger.Errorf("could not add tracing instrumentation, error: %s", err)
@@ -148,24 +160,50 @@ func NewClient(c config.Config, logger datasource.Logger, metrics Metrics) *Redi
 	} else {
 		logger.Errorf("could not connect to redis at '%s:%d' , error: %s", redisConfig.HostName, redisConfig.Port, err)
 
-		go retryConnect(rc, logger)
+		retryDone = make(chan struct{})
+		go retryConnect(rc, logger, stopCh, retryDone)
 	}
 
 	r := &Redis{
-		Client: rc,
-		config: redisConfig,
-		logger: logger,
+		Client:    rc,
+		config:    redisConfig,
+		logger:    logger,
+		stopCh:    stopCh,
+		retryDone: retryDone,
 	}
 
 	return r
 }
 
 // retryConnect handles the retry mechanism for connecting to Redis.
-func retryConnect(client *redis.Client, logger datasource.Logger) {
-	for {
-		time.Sleep(defaultRetryTimeout)
+func retryConnect(client *redis.Client, logger datasource.Logger, stopCh <-chan struct{}, done chan<- struct{}) {
+	if done != nil {
+		defer close(done)
+	}
 
-		ctx, cancel := context.WithTimeout(context.Background(), redisPingTimeout)
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	defer baseCancel()
+	if stopCh != nil {
+		go func() {
+			select {
+			case <-stopCh:
+				baseCancel()
+			case <-baseCtx.Done():
+			}
+		}()
+	}
+
+	timer := time.NewTimer(defaultRetryTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-timer.C:
+		}
+
+		ctx, cancel := context.WithTimeout(baseCtx, redisPingTimeout)
 		err := client.Ping(ctx).Err()
 
 		cancel()
@@ -179,15 +217,34 @@ func retryConnect(client *redis.Client, logger datasource.Logger) {
 
 			return
 		}
+		if baseCtx.Err() != nil {
+			return
+		}
 
 		logger.Errorf("could not connect to redis, error: %s", err)
+		timer.Reset(defaultRetryTimeout)
 	}
 }
 
 // Close shuts down the Redis client, ensuring the current dataset is saved before exiting.
 func (r *Redis) Close() error {
+	if r == nil {
+		return nil
+	}
+	if r.stopCh != nil {
+		r.stopOnce.Do(func() {
+			close(r.stopCh)
+		})
+	}
+	if r.retryDone != nil {
+		<-r.retryDone
+	}
 	if r.Client != nil {
-		return r.Client.Close()
+		err := r.Client.Close()
+		if errors.Is(err, redis.ErrClosed) {
+			return nil
+		}
+		return err
 	}
 
 	return nil
@@ -218,7 +275,12 @@ func NewPubSub(conf config.Config, logger datasource.Logger, metrics Metrics) pu
 	ctx, cancel := context.WithTimeout(context.TODO(), redisPingTimeout)
 	defer cancel()
 
+	stopCh := make(chan struct{})
+	var retryDone chan struct{}
+	initialConnected := false
+
 	if err := rc.Ping(ctx).Err(); err == nil {
+		initialConnected = true
 		if err = otel.InstrumentTracing(rc); err != nil {
 			logger.Errorf("could not add tracing instrumentation, error: %s", err)
 		}
@@ -227,10 +289,11 @@ func NewPubSub(conf config.Config, logger datasource.Logger, metrics Metrics) pu
 	} else {
 		logger.Errorf("could not connect to redis at '%s:%d' , error: %s", redisConfig.HostName, redisConfig.Port, err)
 
-		go retryConnect(rc, logger)
+		retryDone = make(chan struct{})
+		go retryConnect(rc, logger, stopCh, retryDone)
 	}
 
-	ps := newPubSub(rc, redisConfig, logger, metrics)
+	ps := newPubSubWithState(rc, redisConfig, logger, metrics, initialConnected, stopCh, retryDone, true)
 
 	return ps
 }
@@ -259,6 +322,19 @@ func setPubSubDB(conf config.Config, redisConfig *Config) {
 
 // newPubSub creates a new PubSub instance.
 func newPubSub(client *redis.Client, redisCfg *Config, logger datasource.Logger, metrics Metrics) *PubSub {
+	return newPubSubWithState(client, redisCfg, logger, metrics, true, make(chan struct{}), nil, false)
+}
+
+func newPubSubWithState(
+	client *redis.Client,
+	redisCfg *Config,
+	logger datasource.Logger,
+	metrics Metrics,
+	initialConnected bool,
+	stopCh chan struct{},
+	retryDone chan struct{},
+	ownsClient bool,
+) *PubSub {
 	ps := &PubSub{
 		client:          client,
 		config:          redisCfg,
@@ -267,6 +343,7 @@ func newPubSub(client *redis.Client, redisCfg *Config, logger datasource.Logger,
 		tracer:          otelglobal.GetTracerProvider().Tracer("pi"),
 		receiveChan:     make(map[string]chan *pubsub.Message),
 		subStarted:      make(map[string]struct{}),
+		subCtx:          make(map[string]context.Context),
 		subCancel:       make(map[string]context.CancelFunc),
 		subPubSub:       make(map[string]*redis.PubSub),
 		subWg:           make(map[string]*sync.WaitGroup),
@@ -274,10 +351,14 @@ func newPubSub(client *redis.Client, redisCfg *Config, logger datasource.Logger,
 		closeOnce:       make(map[string]*sync.Once),
 		streamConsumers: make(map[string]*streamConsumer),
 		pendingRead:     make(map[string]bool),
+		monitorDone:     make(chan struct{}),
+		stopCh:          stopCh,
+		retryDone:       retryDone,
+		ownsClient:      ownsClient,
 	}
 
 	ps.ctx, ps.cancel = context.WithCancel(context.Background())
-	go ps.monitorConnection(ps.ctx)
+	go ps.monitorConnection(ps.ctx, initialConnected, ps.monitorDone)
 
 	return ps
 }

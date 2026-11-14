@@ -26,6 +26,7 @@ type SubscriptionManager struct {
 
 type subscription struct {
 	cancel context.CancelFunc
+	done   <-chan struct{}
 }
 
 func newSubscriptionManager(bufferSize int) *SubscriptionManager {
@@ -51,7 +52,7 @@ func (sm *SubscriptionManager) Subscribe(
 
 	sm.subMutex.Lock()
 
-	_, exists := sm.subscriptions[topic]
+	sub, exists := sm.subscriptions[topic]
 	if !exists {
 		cons, err := sm.createOrUpdateConsumer(ctx, js, topic, cfg)
 		if err != nil {
@@ -59,11 +60,16 @@ func (sm *SubscriptionManager) Subscribe(
 			return nil, err
 		}
 
-		subCtx, cancel := context.WithCancel(ctx)
-		sm.subscriptions[topic] = &subscription{cancel: cancel}
+		subCtx, cancel := context.WithCancel(context.Background())
+		sub = &subscription{cancel: cancel, done: subCtx.Done()}
+		sm.subscriptions[topic] = sub
 
 		buffer := sm.getOrCreateBuffer(topic)
 		go sm.consumeMessages(subCtx, cons, topic, buffer, cfg, logger)
+	}
+	var subDone <-chan struct{}
+	if sub != nil {
+		subDone = sub.done
 	}
 
 	sm.subMutex.Unlock()
@@ -74,6 +80,8 @@ func (sm *SubscriptionManager) Subscribe(
 	case msg := <-buffer:
 		metrics.IncrementCounter(ctx, "app_pubsub_subscribe_success_count", "topic", topic)
 		return msg, nil
+	case <-subDone:
+		return nil, errClientNotConnected
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -141,7 +149,7 @@ func (sm *SubscriptionManager) consumeMessages(
 }
 
 func (sm *SubscriptionManager) fetchAndProcessMessages(
-	_ context.Context,
+	ctx context.Context,
 	cons jetstream.Consumer,
 	topic string,
 	buffer chan *pubsub.Message,
@@ -149,18 +157,24 @@ func (sm *SubscriptionManager) fetchAndProcessMessages(
 	logger pubsub.Logger) error {
 	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(cfg.MaxWait))
 	if err != nil {
-		return sm.handleFetchError(err, topic, logger)
+		return sm.handleFetchError(ctx, err, topic, logger)
 	}
 
 	return sm.processFetchedMessages(msgs, topic, buffer, logger)
 }
 
-func (*SubscriptionManager) handleFetchError(err error, topic string, logger pubsub.Logger) error {
-	if !errors.Is(err, context.DeadlineExceeded) {
+func (*SubscriptionManager) handleFetchError(ctx context.Context, err error, topic string, logger pubsub.Logger) error {
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		logger.Errorf("Error fetching messages for topic %s: %v", topic, err)
 	}
 
-	time.Sleep(consumeMessageDelay)
+	timer := time.NewTimer(consumeMessageDelay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 
 	return nil
 }
@@ -214,19 +228,15 @@ func (sm *SubscriptionManager) Close() {
 	sm.subMutex.Lock()
 
 	for _, sub := range sm.subscriptions {
-		sub.cancel()
+		if sub != nil && sub.cancel != nil {
+			sub.cancel()
+		}
 	}
 
 	sm.subscriptions = make(map[string]*subscription)
 	sm.subMutex.Unlock()
 
 	sm.bufferMutex.Lock()
-
-	for _, buffer := range sm.topicBuffers {
-		close(buffer)
-	}
-
 	sm.topicBuffers = make(map[string]chan *pubsub.Message)
-
 	sm.bufferMutex.Unlock()
 }

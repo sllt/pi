@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -23,12 +24,13 @@ type RateLimiterStore interface {
 	StopCleanup()
 }
 
-// tokenBucket with simplified integer-only token handling.
+// tokenBucket implements fractional token refill so sub-1-RPS limits work accurately without integer truncation.
 type tokenBucket struct {
-	tokens         int64 // Current tokens
-	lastRefillTime int64 // Unix nano timestamp
-	maxTokens      int64 // Maximum tokens
-	refillRate     int64 // Tokens per second (as integer)
+	mu             sync.Mutex
+	tokens         float64
+	lastRefillTime int64
+	maxTokens      float64
+	refillRate     float64
 }
 
 // bucketEntry holds bucket with last access time for cleanup.
@@ -37,10 +39,10 @@ type bucketEntry struct {
 	lastAccess int64 // Unix timestamp
 }
 
-// newTokenBucket creates a new token bucket with integer-only math.
+// newTokenBucket creates a new token bucket supporting arbitrary positive refill rates.
 func newTokenBucket(config *RateLimiterConfig) *tokenBucket {
-	maxTokens := int64(config.Burst)
-	refillRate := int64(config.RequestsPerSecond())
+	maxTokens := float64(config.Burst)
+	refillRate := config.RequestsPerSecond()
 
 	return &tokenBucket{
 		tokens:         maxTokens,
@@ -52,44 +54,50 @@ func newTokenBucket(config *RateLimiterConfig) *tokenBucket {
 
 // allow checks if a token can be consumed.
 func (tb *tokenBucket) allow() (allowed bool, waitTime time.Duration) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+
 	now := time.Now().UnixNano()
-
-	// Calculate tokens to add based on elapsed time
-	elapsed := now - atomic.LoadInt64(&tb.lastRefillTime)
-	tokensToAdd := elapsed * tb.refillRate / int64(time.Second)
-
-	// Update tokens atomically
-	for {
-		oldTokens := atomic.LoadInt64(&tb.tokens)
-		newTokens := oldTokens + tokensToAdd
-
-		if newTokens > tb.maxTokens {
-			newTokens = tb.maxTokens
-		}
-
-		// Early return if not enough tokens
-		if newTokens < 1 {
-			waitTime := time.Duration((1-newTokens)*int64(time.Second)/tb.refillRate) * time.Nanosecond
-			if waitTime < time.Millisecond {
-				waitTime = time.Millisecond
-			}
-
-			return false, waitTime
-		}
-
-		// Try to consume a token
-		if atomic.CompareAndSwapInt64(&tb.tokens, oldTokens, newTokens-1) {
-			atomic.StoreInt64(&tb.lastRefillTime, now)
-
+	if tb.refillRate <= 0 {
+		if tb.tokens >= 1 {
+			tb.tokens--
+			tb.lastRefillTime = now
 			return true, 0
 		}
+		return false, time.Second
 	}
+
+	if elapsed := now - tb.lastRefillTime; elapsed > 0 {
+		tokensToAdd := (float64(elapsed) / float64(time.Second)) * tb.refillRate
+		tb.tokens = math.Min(tb.maxTokens, tb.tokens+tokensToAdd)
+		tb.lastRefillTime = now
+	}
+
+	if tb.tokens < 1 {
+		waitSec := (1.0 - tb.tokens) / tb.refillRate
+		waitNs := math.Ceil(waitSec * float64(time.Second))
+		if waitNs > float64(math.MaxInt64) {
+			waitTime = time.Duration(math.MaxInt64)
+		} else {
+			waitTime = time.Duration(waitNs)
+		}
+		if waitTime < time.Millisecond {
+			waitTime = time.Millisecond
+		}
+		return false, waitTime
+	}
+
+	tb.tokens--
+	return true, 0
 }
 
 // LocalRateLimiterStore implements RateLimiterStore using in-memory buckets.
 type LocalRateLimiterStore struct {
 	buckets *sync.Map
+	mu      sync.Mutex
+	running bool
 	stopCh  chan struct{}
+	doneCh  chan struct{}
 }
 
 func NewLocalRateLimiterStore() *LocalRateLimiterStore {
@@ -115,9 +123,25 @@ func (l *LocalRateLimiterStore) Allow(_ context.Context, key string, config Rate
 }
 
 func (l *LocalRateLimiterStore) StartCleanup(ctx context.Context) {
-	l.stopCh = make(chan struct{})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	l.mu.Lock()
+	if l.running {
+		l.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	l.running = true
+	l.stopCh = stopCh
+	l.doneCh = doneCh
+	l.mu.Unlock()
 
 	go func() {
+		defer close(doneCh)
+
 		ticker := time.NewTicker(cleanupInterval)
 		defer ticker.Stop()
 
@@ -125,7 +149,7 @@ func (l *LocalRateLimiterStore) StartCleanup(ctx context.Context) {
 			select {
 			case <-ticker.C:
 				l.cleanupExpiredBuckets()
-			case <-l.stopCh:
+			case <-stopCh:
 				return
 			case <-ctx.Done():
 				return
@@ -135,9 +159,25 @@ func (l *LocalRateLimiterStore) StartCleanup(ctx context.Context) {
 }
 
 func (l *LocalRateLimiterStore) StopCleanup() {
-	if l.stopCh != nil {
-		close(l.stopCh)
+	l.mu.Lock()
+	if !l.running {
+		l.mu.Unlock()
+		return
 	}
+	stopCh := l.stopCh
+	doneCh := l.doneCh
+	l.running = false
+	l.stopCh = nil
+	l.doneCh = nil
+	l.mu.Unlock()
+
+	close(stopCh)
+	<-doneCh
+}
+
+func (l *LocalRateLimiterStore) Close() error {
+	l.StopCleanup()
+	return nil
 }
 
 func (l *LocalRateLimiterStore) cleanupExpiredBuckets() {

@@ -10,7 +10,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -25,6 +27,13 @@ type Config struct {
 	Database string // Name of the database to connect to.
 }
 
+type metricsLoop struct {
+	mu      sync.Mutex
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+	stopped bool
+}
+
 // Client is a ClickHouse client implementation that wraps a Conn interface.
 // It provides methods for executing queries, performing inserts, and collecting metrics.
 type Client struct {
@@ -33,6 +42,7 @@ type Client struct {
 	logger  Logger
 	metrics Metrics
 	tracer  trace.Tracer
+	loop    *metricsLoop
 }
 
 var errStatusDown = errors.New("status down")
@@ -46,7 +56,10 @@ var errStatusDown = errors.New("status down")
 //
 //	client.Connect()
 func New(config Config) *Client {
-	return &Client{config: config}
+	return &Client{
+		config: config,
+		loop:   &metricsLoop{},
+	}
 }
 
 // UseLogger sets the logger for the ClickHouse client.
@@ -106,20 +119,74 @@ func (c *Client) Connect() {
 		c.logger.Logf("successfully connected to ClickhouseDB")
 	}
 
-	go pushDBMetrics(c.conn, c.metrics)
+	if c.loop == nil {
+		c.loop = &metricsLoop{}
+	}
+
+	c.loop.mu.Lock()
+	if !c.loop.stopped && c.loop.doneCh == nil {
+		stopCh := make(chan struct{})
+		doneCh := make(chan struct{})
+		c.loop.stopCh = stopCh
+		c.loop.doneCh = doneCh
+		go pushDBMetrics(c.conn, c.metrics, stopCh, doneCh)
+	}
+	c.loop.mu.Unlock()
 }
 
-func pushDBMetrics(conn Conn, metrics Metrics) {
+// Close stops the background ClickHouse metrics poller and closes the underlying driver connection.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+
+	if c.loop != nil {
+		c.loop.mu.Lock()
+		if !c.loop.stopped {
+			c.loop.stopped = true
+			if c.loop.stopCh != nil {
+				close(c.loop.stopCh)
+			}
+		}
+		doneCh := c.loop.doneCh
+		c.loop.mu.Unlock()
+
+		if doneCh != nil {
+			<-doneCh
+		}
+	}
+
+	if closer, ok := c.conn.(io.Closer); ok {
+		return closer.Close()
+	}
+
+	return nil
+}
+
+func pushDBMetrics(conn Conn, metrics Metrics, stopCh <-chan struct{}, doneCh chan struct{}) {
+	defer close(doneCh)
+
+	if conn == nil || metrics == nil {
+		return
+	}
+
 	const frequency = 10
 
-	for {
-		if conn != nil {
-			stats := conn.Stats()
+	stats := conn.Stats()
+	metrics.SetGauge("app_clickhouse_open_connections", float64(stats.Open))
+	metrics.SetGauge("app_clickhouse_idle_connections", float64(stats.Idle))
 
+	ticker := time.NewTicker(frequency * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			stats := conn.Stats()
 			metrics.SetGauge("app_clickhouse_open_connections", float64(stats.Open))
 			metrics.SetGauge("app_clickhouse_idle_connections", float64(stats.Idle))
-
-			time.Sleep(frequency * time.Second)
 		}
 	}
 }

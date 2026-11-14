@@ -10,6 +10,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
 )
@@ -55,11 +56,46 @@ type kafkaClient struct {
 	writer Writer
 	reader map[string]Reader
 
-	mu *sync.RWMutex
+	mu        *sync.RWMutex
+	cancel    context.CancelFunc
+	retryDone chan struct{}
 
 	logger  pubsub.Logger
 	config  Config
 	metrics Metrics
+	tracer  trace.Tracer
+}
+
+func (k *kafkaClient) UseTracer(tracer any) {
+	if k == nil {
+		return
+	}
+	if t, ok := tracer.(trace.Tracer); ok && t != nil {
+		if k.mu != nil {
+			k.mu.Lock()
+			k.tracer = t
+			k.mu.Unlock()
+		} else {
+			k.tracer = t
+		}
+	}
+}
+
+func (k *kafkaClient) getTracer() trace.Tracer {
+	if k != nil {
+		var t trace.Tracer
+		if k.mu != nil {
+			k.mu.RLock()
+			t = k.tracer
+			k.mu.RUnlock()
+		} else {
+			t = k.tracer
+		}
+		if t != nil {
+			return t
+		}
+	}
+	return otel.GetTracerProvider().Tracer("pi")
 }
 
 func New(conf *Config, logger pubsub.Logger, metrics Metrics) *kafkaClient { //nolint:revive // New allows
@@ -83,13 +119,19 @@ func New(conf *Config, logger pubsub.Logger, metrics Metrics) *kafkaClient { //n
 		metrics: metrics,
 		mu:      &sync.RWMutex{},
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	client.cancel = cancel
 
 	err = client.initialize(ctx)
 	if err != nil {
 		logger.Errorf("failed to connect to kafka at %v, error: %v", conf.Brokers, err)
 
-		go client.retryConnect(ctx)
+		retryDone := make(chan struct{})
+		client.retryDone = retryDone
+		go func() {
+			defer close(retryDone)
+			client.retryConnect(ctx)
+		}()
 
 		return client
 	}
@@ -98,17 +140,25 @@ func New(conf *Config, logger pubsub.Logger, metrics Metrics) *kafkaClient { //n
 }
 
 func (k *kafkaClient) Publish(ctx context.Context, topic string, message []byte) error {
-	ctx, span := otel.GetTracerProvider().Tracer("pi").Start(ctx, "kafka-publish")
+	ctx, span := k.getTracer().Start(ctx, "kafka-publish")
 	defer span.End()
 
 	k.metrics.IncrementCounter(ctx, "app_pubsub_publish_total_count", "topic", topic)
 
-	if k.writer == nil || topic == "" {
+	var writer Writer
+	if k.mu != nil {
+		k.mu.RLock()
+		writer = k.writer
+		k.mu.RUnlock()
+	} else {
+		writer = k.writer
+	}
+	if writer == nil || topic == "" {
 		return errPublisherNotConfigured
 	}
 
 	start := time.Now()
-	err := k.writer.WriteMessages(ctx,
+	err := writer.WriteMessages(ctx,
 		kafka.Message{
 			Topic: topic,
 			Value: message,
@@ -169,9 +219,14 @@ func (k *kafkaClient) Query(ctx context.Context, query string, args ...any) ([]b
 
 func (k *kafkaClient) Subscribe(ctx context.Context, topic string) (*pubsub.Message, error) {
 	if !k.isConnected() {
-		time.Sleep(defaultRetryTimeout)
-
-		return nil, errClientNotConnected
+		timer := time.NewTimer(defaultRetryTimeout)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, errors.Join(errClientNotConnected, ctx.Err())
+		case <-timer.C:
+			return nil, errClientNotConnected
+		}
 	}
 
 	if k.config.ConsumerGroupID == "" {
@@ -180,14 +235,15 @@ func (k *kafkaClient) Subscribe(ctx context.Context, topic string) (*pubsub.Mess
 		return &pubsub.Message{}, ErrConsumerGroupNotProvided
 	}
 
-	ctx, span := otel.GetTracerProvider().Tracer("pi").Start(ctx, "kafka-subscribe")
+	ctx, span := k.getTracer().Start(ctx, "kafka-subscribe")
 	defer span.End()
 
 	k.metrics.IncrementCounter(ctx, "app_pubsub_subscribe_total_count", "topic", topic, "consumer_group", k.config.ConsumerGroupID)
 
 	var reader Reader
-	// Lock the reader map to ensure only one subscriber access the reader at a time
-	k.mu.Lock()
+	if k.mu != nil {
+		k.mu.Lock()
+	}
 
 	if k.reader == nil {
 		k.reader = make(map[string]Reader)
@@ -196,15 +252,15 @@ func (k *kafkaClient) Subscribe(ctx context.Context, topic string) (*pubsub.Mess
 	if k.reader[topic] == nil {
 		k.reader[topic] = k.getNewReader(topic)
 	}
+	reader = k.reader[topic]
 
-	// Release the lock on the reader map after update
-	k.mu.Unlock()
+	if k.mu != nil {
+		k.mu.Unlock()
+	}
 
 	start := time.Now()
 
 	// Read a single message from the topic
-	reader = k.reader[topic]
-
 	msg, err := reader.FetchMessage(ctx)
 	if err != nil {
 		k.logger.Errorf("failed to read message from kafka topic %s: %v", topic, err)
@@ -215,7 +271,7 @@ func (k *kafkaClient) Subscribe(ctx context.Context, topic string) (*pubsub.Mess
 	m := pubsub.NewMessage(ctx)
 	m.Value = msg.Value
 	m.Topic = topic
-	m.Committer = newKafkaMessage(&msg, k.reader[topic], k.logger)
+	m.Committer = newKafkaMessage(&msg, reader, k.logger)
 
 	end := time.Since(start)
 
@@ -243,17 +299,57 @@ func (k *kafkaClient) Subscribe(ctx context.Context, topic string) (*pubsub.Mess
 }
 
 func (k *kafkaClient) Close() (err error) {
-	for _, r := range k.reader {
-		err = errors.Join(err, r.Close())
+	if k.cancel != nil {
+		k.cancel()
+	}
+	if k.retryDone != nil {
+		<-k.retryDone
 	}
 
-	if k.writer != nil {
-		err = errors.Join(err, k.writer.Close())
+	var (
+		readers []Reader
+		writer  Writer
+		conn    *multiConn
+	)
+	if k.mu != nil {
+		k.mu.Lock()
+		for _, r := range k.reader {
+			readers = append(readers, r)
+		}
+		k.reader = nil
+		writer = k.writer
+		conn = k.conn
+		k.mu.Unlock()
+	} else {
+		for _, r := range k.reader {
+			readers = append(readers, r)
+		}
+		writer = k.writer
+		conn = k.conn
 	}
 
-	if k.conn != nil {
-		err = errors.Join(k.conn.Close())
+	for _, r := range readers {
+		if r != nil {
+			err = errors.Join(err, r.Close())
+		}
+	}
+
+	if writer != nil {
+		err = errors.Join(err, writer.Close())
+	}
+
+	if conn != nil {
+		err = errors.Join(err, conn.Close())
 	}
 
 	return err
+}
+
+func (*kafkaClient) AckSemantics() pubsub.AckSemantics {
+	return pubsub.AckSemantics{
+		Mode:                  pubsub.AckModeCumulativeOffset,
+		SupportsContextCommit: true,
+		SupportsNack:          false,
+		SupportsSeek:          false,
+	}
 }

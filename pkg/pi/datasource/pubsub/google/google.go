@@ -12,6 +12,7 @@ import (
 
 	gcPubSub "cloud.google.com/go/pubsub"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/api/iterator"
 
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
@@ -43,6 +44,37 @@ type googleClient struct {
 	receiveChan map[string]chan *pubsub.Message
 	subStarted  map[string]struct{}
 	mu          sync.RWMutex
+	subCtx      context.Context
+	subCancel   context.CancelFunc
+	subWG       sync.WaitGroup
+	closed      bool
+	stopCh      chan struct{}
+	stopOnce    sync.Once
+	retryDone   chan struct{}
+	tracer      trace.Tracer
+}
+
+func (g *googleClient) UseTracer(tracer any) {
+	if g == nil {
+		return
+	}
+	if t, ok := tracer.(trace.Tracer); ok && t != nil {
+		g.mu.Lock()
+		g.tracer = t
+		g.mu.Unlock()
+	}
+}
+
+func (g *googleClient) getTracer() trace.Tracer {
+	if g != nil {
+		g.mu.RLock()
+		t := g.tracer
+		g.mu.RUnlock()
+		if t != nil {
+			return t
+		}
+	}
+	return otel.GetTracerProvider().Tracer("pi")
 }
 
 const (
@@ -69,10 +101,14 @@ func New(conf Config, logger pubsub.Logger, metrics Metrics) *googleClient {
 	client.receiveChan = make(map[string]chan *pubsub.Message)
 	client.subStarted = make(map[string]struct{})
 	client.mu = sync.RWMutex{}
+	client.subCtx, client.subCancel = context.WithCancel(context.Background())
+
+	client.stopCh = make(chan struct{})
 
 	gClient, err := connect(conf, logger)
 	if err != nil {
-		go retryConnect(conf, logger, &client)
+		client.retryDone = make(chan struct{})
+		go retryConnect(conf, logger, &client, client.stopCh, client.retryDone)
 
 		return &client
 	}
@@ -83,14 +119,18 @@ func New(conf Config, logger pubsub.Logger, metrics Metrics) *googleClient {
 }
 
 func connect(conf Config, logger pubsub.Logger) (*gcPubSub.Client, error) {
-	client, err := gcPubSub.NewClient(context.Background(), conf.ProjectID)
+	return connectWithContext(context.Background(), conf, logger)
+}
+
+func connectWithContext(parent context.Context, conf Config, logger pubsub.Logger) (*gcPubSub.Client, error) {
+	ctx, cancel := context.WithTimeout(parent, defaultRetryInterval)
+	defer cancel()
+
+	client, err := gcPubSub.NewClient(ctx, conf.ProjectID)
 	if err != nil {
 		logger.Errorf("could not create Google PubSub client, error: %v", err)
 		return nil, err
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), defaultRetryInterval)
-	defer cancel()
 
 	it := client.Topics(ctx)
 
@@ -101,6 +141,7 @@ func connect(conf Config, logger pubsub.Logger) (*gcPubSub.Client, error) {
 			return client, nil
 		}
 
+		_ = client.Close()
 		logger.Errorf("google pubsub connection validation failed, error: %v", err)
 
 		return nil, err
@@ -112,7 +153,7 @@ func connect(conf Config, logger pubsub.Logger) (*gcPubSub.Client, error) {
 }
 
 func (g *googleClient) Publish(ctx context.Context, topic string, message []byte) error {
-	ctx, span := otel.GetTracerProvider().Tracer("pi").Start(ctx, "publish-gcp")
+	ctx, span := g.getTracer().Start(ctx, "publish-gcp")
 	defer span.End()
 
 	g.metrics.IncrementCounter(ctx, "app_pubsub_publish_total_count", "topic", topic)
@@ -153,25 +194,54 @@ func (g *googleClient) Publish(ctx context.Context, topic string, message []byte
 	return nil
 }
 
-func (g *googleClient) Subscribe(ctx context.Context, topic string) (*pubsub.Message, error) {
-	var end time.Duration
+func (g *googleClient) ensureSubContextLocked() context.Context {
+	if g.receiveChan == nil {
+		g.receiveChan = make(map[string]chan *pubsub.Message)
+	}
+	if g.subStarted == nil {
+		g.subStarted = make(map[string]struct{})
+	}
+	if g.subCtx == nil {
+		g.subCtx, g.subCancel = context.WithCancel(context.Background())
+	}
+	return g.subCtx
+}
 
-	if g.client == nil {
+func (g *googleClient) Subscribe(ctx context.Context, topic string) (*pubsub.Message, error) {
+	g.mu.RLock()
+	hasClient := g.client != nil
+	isClosed := g.closed
+	g.mu.RUnlock()
+
+	if !hasClient {
 		return nil, nil
 	}
-
-	if !g.isConnected() {
-		time.Sleep(defaultRetryInterval)
-
+	if isClosed {
 		return nil, errClientNotConnected
 	}
 
-	spanCtx, span := otel.GetTracerProvider().Tracer("pi").Start(ctx, "gcp-subscribe")
+	if !g.isConnected() {
+		timer := time.NewTimer(defaultRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, errors.Join(errClientNotConnected, ctx.Err())
+		case <-timer.C:
+			return nil, errClientNotConnected
+		}
+	}
+
+	spanCtx, span := g.getTracer().Start(ctx, "gcp-subscribe")
 	defer span.End()
 
 	g.metrics.IncrementCounter(spanCtx, "app_pubsub_subscribe_total_count", "topic", topic, "subscription_name", g.Config.SubscriptionName)
 
-	if _, ok := g.subStarted[topic]; !ok {
+	g.mu.RLock()
+	_, started := g.subStarted[topic]
+	ch := g.receiveChan[topic]
+	g.mu.RUnlock()
+
+	if !started {
 		t, err := g.getTopic(spanCtx, topic)
 		if err != nil {
 			return nil, err
@@ -182,40 +252,59 @@ func (g *googleClient) Subscribe(ctx context.Context, topic string) (*pubsub.Mes
 			return nil, err
 		}
 
-		start := time.Now()
-
-		processMessage := func(ctx context.Context, msg *gcPubSub.Message) {
-			m := pubsub.NewMessage(ctx)
-			end = time.Since(start)
-
-			m.Topic = topic
-			m.Value = msg.Data
-			m.MetaData = msg.Attributes
-			m.Committer = newGoogleMessage(msg)
-
-			g.mu.Lock()
-			defer g.mu.Unlock()
-
-			g.receiveChan[topic] <- m
-		}
-
-		// initialize the channel before we can start receiving on it
 		g.mu.Lock()
-		g.receiveChan[topic] = make(chan *pubsub.Message)
-		g.mu.Unlock()
-
-		go func() {
-			err = subscription.Receive(ctx, processMessage)
-			if err != nil {
-				g.logger.Errorf("error getting a message from google: %s", err.Error())
+		if g.closed {
+			g.mu.Unlock()
+			return nil, errClientNotConnected
+		}
+		if _, already := g.subStarted[topic]; !already {
+			subCtx := g.ensureSubContextLocked()
+			if existing, ok := g.receiveChan[topic]; ok && existing != nil {
+				ch = existing
+			} else {
+				ch = make(chan *pubsub.Message)
+				g.receiveChan[topic] = ch
 			}
-		}()
+			g.subStarted[topic] = struct{}{}
+			g.subWG.Add(1)
 
-		g.subStarted[topic] = struct{}{}
+			msgChan := ch
+			go func() {
+				defer g.subWG.Done()
+				recvErr := subscription.Receive(subCtx, func(cbCtx context.Context, msg *gcPubSub.Message) {
+					m := pubsub.NewMessage(cbCtx)
+					m.Topic = topic
+					m.Value = msg.Data
+					m.MetaData = msg.Attributes
+					m.Committer = newGoogleMessage(msg)
+
+					select {
+					case msgChan <- m:
+					case <-subCtx.Done():
+						msg.Nack()
+					}
+				})
+				if recvErr != nil && !errors.Is(recvErr, context.Canceled) {
+					g.logger.Errorf("error getting a message from google: %s", recvErr.Error())
+				}
+			}()
+		} else {
+			ch = g.receiveChan[topic]
+		}
+		g.mu.Unlock()
 	}
 
+	if ch == nil {
+		return nil, nil
+	}
+
+	fetchStart := time.Now()
 	select {
-	case m := <-g.receiveChan[topic]:
+	case m, ok := <-ch:
+		if !ok || m == nil {
+			return nil, nil
+		}
+		fetchDur := time.Since(fetchStart)
 		g.metrics.IncrementCounter(spanCtx, "app_pubsub_subscribe_success_count", "topic", topic, "subscription_name",
 			g.Config.SubscriptionName)
 
@@ -226,7 +315,7 @@ func (g *googleClient) Subscribe(ctx context.Context, topic string) (*pubsub.Mes
 			Topic:         topic,
 			Host:          g.Config.ProjectID,
 			PubSubBackend: "GCP",
-			Time:          end.Microseconds(),
+			Time:          fetchDur.Microseconds(),
 		})
 
 		return m, nil
@@ -364,20 +453,82 @@ func (g *googleClient) CreateTopic(ctx context.Context, name string) error {
 }
 
 func (g *googleClient) Close() error {
-	if g.client != nil {
-		return g.client.Close()
+	if g.stopCh != nil {
+		g.stopOnce.Do(func() {
+			close(g.stopCh)
+		})
+	}
+	if g.retryDone != nil {
+		<-g.retryDone
 	}
 
-	for _, c := range g.receiveChan {
-		close(c)
+	g.mu.Lock()
+	g.closed = true
+	subCancel := g.subCancel
+	c := g.client
+	g.mu.Unlock()
+
+	if subCancel != nil {
+		subCancel()
+	}
+	g.subWG.Wait()
+
+	g.mu.Lock()
+	chans := g.receiveChan
+	g.receiveChan = nil
+	g.subStarted = nil
+	g.mu.Unlock()
+
+	var closeErr error
+	if c != nil {
+		closeErr = c.Close()
 	}
 
-	return nil
+	for _, ch := range chans {
+		if ch != nil {
+			close(ch)
+		}
+	}
+
+	return closeErr
 }
 
-func retryConnect(conf Config, logger pubsub.Logger, g *googleClient) {
+func (*googleClient) AckSemantics() pubsub.AckSemantics {
+	return pubsub.AckSemantics{
+		Mode:                  pubsub.AckModeIndependent,
+		SupportsContextCommit: false,
+		SupportsNack:          true,
+	}
+}
+
+func retryConnect(conf Config, logger pubsub.Logger, g *googleClient, stopCh <-chan struct{}, done chan<- struct{}) {
+	if done != nil {
+		defer close(done)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if stopCh != nil {
+		go func() {
+			select {
+			case <-stopCh:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	timer := time.NewTimer(defaultRetryInterval)
+	defer timer.Stop()
+
 	for {
-		client, err := connect(conf, logger)
+		select {
+		case <-stopCh:
+			return
+		case <-timer.C:
+		}
+
+		client, err := connectWithContext(ctx, conf, logger)
 		if err == nil {
 			g.mu.Lock()
 			g.client = client
@@ -387,9 +538,12 @@ func retryConnect(conf Config, logger pubsub.Logger, g *googleClient) {
 
 			return
 		}
+		if ctx.Err() != nil {
+			return
+		}
 
 		logger.Errorf("could not connect to Google PubSub, error: %v", err)
 
-		time.Sleep(defaultRetryInterval)
+		timer.Reset(defaultRetryInterval)
 	}
 }

@@ -116,6 +116,10 @@ func (m sqlMockDB) HealthCheck() *datasource.Health {
 	return &d
 }
 
+func (m sqlMockDB) HealthCheckContext(context.Context) *datasource.Health {
+	return m.HealthCheck()
+}
+
 func (m sqlMockDB) Dialect() string {
 	if len(m.expectedDialect) == 0 {
 		m.logger.Error("Did not expect any mock calls for Dialect")

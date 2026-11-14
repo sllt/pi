@@ -11,7 +11,6 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"go.opentelemetry.io/otel"
 
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
 )
@@ -137,7 +136,7 @@ func (*MQTT) handleContextDone(queryCtx context.Context, topicName string, buffe
 func (m *MQTT) createMqttHandler(_ context.Context, topic string, msgs chan *pubsub.Message) mqtt.MessageHandler {
 	return func(_ mqtt.Client, msg mqtt.Message) {
 		ctx := context.Background()
-		ctx, span := otel.GetTracerProvider().Tracer("pi").Start(ctx, "mqtt-subscribe")
+		ctx, span := m.getTracer().Start(ctx, "mqtt-subscribe")
 
 		defer span.End()
 
@@ -187,8 +186,10 @@ func getHandler(subscribeFunc SubscribeFunc) func(client mqtt.Client, msg mqtt.M
 }
 
 func (m *MQTT) Unsubscribe(topic string) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 
 	token := m.Client.Unsubscribe(topic)
 	token.Wait()
@@ -209,29 +210,61 @@ func (m *MQTT) Unsubscribe(topic string) error {
 }
 
 func (m *MQTT) Close() error {
-	timeout := m.config.CloseTimeout
+	var timeout time.Duration
+	if m.config != nil {
+		timeout = m.config.CloseTimeout
+	}
 
 	return m.Disconnect(uint(math.Min(float64(timeout.Milliseconds()), float64(math.MaxUint32))))
 }
 
 func (m *MQTT) Disconnect(waitTime uint) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.stopRetry()
+
+	var topics []string
+	if m.mu != nil {
+		m.mu.RLock()
+		topics = make([]string, 0, len(m.subscriptions))
+		for topic := range m.subscriptions {
+			topics = append(topics, topic)
+		}
+		m.mu.RUnlock()
+	} else {
+		for topic := range m.subscriptions {
+			topics = append(topics, topic)
+		}
+	}
 
 	var err error
 
-	for topic := range m.subscriptions {
+	for _, topic := range topics {
 		unsubscribeErr := m.Unsubscribe(topic)
-		if err != nil {
+		if unsubscribeErr != nil {
 			err = errors.Join(err, unsubscribeErr)
 
 			m.logger.Errorf("Error closing Subscription: %v", err)
 		}
 	}
 
-	m.Client.Disconnect(waitTime)
+	if m.Client != nil {
+		m.Client.Disconnect(waitTime)
+	}
 
 	return err
+}
+
+func (m *MQTT) stopRetry() {
+	if m == nil {
+		return
+	}
+	if m.stopCh != nil {
+		m.stopOnce.Do(func() {
+			close(m.stopCh)
+		})
+	}
+	if m.retryDone != nil {
+		<-m.retryDone
+	}
 }
 
 func (m *MQTT) Ping() error {
@@ -244,8 +277,21 @@ func (m *MQTT) Ping() error {
 	return nil
 }
 
-func retryConnect(client mqtt.Client, config *Config, logger Logger, options *mqtt.ClientOptions) {
+func retryConnect(client mqtt.Client, config *Config, logger Logger, options *mqtt.ClientOptions, stopCh <-chan struct{}, done chan<- struct{}) {
+	if done != nil {
+		defer close(done)
+	}
+
+	timer := time.NewTimer(defaultRetryTimeout)
+	defer timer.Stop()
+
 	for {
+		select {
+		case <-stopCh:
+			return
+		case <-timer.C:
+		}
+
 		token := client.Connect()
 		if token.Wait() && token.Error() == nil {
 			logger.Infof("connected to MQTT at '%v:%v' with clientID '%v'", config.Hostname, config.Port, options.ClientID)
@@ -254,7 +300,7 @@ func retryConnect(client mqtt.Client, config *Config, logger Logger, options *mq
 		}
 
 		logger.Errorf("could not connect to MQTT at '%v:%v', error: %v", config.Hostname, config.Port, token.Error())
-		time.Sleep(defaultRetryTimeout)
+		timer.Reset(defaultRetryTimeout)
 	}
 }
 

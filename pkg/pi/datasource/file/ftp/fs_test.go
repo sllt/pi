@@ -23,6 +23,7 @@ func TestNew_EmptyHost(t *testing.T) {
 	fs := New(config)
 
 	require.NotNil(t, fs)
+	defer func() { _ = fs.(*fileSystem).Close() }()
 
 	assert.Equal(t, "ftp://unconfigured", fs.(*fileSystem).CommonFileSystem.Location)
 }
@@ -33,6 +34,7 @@ func TestNew_PortZero(t *testing.T) {
 	fs := New(config)
 
 	require.NotNil(t, fs)
+	defer func() { _ = fs.(*fileSystem).Close() }()
 	// Port 0 will default to 21 in buildLocation
 	assert.Equal(t, "localhost:21", fs.(*fileSystem).CommonFileSystem.Location)
 }
@@ -53,6 +55,7 @@ func TestNew_ConnectionFailure_StartsRetry(t *testing.T) {
 
 	fs := New(config)
 	require.NotNil(t, fs)
+	defer func() { _ = fs.(*fileSystem).Close() }()
 
 	// Inject logger and metrics (mimicking AddFileStore behavior)
 	fs.UseLogger(mockLogger)
@@ -91,6 +94,7 @@ func TestNew_Success(t *testing.T) {
 
 	fs := New(config)
 	require.NotNil(t, fs)
+	defer func() { _ = fs.(*fileSystem).Close() }()
 
 	assert.Equal(t, "localhost:2121", fs.(*fileSystem).CommonFileSystem.Location)
 
@@ -131,6 +135,7 @@ func TestNew_WithRemoteDir(t *testing.T) {
 	fs := New(config)
 
 	require.NotNil(t, fs)
+	defer func() { _ = fs.(*fileSystem).Close() }()
 
 	assert.Equal(t, "localhost:2121/uploads", fs.(*fileSystem).CommonFileSystem.Location)
 
@@ -170,6 +175,7 @@ func TestNew_WithRootRemoteDir(t *testing.T) {
 
 	fs := New(config)
 	require.NotNil(t, fs)
+	defer func() { _ = fs.(*fileSystem).Close() }()
 
 	assert.Equal(t, "localhost:2121", fs.(*fileSystem).CommonFileSystem.Location)
 
@@ -207,6 +213,7 @@ func TestNew_WithCustomDialTimeout(t *testing.T) {
 	fs := New(config)
 
 	require.NotNil(t, fs)
+	defer func() { _ = fs.(*fileSystem).Close() }()
 
 	adapter := fs.(*fileSystem).CommonFileSystem.Provider.(*storageAdapter)
 	assert.Equal(t, 3*time.Second, adapter.cfg.DialTimeout)

@@ -29,10 +29,23 @@ func NewRateLimiter(config RateLimiterConfig, h HTTP) HTTP {
 	}
 
 	// Start cleanup routine
-	ctx := context.Background()
-	rl.store.StartCleanup(ctx)
+	if rl.store != nil {
+		ctx := context.Background()
+		rl.store.StartCleanup(ctx)
+	}
 
 	return rl
+}
+
+// Close stops the rate limiter's background bucket cleanup and closes any wrapped service resources.
+func (rl *rateLimiter) Close() error {
+	if rl == nil {
+		return nil
+	}
+	if rl.store != nil {
+		rl.store.StopCleanup()
+	}
+	return CloseService(rl.HTTP)
 }
 
 // AddOption allows RateLimiterConfig to be used as a service.Options.

@@ -475,17 +475,18 @@ func TestClient_SubscribeWithHandler(t *testing.T) {
 	defer ctrl.Finish()
 
 	client, mocks := setupClientAndMocks(t, ctrl)
+	subCtx := t.Context()
 
 	var wg sync.WaitGroup
 
 	wg.Add(2) // Two handlers
 
 	t.Run("First_Subscription", func(t *testing.T) {
-		testFirstSubscription(t, client, mocks, &wg)
+		testFirstSubscription(t, subCtx, client, mocks, &wg)
 	})
 
 	t.Run("Second_Subscription", func(t *testing.T) {
-		testSecondSubscription(t, client, mocks, &wg)
+		testSecondSubscription(t, subCtx, client, mocks, &wg)
 	})
 
 	waitForHandlersToComplete(t, &wg)
@@ -541,15 +542,16 @@ func setupCommonExpectations(mocks *testMocks) {
 	mocks.connManager.EXPECT().Close(gomock.Any()).AnyTimes()
 }
 
-func testFirstSubscription(t *testing.T, client *Client, mocks *testMocks, wg *sync.WaitGroup) {
+func testFirstSubscription(t *testing.T, subCtx context.Context, client *Client, mocks *testMocks, wg *sync.WaitGroup) {
 	t.Helper()
 
-	setupFirstSubscriptionExpectations(mocks)
+	ackDone := make(chan struct{}, 1)
+	setupFirstSubscriptionExpectations(mocks, ackDone)
 
 	firstHandlerCalled := make(chan bool, 1)
 	firstHandler := createFirstHandler(t, firstHandlerCalled, wg)
 
-	err := client.SubscribeWithHandler(t.Context(), "test-subject", firstHandler)
+	err := client.SubscribeWithHandler(subCtx, "test-subject", firstHandler)
 	require.NoError(t, err)
 
 	mocks.messageChan1 <- mocks.msg1
@@ -557,17 +559,23 @@ func testFirstSubscription(t *testing.T, client *Client, mocks *testMocks, wg *s
 	close(mocks.messageChan1)
 
 	assertHandlerCalled(t, firstHandlerCalled, "First handler")
+	select {
+	case <-ackDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for first message Ack")
+	}
 }
 
-func testSecondSubscription(t *testing.T, client *Client, mocks *testMocks, wg *sync.WaitGroup) {
+func testSecondSubscription(t *testing.T, subCtx context.Context, client *Client, mocks *testMocks, wg *sync.WaitGroup) {
 	t.Helper()
 
-	setupSecondSubscriptionExpectations(mocks)
+	nakDone := make(chan struct{}, 1)
+	setupSecondSubscriptionExpectations(mocks, nakDone)
 
 	errorHandlerCalled := make(chan bool, 1)
 	errorHandler := createErrorHandler(t, errorHandlerCalled, wg)
 
-	err := client.SubscribeWithHandler(t.Context(), "test-subject", errorHandler)
+	err := client.SubscribeWithHandler(subCtx, "test-subject", errorHandler)
 	require.NoError(t, err)
 
 	mocks.messageChan2 <- mocks.msg2
@@ -575,30 +583,34 @@ func testSecondSubscription(t *testing.T, client *Client, mocks *testMocks, wg *
 	close(mocks.messageChan2)
 
 	assertHandlerCalled(t, errorHandlerCalled, "Error handler")
+	select {
+	case <-nakDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for second message Nak")
+	}
 }
 
-func setupFirstSubscriptionExpectations(mocks *testMocks) {
+func setupFirstSubscriptionExpectations(mocks *testMocks, ackDone chan<- struct{}) {
 	mocks.jetStream.EXPECT().
 		CreateOrUpdateConsumer(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(mocks.consumer1, nil).
 		Times(1)
 
-	mocks.consumer1.EXPECT().
-		Fetch(gomock.Any(), gomock.Any()).
-		Return(mocks.messageBatch1, nil).
-		Times(2)
-
 	gomock.InOrder(
-		mocks.messageBatch1.EXPECT().
-			Messages().
-			Return(mocks.messageChan1).
+		mocks.consumer1.EXPECT().
+			Fetch(gomock.Any(), gomock.Any()).
+			Return(mocks.messageBatch1, nil).
 			Times(1),
-
-		mocks.messageBatch1.EXPECT().
-			Messages().
-			Return(nil).
-			Times(1),
+		mocks.consumer1.EXPECT().
+			Fetch(gomock.Any(), gomock.Any()).
+			Return(nil, context.Canceled).
+			AnyTimes(),
 	)
+
+	mocks.messageBatch1.EXPECT().
+		Messages().
+		Return(mocks.messageChan1).
+		Times(1)
 
 	mocks.messageBatch1.EXPECT().
 		Error().
@@ -607,32 +619,34 @@ func setupFirstSubscriptionExpectations(mocks *testMocks) {
 
 	mocks.msg1.EXPECT().
 		Ack().
-		Return(nil).
+		DoAndReturn(func() error {
+			ackDone <- struct{}{}
+			return nil
+		}).
 		Times(1)
 }
 
-func setupSecondSubscriptionExpectations(mocks *testMocks) {
+func setupSecondSubscriptionExpectations(mocks *testMocks, nakDone chan<- struct{}) {
 	mocks.jetStream.EXPECT().
 		CreateOrUpdateConsumer(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(mocks.consumer2, nil).
 		Times(1)
 
-	mocks.consumer2.EXPECT().
-		Fetch(gomock.Any(), gomock.Any()).
-		Return(mocks.messageBatch2, nil).
-		Times(2)
-
 	gomock.InOrder(
-		mocks.messageBatch2.EXPECT().
-			Messages().
-			Return(mocks.messageChan2).
+		mocks.consumer2.EXPECT().
+			Fetch(gomock.Any(), gomock.Any()).
+			Return(mocks.messageBatch2, nil).
 			Times(1),
-
-		mocks.messageBatch2.EXPECT().
-			Messages().
-			Return(nil).
-			Times(1),
+		mocks.consumer2.EXPECT().
+			Fetch(gomock.Any(), gomock.Any()).
+			Return(nil, context.Canceled).
+			AnyTimes(),
 	)
+
+	mocks.messageBatch2.EXPECT().
+		Messages().
+		Return(mocks.messageChan2).
+		Times(1)
 
 	mocks.messageBatch2.EXPECT().
 		Error().
@@ -641,7 +655,10 @@ func setupSecondSubscriptionExpectations(mocks *testMocks) {
 
 	mocks.msg2.EXPECT().
 		Nak().
-		Return(nil).
+		DoAndReturn(func() error {
+			nakDone <- struct{}{}
+			return nil
+		}).
 		Times(1)
 }
 

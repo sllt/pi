@@ -30,6 +30,10 @@ func (a *App) initTracer() {
 		)),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(traceRatio))),
 	)
+	if a.container != nil {
+		a.container.TracerProvider = tp
+	}
+	a.ownedTracerShutdown = tp.Shutdown
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	otel.SetErrorHandler(&otelErrorHandler{

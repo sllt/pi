@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"sync/atomic"
 
 	gorillaWebsocket "github.com/gorilla/websocket"
 
@@ -10,11 +12,18 @@ import (
 	"github.com/sllt/pi/pkg/pi/websocket"
 )
 
+var anonWSConnSeq atomic.Uint64
+
 // WSHandlerUpgrade middleware upgrades the incoming http request to a websocket connection using websocket upgrader.
 func WSHandlerUpgrade(c *infra.Container, wsManager *websocket.Manager) func(inner http.Handler) http.Handler {
 	return func(inner http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if gorillaWebsocket.IsWebSocketUpgrade(r) {
+				if wsManager != nil && wsManager.IsAdmissionClosed() {
+					http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+					return
+				}
+
 				conn, err := wsManager.WebSocketUpgrader.Upgrade(w, r, nil)
 				if err != nil {
 					c.Errorf("Failed to upgrade to WebSocket: %v", err)
@@ -23,11 +32,21 @@ func WSHandlerUpgrade(c *infra.Container, wsManager *websocket.Manager) func(inn
 					return
 				}
 
-				// Add the connection to the hub
-				wsManager.AddWebsocketConnection(r.Header.Get("Sec-WebSocket-Key"), &websocket.Connection{Conn: conn})
+				connID := r.Header.Get("Sec-WebSocket-Key")
+				if connID == "" {
+					connID = fmt.Sprintf("ws-anon-%d", anonWSConnSeq.Add(1))
+				}
+				wsConn := &websocket.Connection{Conn: conn}
+				if policy := wsManager.HubPolicy(); policy.WriteTimeout > 0 {
+					wsConn.SetWriteTimeout(policy.WriteTimeout)
+				}
+
+				// Add the connection to the hub and ensure cleanup if downstream middlewares reject before App.WebSocket.
+				wsManager.AddWebsocketConnection(connID, wsConn)
+				defer wsManager.CloseConnectionIfMatch(connID, wsConn)
 
 				// Store the websocket connection key in the context
-				ctx := context.WithValue(r.Context(), websocket.WSConnectionKey, r.Header.Get("Sec-WebSocket-Key"))
+				ctx := context.WithValue(r.Context(), websocket.WSConnectionKey, connID)
 				r = r.WithContext(ctx)
 			}
 

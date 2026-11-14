@@ -46,13 +46,21 @@ func main() {
 				Name:  "create",
 				Usage: "Create layered architecture components",
 				Commands: []*cli.Command{
+					newCreateCommand("dto", "Create a new DTO"),
 					newCreateCommand("handler", "Create a new handler"),
+					newCreateCommand("router", "Create a new router"),
 					newCreateCommand("service", "Create a new service"),
 					newCreateCommand("repository", "Create a new repository"),
 					newCreateCommand("model", "Create a new model"),
 					{
 						Name:  "all",
-						Usage: "Create handler, service, repository, and model",
+						Usage: "Create dto, handler, router, service, repository, and model",
+						Flags: []cli.Flag{
+							&cli.BoolFlag{
+								Name:  "dry-run",
+								Usage: "Preview files to be created or preserved without writing to disk",
+							},
+						},
 						Arguments: []cli.Argument{
 							&cli.StringArg{
 								Name: "name",
@@ -63,7 +71,9 @@ func main() {
 							if name == "" {
 								return fmt.Errorf("please provide a name, e.g.: pi create all user")
 							}
-							result, err := create.All(name)
+							result, err := create.AllWithOptions(name, create.Options{
+								DryRun: cmd.Bool("dry-run"),
+							})
 							if err != nil {
 								return err
 							}
@@ -178,6 +188,12 @@ func newCreateCommand(createType, usage string) *cli.Command {
 	return &cli.Command{
 		Name:  createType,
 		Usage: usage,
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "dry-run",
+				Usage: "Preview files to be created or preserved without writing to disk",
+			},
+		},
 		Arguments: []cli.Argument{
 			&cli.StringArg{
 				Name: "name",
@@ -188,7 +204,9 @@ func newCreateCommand(createType, usage string) *cli.Command {
 			if name == "" {
 				return fmt.Errorf("please provide a name, e.g.: pi create %s user", createType)
 			}
-			result, err := create.CreateComponent(name, createType)
+			result, err := create.CreateComponentWithOptions(name, createType, create.Options{
+				DryRun: cmd.Bool("dry-run"),
+			})
 			if err != nil {
 				return err
 			}

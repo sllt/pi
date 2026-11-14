@@ -36,6 +36,12 @@ type Client struct {
 	subManager       SubscriptionManagerInterface
 	subscriptions    map[string]context.CancelFunc
 	subMutex         sync.Mutex
+	subWG            sync.WaitGroup
+	connMu           sync.RWMutex
+	retryMu          sync.Mutex
+	stopCh           chan struct{}
+	retryDone        chan struct{}
+	closed           bool
 	streamManager    StreamManagerInterface
 	Config           *Config
 	logger           pubsub.Logger
@@ -58,7 +64,7 @@ func (c *Client) Connect() error {
 	if err := c.establishConnection(); err != nil {
 		c.logger.Errorf("failed to connect to NATS server at %v: %v", c.Config.Server, err)
 
-		go c.retryConnect()
+		c.startRetryConnect()
 
 		return err
 	}
@@ -93,26 +99,53 @@ func (c *Client) Publish(ctx context.Context, subject string, message []byte) er
 		return err
 	}
 
-	return c.connManager.Publish(ctx, subject, message, c.metrics)
+	c.connMu.RLock()
+	connMgr := c.connManager
+	c.connMu.RUnlock()
+
+	if connMgr == nil {
+		return errClientNotConnected
+	}
+
+	return connMgr.Publish(ctx, subject, message, c.metrics)
 }
 
 // Subscribe subscribes to a topic and returns a single message.
 func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, error) {
+	stopCh := c.ensureStopCh()
+
 	for {
 		if err := checkClient(c); err != nil {
-			time.Sleep(defaultRetryTimeout)
+			c.waitRetryOrCancel(ctx, stopCh)
 
 			return nil, errClientNotConnected
 		}
 
-		js, err := c.connManager.jetStream()
+		c.connMu.RLock()
+		connMgr := c.connManager
+		subMgr := c.subManager
+		c.connMu.RUnlock()
+
+		if connMgr == nil || subMgr == nil {
+			c.waitRetryOrCancel(ctx, stopCh)
+
+			return nil, errClientNotConnected
+		}
+
+		js, err := connMgr.jetStream()
 		if err == nil {
-			return c.subManager.Subscribe(ctx, topic, js, c.Config, c.logger, c.metrics)
+			return subMgr.Subscribe(ctx, topic, js, c.Config, c.logger, c.metrics)
 		}
 
 		c.logger.Debugf("Waiting for NATS connection to be established for topic %s", topic)
 
-		time.Sleep(defaultRetryTimeout)
+		if !c.waitRetryOrCancel(ctx, stopCh) {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+
+			return nil, errClientNotConnected
+		}
 	}
 }
 
@@ -123,7 +156,15 @@ func (c *Client) SubscribeWithHandler(ctx context.Context, subject string, handl
 	// Cancel any existing subscription for this subject
 	c.cancelExistingSubscription(subject)
 
-	js, err := c.connManager.jetStream()
+	c.connMu.RLock()
+	connMgr := c.connManager
+	c.connMu.RUnlock()
+
+	if connMgr == nil {
+		return errClientNotConnected
+	}
+
+	js, err := connMgr.jetStream()
 	if err != nil {
 		return err
 	}
@@ -135,11 +176,17 @@ func (c *Client) SubscribeWithHandler(ctx context.Context, subject string, handl
 		return err
 	}
 
+	if c.subscriptions == nil {
+		c.subscriptions = make(map[string]context.CancelFunc)
+	}
+
 	// Create a new context for this subscription
 	subCtx, cancel := context.WithCancel(ctx)
 	c.subscriptions[subject] = cancel
 
+	c.subWG.Add(1)
 	go func() {
+		defer c.subWG.Done()
 		defer cancel() // Ensure the cancellation is handled properly
 
 		c.processMessages(subCtx, cons, subject, handler)
@@ -155,12 +202,43 @@ func (c *Client) cancelExistingSubscription(subject string) {
 	}
 }
 
-// Close closes the Client.
+// Close closes the Client, stopping any background reconnect loops and active subscriptions.
 func (c *Client) Close(ctx context.Context) error {
-	c.subManager.Close()
+	c.retryMu.Lock()
+	if !c.closed {
+		c.closed = true
+		if c.stopCh == nil {
+			c.stopCh = make(chan struct{})
+		}
+		close(c.stopCh)
+	}
+	done := c.retryDone
+	c.retryMu.Unlock()
 
-	if c.connManager != nil {
-		c.connManager.Close(ctx)
+	if done != nil {
+		<-done
+	}
+
+	c.subMutex.Lock()
+	for subject, cancel := range c.subscriptions {
+		cancel()
+		delete(c.subscriptions, subject)
+	}
+	c.subMutex.Unlock()
+
+	c.subWG.Wait()
+
+	c.connMu.RLock()
+	subMgr := c.subManager
+	connMgr := c.connManager
+	c.connMu.RUnlock()
+
+	if subMgr != nil {
+		subMgr.Close()
+	}
+
+	if connMgr != nil {
+		connMgr.Close(ctx)
 	}
 
 	return nil
@@ -183,7 +261,15 @@ func (c *Client) Query(ctx context.Context, query string, args ...any) ([]byte, 
 	queryCtx, cancel := createQueryContext(ctx, timeout)
 	defer cancel()
 
-	js, err := c.connManager.jetStream()
+	c.connMu.RLock()
+	connMgr := c.connManager
+	c.connMu.RUnlock()
+
+	if connMgr == nil {
+		return nil, errClientNotConnected
+	}
+
+	js, err := connMgr.jetStream()
 	if err != nil {
 		return nil, err
 	}
@@ -208,9 +294,17 @@ func (c *Client) CreateTopic(ctx context.Context, name string) error {
 		return err
 	}
 
+	c.connMu.RLock()
+	streamMgr := c.streamManager
+	c.connMu.RUnlock()
+
+	if streamMgr == nil {
+		return errClientNotConnected
+	}
+
 	// For migrations stream, use special configuration with max bytes
 	if name == piNatsStreamName {
-		return c.streamManager.CreateStream(ctx, &StreamConfig{
+		return streamMgr.CreateStream(ctx, &StreamConfig{
 			Stream:    name,
 			Subjects:  []string{name},
 			MaxBytes:  defaultMaxBytes,
@@ -220,7 +314,7 @@ func (c *Client) CreateTopic(ctx context.Context, name string) error {
 		})
 	}
 
-	return c.streamManager.CreateStream(ctx, &StreamConfig{
+	return streamMgr.CreateStream(ctx, &StreamConfig{
 		Stream:   name,
 		Subjects: []string{name},
 	})
@@ -232,7 +326,15 @@ func (c *Client) DeleteTopic(ctx context.Context, name string) error {
 		return err
 	}
 
-	return c.streamManager.DeleteStream(ctx, name)
+	c.connMu.RLock()
+	streamMgr := c.streamManager
+	c.connMu.RUnlock()
+
+	if streamMgr == nil {
+		return errClientNotConnected
+	}
+
+	return streamMgr.DeleteStream(ctx, name)
 }
 
 // CreateStream creates a new stream in NATS jStream.
@@ -241,7 +343,15 @@ func (c *Client) CreateStream(ctx context.Context, cfg *StreamConfig) error {
 		return err
 	}
 
-	return c.streamManager.CreateStream(ctx, cfg)
+	c.connMu.RLock()
+	streamMgr := c.streamManager
+	c.connMu.RUnlock()
+
+	if streamMgr == nil {
+		return errClientNotConnected
+	}
+
+	return streamMgr.CreateStream(ctx, cfg)
 }
 
 // DeleteStream deletes a stream in NATS jStream.
@@ -250,7 +360,15 @@ func (c *Client) DeleteStream(ctx context.Context, name string) error {
 		return err
 	}
 
-	return c.streamManager.DeleteStream(ctx, name)
+	c.connMu.RLock()
+	streamMgr := c.streamManager
+	c.connMu.RUnlock()
+
+	if streamMgr == nil {
+		return errClientNotConnected
+	}
+
+	return streamMgr.DeleteStream(ctx, name)
 }
 
 // CreateOrUpdateStream creates or updates a stream in NATS jStream.
@@ -259,7 +377,15 @@ func (c *Client) CreateOrUpdateStream(ctx context.Context, cfg *jetstream.Stream
 		return nil, err
 	}
 
-	return c.streamManager.CreateOrUpdateStream(ctx, cfg)
+	c.connMu.RLock()
+	streamMgr := c.streamManager
+	c.connMu.RUnlock()
+
+	if streamMgr == nil {
+		return nil, errClientNotConnected
+	}
+
+	return streamMgr.CreateOrUpdateStream(ctx, cfg)
 }
 
 // GetJetStreamStatus returns the status of the jStream connection.

@@ -8,6 +8,7 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sllt/pi/pkg/pi/datasource"
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
@@ -45,6 +46,42 @@ type MQTT struct {
 	config        *Config
 	subscriptions map[string]subscription
 	mu            *sync.RWMutex
+	stopCh        chan struct{}
+	stopOnce      sync.Once
+	retryDone     chan struct{}
+	tracer        trace.Tracer
+}
+
+func (m *MQTT) UseTracer(tracer any) {
+	if m == nil {
+		return
+	}
+	if t, ok := tracer.(trace.Tracer); ok && t != nil {
+		if m.mu != nil {
+			m.mu.Lock()
+			m.tracer = t
+			m.mu.Unlock()
+		} else {
+			m.tracer = t
+		}
+	}
+}
+
+func (m *MQTT) getTracer() trace.Tracer {
+	if m != nil {
+		var t trace.Tracer
+		if m.mu != nil {
+			m.mu.RLock()
+			t = m.tracer
+			m.mu.RUnlock()
+		} else {
+			t = m.tracer
+		}
+		if t != nil {
+			return t
+		}
+	}
+	return otel.GetTracerProvider().Tracer("pi")
 }
 
 type Config struct {
@@ -85,22 +122,40 @@ func New(config *Config, logger Logger, metrics Metrics) *MQTT {
 	// create the client using the options above
 	client := mqtt.NewClient(options)
 
+	stopCh := make(chan struct{})
+	var retryDone chan struct{}
+
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		logger.Errorf("could not connect to MQTT at '%v:%v', error: %v", config.Hostname, config.Port, token.Error())
 
-		go retryConnect(client, config, logger, options)
+		retryDone = make(chan struct{})
+		go retryConnect(client, config, logger, options, stopCh, retryDone)
 	} else {
 		logger.Infof("connected to MQTT at '%v:%v' with clientID '%v'", config.Hostname, config.Port, options.ClientID)
 	}
 
-	return &MQTT{Client: client, config: config, logger: logger, subscriptions: subs, mu: mu, metrics: metrics}
+	return &MQTT{
+		Client:        client,
+		config:        config,
+		logger:        logger,
+		subscriptions: subs,
+		mu:            mu,
+		metrics:       metrics,
+		stopCh:        stopCh,
+		retryDone:     retryDone,
+	}
 }
 
 func (m *MQTT) Subscribe(ctx context.Context, topic string) (*pubsub.Message, error) {
 	if !m.Client.IsConnected() {
-		time.Sleep(defaultRetryTimeout)
-
-		return nil, errClientNotConnected
+		timer := time.NewTimer(defaultRetryTimeout)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, errors.Join(errClientNotConnected, ctx.Err())
+		case <-timer.C:
+			return nil, errClientNotConnected
+		}
 	}
 
 	m.mu.Lock()
@@ -177,7 +232,7 @@ func (m *MQTT) Query(ctx context.Context, query string, args ...any) ([]byte, er
 }
 
 func (m *MQTT) Publish(ctx context.Context, topic string, message []byte) error {
-	_, span := otel.GetTracerProvider().Tracer("pi").Start(ctx, "mqtt-publish")
+	_, span := m.getTracer().Start(ctx, "mqtt-publish")
 	defer span.End()
 
 	m.metrics.IncrementCounter(ctx, "app_pubsub_publish_total_count", "topic", topic)
@@ -255,6 +310,16 @@ func (m *MQTT) CreateTopic(_ context.Context, topic string) error {
 // Note: there is no concept of deletion.
 func (*MQTT) DeleteTopic(_ context.Context, _ string) error {
 	return nil
+}
+
+func (*MQTT) AckSemantics() pubsub.AckSemantics {
+	return pubsub.AckSemantics{
+		Mode: AckModeAutoFallback(),
+	}
+}
+
+func AckModeAutoFallback() pubsub.AckMode {
+	return pubsub.AckModeAuto
 }
 
 // Extended Functionalities for MQTT

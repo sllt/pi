@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/sllt/pi/pkg/pi/infra"
@@ -14,9 +15,10 @@ import (
 
 type metricServer struct {
 	listenerState
-	port    int
-	srv     *http.Server
-	handler http.Handler
+	port     int
+	srv      *http.Server
+	listener atomic.Pointer[idempotentListener]
+	handler  http.Handler
 }
 
 func newMetricServer(port int) *metricServer {
@@ -49,10 +51,12 @@ func (m *metricServer) start(c *infra.Container, onError func(error)) error {
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 
-		listener, err := net.Listen("tcp", addr)
+		rawListener, err := net.Listen("tcp", addr)
 		if err != nil {
 			return fmt.Errorf("failed to listen on metrics address %s: %w", addr, err)
 		}
+		listener := &idempotentListener{Listener: rawListener}
+		m.listener.Store(listener)
 		m.boundTo(listener.Addr())
 		c.Infof("Metrics server listening on %s", listener.Addr())
 
@@ -71,7 +75,11 @@ func (m *metricServer) Shutdown(ctx context.Context) error {
 		return nil
 	}
 
-	return ShutdownWithContext(ctx, func(ctx context.Context) error {
+	err := ShutdownWithContext(ctx, func(ctx context.Context) error {
 		return m.srv.Shutdown(ctx)
 	}, m.srv.Close)
+	if l := m.listener.Load(); l != nil {
+		_ = l.Close()
+	}
+	return err
 }

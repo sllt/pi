@@ -32,6 +32,22 @@ func (m *Message) Context() context.Context {
 	return m.ctx
 }
 
+// WithContext returns a shallow copy of Message bound to ctx with an owned copy of Value.
+func (m *Message) WithContext(ctx context.Context) *Message {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cp := *m
+	cp.ctx = ctx
+	if m.Value != nil {
+		cp.Value = append([]byte(nil), m.Value...)
+	}
+	return &cp
+}
+
 func (m *Message) Param(p string) string {
 	if p == "topic" {
 		return m.Topic

@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -37,6 +38,10 @@ func (k *kafkaClient) initialize(ctx context.Context) error {
 
 	k.logger.Logf("connected to %d Kafka brokers", len(conns))
 
+	if k.mu != nil {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+	}
 	k.dialer = dialer
 	k.conn = multi
 	k.writer = writer
@@ -52,6 +57,7 @@ func (k *kafkaClient) getNewReader(topic string) Reader {
 		Topic:       topic,
 		MinBytes:    defaultMinBytes,
 		MaxBytes:    defaultMaxBytes,
+		MaxWait:     time.Second,
 		Dialer:      k.dialer,
 		StartOffset: int64(k.config.OffSet),
 	})
@@ -80,6 +86,9 @@ type multiConn struct {
 }
 
 func (m *multiConn) Controller() (kafka.Broker, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	if len(m.conns) == 0 {
 		return kafka.Broker{}, errNoActiveConnections
 	}
@@ -113,8 +122,6 @@ func (m *multiConn) CreateTopics(topics ...kafka.TopicConfig) error {
 	}
 
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	for _, conn := range m.conns {
 		if conn == nil {
 			continue
@@ -122,10 +129,12 @@ func (m *multiConn) CreateTopics(topics ...kafka.TopicConfig) error {
 
 		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
 			if tcpAddr.IP.Equal(controllerResolvedAddr.IP) && tcpAddr.Port == controllerResolvedAddr.Port {
+				m.mu.RUnlock()
 				return conn.CreateTopics(topics...)
 			}
 		}
 	}
+	m.mu.RUnlock()
 
 	// If not found, create a new connection
 	conn, err := m.dialer.DialContext(context.Background(), "tcp", controllerAddr)
@@ -133,7 +142,9 @@ func (m *multiConn) CreateTopics(topics ...kafka.TopicConfig) error {
 		return err
 	}
 
+	m.mu.Lock()
 	m.conns = append(m.conns, conn)
+	m.mu.Unlock()
 
 	return conn.CreateTopics(topics...)
 }
@@ -151,6 +162,7 @@ func (m *multiConn) DeleteTopics(topics ...string) error {
 		return err
 	}
 
+	m.mu.RLock()
 	for _, conn := range m.conns {
 		if conn == nil {
 			continue
@@ -159,10 +171,12 @@ func (m *multiConn) DeleteTopics(topics ...string) error {
 		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
 			// Match IP (after resolution) and Port
 			if tcpAddr.IP.Equal(controllerResolvedAddr.IP) && tcpAddr.Port == controllerResolvedAddr.Port {
+				m.mu.RUnlock()
 				return conn.DeleteTopics(topics...)
 			}
 		}
 	}
+	m.mu.RUnlock()
 
 	// If not found, create a new connection
 	conn, err := m.dialer.DialContext(context.Background(), "tcp", controllerAddr)
@@ -170,7 +184,9 @@ func (m *multiConn) DeleteTopics(topics ...string) error {
 		return err
 	}
 
+	m.mu.Lock()
 	m.conns = append(m.conns, conn)
+	m.mu.Unlock()
 
 	return conn.DeleteTopics(topics...)
 }
@@ -178,7 +194,11 @@ func (m *multiConn) DeleteTopics(topics ...string) error {
 func (m *multiConn) Close() error {
 	var err error
 
-	for _, conn := range m.conns {
+	m.mu.Lock()
+	conns := append([]Connection(nil), m.conns...)
+	m.mu.Unlock()
+
+	for _, conn := range conns {
 		if conn != nil {
 			err = errors.Join(err, conn.Close())
 		}

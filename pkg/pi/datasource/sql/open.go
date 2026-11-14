@@ -11,7 +11,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/XSAM/otelsql"
 	"github.com/go-sql-driver/mysql"
+	metricNoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sllt/pi/pkg/pi/config"
 	"github.com/sllt/pi/pkg/pi/datasource"
@@ -22,6 +25,19 @@ import (
 // bounded commands such as migrations; NewSQL retains its existing behavior.
 // logger must be non-nil. No telemetry provider is installed by this function.
 func OpenContext(ctx context.Context, configs config.Config, logger datasource.Logger, metrics Metrics) (*DB, error) {
+	return OpenContextWithTracerProvider(ctx, configs, logger, metrics, nil)
+}
+
+// OpenContextWithTracerProvider opens and verifies a SQL connection like OpenContext,
+// instrumenting queries with the supplied TracerProvider when non-nil without mutating
+// global sql drivers or global OpenTelemetry providers.
+func OpenContextWithTracerProvider(
+	ctx context.Context,
+	configs config.Config,
+	logger datasource.Logger,
+	metrics Metrics,
+	tracerProvider trace.TracerProvider,
+) (*DB, error) {
 	if configs == nil || logger == nil {
 		return nil, fmt.Errorf("sql: config and logger are required")
 	}
@@ -47,14 +63,29 @@ func OpenContext(ctx context.Context, configs config.Config, logger datasource.L
 		driver = dialectPostgres
 	}
 	var db *sql.DB
+	var otelOpts []otelsql.Option
+	if tracerProvider != nil {
+		otelOpts = []otelsql.Option{
+			otelsql.WithTracerProvider(tracerProvider),
+			otelsql.WithMeterProvider(metricNoop.NewMeterProvider()),
+		}
+	}
 	if driver == dialectMysql {
 		var connector sqldriver.Connector
 		connector, err = snapshotMySQLConnector(cfg, configs)
 		if err == nil {
-			db = sql.OpenDB(connector)
+			if tracerProvider != nil {
+				db = otelsql.OpenDB(connector, otelOpts...)
+			} else {
+				db = sql.OpenDB(connector)
+			}
 		}
 	} else {
-		db, err = sql.Open(driver, dsn)
+		if tracerProvider != nil {
+			db, err = otelsql.Open(driver, dsn, otelOpts...)
+		} else {
+			db, err = sql.Open(driver, dsn)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sql: open: %w", err)

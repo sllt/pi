@@ -100,6 +100,30 @@ func TestCron_parseSchedule_Success(t *testing.T) {
 				dayOfWeek: map[int]struct{}{4: {}},
 			},
 		},
+		{
+			desc:     "start/step syntax with seconds (used by pi-layout)",
+			schedule: "0/3 * * * * *",
+			expJob: &job{
+				sec:       getDefaultJobField(0, 59, 3),
+				min:       getDefaultJobField(0, 59, 1),
+				hour:      getDefaultJobField(0, 23, 1),
+				day:       getDefaultJobField(1, 31, 1),
+				month:     getDefaultJobField(1, 12, 1),
+				dayOfWeek: getDefaultJobField(0, 6, 1),
+			},
+		},
+		{
+			desc:     "non-zero start/step syntax",
+			schedule: "5/15 * * * * *",
+			expJob: &job{
+				sec:       getDefaultJobField(5, 59, 15),
+				min:       getDefaultJobField(0, 59, 1),
+				hour:      getDefaultJobField(0, 23, 1),
+				day:       getDefaultJobField(1, 31, 1),
+				month:     getDefaultJobField(1, 12, 1),
+				dayOfWeek: getDefaultJobField(0, 6, 1),
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -143,6 +167,11 @@ func TestCron_parseSchedule_Error(t *testing.T) {
 				"* 1,2/10 * * *",
 				"* * 1,2,3,1-15/10 * *",
 				"a b c d e",
+				"*/0 * * * *",
+				"0/0 * * * * *",
+				"/5 * * * *",
+				"10-2 * * * *",
+				"10-2/2 * * * *",
 			},
 			expErrString: "unable to parse",
 		},

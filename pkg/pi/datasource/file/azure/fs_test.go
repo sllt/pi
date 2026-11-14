@@ -75,6 +75,7 @@ func TestNew_ConnectionFailure_StartsRetry(t *testing.T) {
 
 	fs, err := New(config)
 	require.NoError(t, err)
+	defer func() { _ = fs.(*azureFileSystem).Close() }()
 	require.NotNil(t, fs)
 
 	// Set logger and metrics via UseLogger/UseMetrics
@@ -131,6 +132,7 @@ func TestAzureFileSystem_Connect_AlreadyConnected(t *testing.T) {
 
 	fs, err := New(config)
 	require.NoError(t, err)
+	defer func() { _ = fs.(*azureFileSystem).Close() }()
 
 	// Set logger and metrics via UseLogger/UseMetrics
 	fs.UseLogger(mockLogger)
@@ -171,6 +173,7 @@ func TestAzureFileSystem_Connect_NotConnected(t *testing.T) {
 
 	fs, err := New(config)
 	require.NoError(t, err)
+	defer func() { _ = fs.(*azureFileSystem).Close() }()
 
 	// Set logger and metrics via UseLogger/UseMetrics
 	fs.UseLogger(mockLogger)
@@ -215,6 +218,7 @@ func TestAzureFileSystem_startRetryConnect(t *testing.T) {
 
 	fs, err := New(config)
 	require.NoError(t, err)
+	defer func() { _ = fs.(*azureFileSystem).Close() }()
 
 	// Set logger and metrics via UseLogger/UseMetrics
 	fs.UseLogger(mockLogger)
@@ -252,6 +256,7 @@ func TestAzureFileSystem_startRetryConnect_RetryDisabled(t *testing.T) {
 
 	fs, err := New(config)
 	require.NoError(t, err)
+	defer func() { _ = fs.(*azureFileSystem).Close() }()
 
 	// Set logger and metrics via UseLogger/UseMetrics
 	fs.UseLogger(mockLogger)
@@ -405,11 +410,8 @@ func TestAzureFileSystem_Connect_NotConnected_WithLogger(t *testing.T) {
 	// Give goroutine time to start
 	time.Sleep(100 * time.Millisecond)
 
-	// Disable retry to stop the goroutine
-	fs.CommonFileSystem.SetDisableRetry(true)
-
-	// Give goroutine time to check the flag and exit
-	time.Sleep(100 * time.Millisecond)
+	// Stop the retry goroutine cleanly before gomock controller finishes
+	_ = fs.Close()
 }
 
 func TestAzureFileSystem_logRetryStart_WithLogger(t *testing.T) {
@@ -731,17 +733,18 @@ func TestAzureFileSystem_startRetryConnect_ExitsOnConnection(t *testing.T) {
 		"testshare",
 	).AnyTimes()
 
-	// Start retry in background
-	go fs.startRetryConnect()
+	retryExited := make(chan struct{})
+	go func() {
+		defer close(retryExited)
+		fs.startRetryConnect()
+	}()
 
 	// Wait a bit for retry to start
 	time.Sleep(100 * time.Millisecond)
 
-	// Disable retry to stop the goroutine
-	fs.CommonFileSystem.SetDisableRetry(true)
-
-	// Give it time to exit
-	time.Sleep(50 * time.Millisecond)
+	// Stop the retry goroutine cleanly
+	_ = fs.Close()
+	<-retryExited
 }
 
 func TestAzureFileSystem_startRetryConnect_ExitsOnDisable(t *testing.T) {
@@ -772,15 +775,17 @@ func TestAzureFileSystem_startRetryConnect_ExitsOnDisable(t *testing.T) {
 		"testshare",
 	).MaxTimes(1)
 
-	// Start retry in background
-	go fs.startRetryConnect()
+	retryExited := make(chan struct{})
+	go func() {
+		defer close(retryExited)
+		fs.startRetryConnect()
+	}()
 
 	// Wait a bit for retry to start
 	time.Sleep(50 * time.Millisecond)
 
-	// Disable retry - should cause exit
+	// Disable retry and close stopCh so retry loop exits deterministically
 	fs.CommonFileSystem.SetDisableRetry(true)
-
-	// Give it time to check and exit
-	time.Sleep(100 * time.Millisecond)
+	_ = fs.Close()
+	<-retryExited
 }

@@ -78,6 +78,8 @@ func TestGoogleClient_New_EmptyClient(t *testing.T) {
 	config := Config{ProjectID: "test", SubscriptionName: "test"}
 
 	client := New(config, logger, mockMetrics)
+	require.NotNil(t, client)
+	t.Cleanup(func() { _ = client.Close() })
 
 	require.Nil(t, client.client, "TestGoogleClient_New_EmptyClient Failed!")
 
@@ -1391,6 +1393,8 @@ func TestNew_WithRetryConnect(t *testing.T) {
 	config := Config{ProjectID: "invalid-project-for-retry", SubscriptionName: "test"}
 
 	client := New(config, logger, mockMetrics)
+	require.NotNil(t, client)
+	t.Cleanup(func() { _ = client.Close() })
 
 	// Should return a client even if connection fails
 	assert.NotNil(t, client)

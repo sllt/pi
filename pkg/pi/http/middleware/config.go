@@ -54,7 +54,12 @@ func GetConfigs(c config.Config) Config {
 
 	// Config values for Log Probes
 	logDisableProbes := c.GetOrDefault("LOG_DISABLE_PROBES", "false")
-	middlewareConfigs.LogProbes.Paths = []string{service.HealthPath, service.AlivePath}
+	middlewareConfigs.LogProbes.Paths = []string{
+		service.HealthPath,
+		service.AlivePath,
+		service.ReadyPath,
+		service.StartupPath,
+	}
 
 	// Convert the string value to a boolean
 	value, err := strconv.ParseBool(logDisableProbes)

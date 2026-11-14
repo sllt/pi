@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 type MockLogger struct {
+	mu     sync.RWMutex
 	level  Level
 	out    io.Writer
 	errOut io.Writer
@@ -21,13 +23,18 @@ func NewMockLogger(level Level) Logger {
 }
 
 func (m *MockLogger) logf(level Level, format string, args ...any) {
-	if level < m.level {
+	m.mu.RLock()
+	currLevel := m.level
+	out := m.out
+	errOut := m.errOut
+	m.mu.RUnlock()
+
+	if level < currLevel {
 		return
 	}
 
-	out := m.out
 	if level == ERROR {
-		out = m.errOut
+		out = errOut
 	}
 
 	var message any
@@ -41,7 +48,9 @@ func (m *MockLogger) logf(level Level, format string, args ...any) {
 		message = fmt.Sprintf(format, args...)
 	}
 
+	m.mu.Lock()
 	fmt.Fprintf(out, "%v\n", message)
+	m.mu.Unlock()
 }
 
 func (m *MockLogger) Debug(args ...any) {
@@ -101,5 +110,7 @@ func (m *MockLogger) Logf(format string, args ...any) {
 }
 
 func (m *MockLogger) ChangeLevel(level Level) {
+	m.mu.Lock()
 	m.level = level
+	m.mu.Unlock()
 }

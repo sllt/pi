@@ -12,6 +12,7 @@ var (
 	matchSpaces = regexp.MustCompile(`\s+`)
 	matchN      = regexp.MustCompile(`(.*)/(\d+)`)
 	matchRange  = regexp.MustCompile(`^(\d+)-(\d+)$`)
+	matchSingle = regexp.MustCompile(`^\d+$`)
 )
 
 // parseSchedule parses schedule string and create job struct with filled times to launch,
@@ -97,24 +98,48 @@ func parsePart(s string, minValue, maxValue int) (map[int]struct{}, error) {
 }
 
 func parseSteps(s, match1, match2 string, minValue, maxValue int) (map[int]struct{}, error) {
+	if match1 == "" {
+		return nil, errParsing{match1, s}
+	}
+
+	n, err := strconv.Atoi(match2)
+	if err != nil || n <= 0 {
+		return nil, errParsing{match2, s}
+	}
+
 	localMin := minValue
 	localMax := maxValue
 
-	if match1 != "" && match1 != "*" {
-		rng := matchRange.FindStringSubmatch(match1)
-		if rng == nil {
+	if match1 != "*" {
+		switch {
+		case matchRange.MatchString(match1):
+			rng := matchRange.FindStringSubmatch(match1)
+			var err1, err2 error
+			localMin, err1 = strconv.Atoi(rng[1])
+			localMax, err2 = strconv.Atoi(rng[2])
+			if err1 != nil || err2 != nil {
+				return nil, errParsing{match1, s}
+			}
+			if localMin < minValue || localMax > maxValue {
+				return nil, errOutOfRange{rng[1], s, minValue, maxValue}
+			}
+			if localMin > localMax {
+				return nil, errParsing{match1, s}
+			}
+		case matchSingle.MatchString(match1):
+			start, convErr := strconv.Atoi(match1)
+			if convErr != nil {
+				return nil, errParsing{match1, s}
+			}
+			if start < minValue || start > maxValue {
+				return nil, errOutOfRange{match1, s, minValue, maxValue}
+			}
+			localMin = start
+			localMax = maxValue
+		default:
 			return nil, errParsing{match1, s}
 		}
-
-		localMin, _ = strconv.Atoi(rng[1])
-		localMax, _ = strconv.Atoi(rng[2])
-
-		if localMin < minValue || localMax > maxValue {
-			return nil, errOutOfRange{rng[1], s, minValue, maxValue}
-		}
 	}
-
-	n, _ := strconv.Atoi(match2)
 
 	return getDefaultJobField(localMin, localMax, n), nil
 }
@@ -138,11 +163,17 @@ func parseRange(s string, minValue, maxValue int) (map[int]struct{}, error) {
 
 func parseSingleOrRange(part string, minValue, maxValue int, r map[int]struct{}) error {
 	if rng := matchRange.FindStringSubmatch(part); rng != nil {
-		localMin, _ := strconv.Atoi(rng[1])
-		localMax, _ := strconv.Atoi(rng[2])
+		localMin, err1 := strconv.Atoi(rng[1])
+		localMax, err2 := strconv.Atoi(rng[2])
+		if err1 != nil || err2 != nil {
+			return errParsing{part, part}
+		}
 
 		if localMin < minValue || localMax > maxValue {
 			return errOutOfRange{part, part, minValue, maxValue}
+		}
+		if localMin > localMax {
+			return errParsing{part, part}
 		}
 
 		for i := localMin; i <= localMax; i++ {

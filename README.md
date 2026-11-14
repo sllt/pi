@@ -1,5 +1,12 @@
 # Pi
 
+### 受监督运行时与类型化 HTTP / OpenAPI（v0.5.0）
+
+- **Tao Actor 受监督运行时**：内置基于 `github.com/sllt/tao/actor` 的隔离监督树，统一托管后台 Worker（`GoSupervised` / `WithRestartPolicy`）、Cron 调度（`CronSkipIfRunning` / `CronDelayIfRunning` 重入保护与优雅停机排空）、PubSub Subscriber（有界退避重连与 Ack/Nack 能力探针）及服务端/客户端 WebSocket 连接生命周期。
+- **探针与可观测性对齐**：新增 `/livez` 与 `/readyz` 健康探针（聚合受管资源与监督组件就绪态），并将 `WithMetrics` / `WithTracing` / `WithRemoteLogURL` 纳入 `Build` 显式生命周期管理，停止时按序排空并关闭导出器。
+- **泛型类型化路由与编译期/装配期预检**：提供 `pi.Handle`、`pi.GET` / `pi.POST` / `pi.PUT` / `pi.PATCH` / `pi.DELETE` 与 `RouteGroup` 泛型注册能力，请求结构体统一支持 `path` / `query` / `header` / `json` 绑定与 `validate` 校验。非法绑定标签、冲突参数、非法校验常量与不兼容的分组挂载在注册期立即记录并由 `app.RouteError()` / `Start` 拒绝，避免运行期 404 或 500。
+- **零外部工具 OpenAPI 3.0.3 与离线 Scalar UI**：无需 `swag` 注释生成，直接从已注册类型化路由导出或在线服务 OpenAPI 3.0.3（`app.OpenAPISpec` / `OpenAPIJSON` / `OpenAPIYAML`，在线端点 `/.well-known/openapi.json`、`/.well-known/openapi.yaml`），并内置零 CDN 依赖、预压缩的离线 Scalar API Reference 页面（默认 `/.well-known/swagger`）。
+
 ### 业务契约（v0.4.1）
 
 - `apperror.New(kind, code, publicMessage)` 定义业务错误，`WithCause` 保留内部错误链，`WithDetails` 只携带公开的字段/规则；未知错误统一脱敏。HTTP、`grpc.MapError`、`cmd.MapError` 分别映射协议状态和退出码，取消优先于其他错误，HTTP 兼容旧 Code/StatusCode 接口。
@@ -45,7 +52,7 @@ Owned 按登记顺序启动、逆序关闭，失败的 Start 也执行 Stop；Bo
 
 ### Reproducible projects (v0.3.2)
 
-Install a specific CLI (`go install github.com/sllt/pi/cmd/pi@v0.4.1`), then run
+Install a specific CLI (`go install github.com/sllt/pi/cmd/pi@v0.5.0`), then run
 `pi init --module example.com/company/orders ./orders`. The default template ref
 matches the CLI version. `--ref` selects another tag/commit explicitly. Generated
 `.pi-template.json` records the CLI, framework, template ref/commit and verification
@@ -65,7 +72,7 @@ module builds are separate from the root module and do not certify backend behav
 
 一个为微服务开发而设计的 Go 语言框架。
 
-项目已由 Kite 更名为 Pi，CLI 命令为 `pi`，脚手架为 [pi-layout](https://github.com/sllt/pi-layout)。新 module 从 v0.2.4 开始发布；v0.3.0 提供 Migration v2，见[发布说明](docs/releases/v0.3.0.zh-CN.md)和[迁移兼容性](docs/design/migration-v2.zh-CN.md)。历史 `v0.2.3` 仍使用旧路径。
+项目已由 Kite 更名为 Pi，CLI 命令为 `pi`，脚手架为 [pi-layout](https://github.com/sllt/pi-layout)。新 module 从 v0.2.4 开始发布；v0.3.0 提供 Migration v2。历史 `v0.2.3` 仍使用旧路径。
 
 ## 核心特性
 
@@ -91,7 +98,7 @@ module builds are separate from the root module and do not certify backend behav
 - **数据库迁移** - 内置迁移管理工具
 - **定时任务** - Cron 任务调度支持
 - **动态日志级别** - 无需重启即可更改日志级别
-- **Swagger 文档** - 自动生成和渲染 API 文档
+- **OpenAPI 与 Scalar 文档** - 自动从类型化路由生成 OpenAPI 3.0.3 规范并内置离线 Scalar UI
 - **文件系统抽象** - 统一的文件操作接口
 - **WebSocket** - 原生 WebSocket 支持
 

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
@@ -18,17 +18,22 @@ func TestMain(m *testing.M) {
 func Test_UserPurgeCron(t *testing.T) {
 	configs := testutil.NewServerConfigs(t)
 
-	go main()
-	time.Sleep(1100 * time.Millisecond)
-
-	expected := 1
-
-	var m int
-
 	mu.Lock()
-	m = n
+	n = 0
 	mu.Unlock()
 
-	assert.Equal(t, expected, m)
-	t.Logf("Metrics server running at: %s", configs.MetricsHost)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		main()
+	}()
+
+	require.Eventually(t, func() bool {
+		mu.RLock()
+		defer mu.RUnlock()
+		return n >= 1
+	}, 2200*time.Millisecond, 25*time.Millisecond)
+
+	<-done
+	t.Logf("Metrics server ran at: %s", configs.MetricsHost)
 }

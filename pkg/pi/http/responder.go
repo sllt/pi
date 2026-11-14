@@ -176,6 +176,11 @@ func (r Responder) handleSpecialResponseTypes(data any, err error) bool {
 		_ = v.Run(ctx, r.w)
 		return true
 	case resTypes.File:
+		for k, val := range v.Headers {
+			if k != "" && val != "" {
+				r.w.Header().Set(k, val)
+			}
+		}
 		r.w.Header().Set("Content-Type", v.ContentType)
 		r.w.WriteHeader(statusCode)
 		_, _ = r.w.Write(v.Content)

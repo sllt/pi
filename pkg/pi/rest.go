@@ -31,17 +31,45 @@ func (a *App) PATCH(pattern string, handler Handler) {
 }
 
 func (a *App) add(method, pattern string, h Handler) {
-	if !a.canMutateRoutes("register routes") {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		return
+	}
+	reg := a.httpServer.registry
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	if !a.canMutateRoutesLocked("register routes") {
 		return
 	}
 
 	a.ensureHTTPAvailable()
 
-	a.httpServer.registry.root.routes = append(a.httpServer.registry.root.routes, RouteDef{
+	reg.root.routes = append(reg.root.routes, RouteDef{
 		Method:  method,
 		Pattern: pattern,
 		Handler: h,
 	})
+	reg.markDirtyLocked()
+}
+
+func (a *App) addSystemRouteLocked(method, pattern string, h Handler) {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		return
+	}
+	reg := a.httpServer.registry
+	if reg.compiled {
+		return
+	}
+
+	a.ensureHTTPAvailable()
+
+	idx := len(reg.root.routes)
+	reg.root.routes = append(reg.root.routes, RouteDef{
+		Method:  method,
+		Pattern: pattern,
+		Handler: h,
+	})
+	reg.root.setRouteMeta(idx, &routeMeta{isSystem: true})
+	reg.markDirtyLocked()
 }
 
 func (a *App) ensureHTTPAvailable() {
@@ -49,12 +77,24 @@ func (a *App) ensureHTTPAvailable() {
 }
 
 func (a *App) canMutateRoutes(action string) bool {
-	if a.httpServer == nil || a.httpServer.registry == nil {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		return false
+	}
+	reg := a.httpServer.registry
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	return a.canMutateRoutesLocked(action)
+}
+
+func (a *App) canMutateRoutesLocked(action string) bool {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
 		return false
 	}
 
 	if a.httpServer.registry.compiled {
-		a.container.Logger.Errorf("cannot %s after routes have been compiled; register all routes and middleware before Run", action)
+		if a.container != nil && a.container.Logger != nil {
+			a.container.Logger.Errorf("cannot %s after routes have been compiled; register all routes and middleware before Run", action)
+		}
 		return false
 	}
 
@@ -74,7 +114,7 @@ func (a *App) getRequestTimeout() time.Duration {
 func (a *App) AddRESTHandlers(object any) error {
 	cfg, err := scanEntity(object)
 	if err != nil {
-		a.container.Logger.Errorf(err.Error())
+		a.container.Logger.Errorf("%s", err.Error())
 		return err
 	}
 

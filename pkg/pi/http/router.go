@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,9 +11,72 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	metricNoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/embedded"
 
 	"github.com/sllt/pi/pkg/pi/logging"
 )
+
+var defaultW3CPropagator = propagation.NewCompositeTextMapPropagator(
+	propagation.TraceContext{},
+	propagation.Baggage{},
+)
+
+// ResolveTextMapPropagator returns the global OTel TextMapPropagator if configured,
+// or falls back to W3C TraceContext + Baggage without mutating global OTel state.
+func ResolveTextMapPropagator() propagation.TextMapPropagator {
+	if p := otel.GetTextMapPropagator(); p != nil && len(p.Fields()) > 0 {
+		return p
+	}
+	return defaultW3CPropagator
+}
+
+type localParentPreservingPropagator struct{}
+
+func (localParentPreservingPropagator) Inject(ctx context.Context, carrier propagation.TextMapCarrier) {
+	ResolveTextMapPropagator().Inject(ctx, carrier)
+}
+
+func (localParentPreservingPropagator) Extract(ctx context.Context, carrier propagation.TextMapCarrier) context.Context {
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() && !sc.IsRemote() {
+		return ctx
+	}
+	return ResolveTextMapPropagator().Extract(ctx, carrier)
+}
+
+func (localParentPreservingPropagator) Fields() []string {
+	return ResolveTextMapPropagator().Fields()
+}
+
+type dynamicTracerProvider struct {
+	embedded.TracerProvider
+	resolve func() trace.TracerProvider
+}
+
+func (d dynamicTracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
+	if d.resolve != nil {
+		if tp := d.resolve(); tp != nil {
+			return tp.Tracer(name, opts...)
+		}
+	}
+	return otel.GetTracerProvider().Tracer(name, opts...)
+}
+
+// NewRouteHTTPHandler wraps handler with OpenTelemetry HTTP instrumentation scoped to
+// the supplied TracerProvider resolver and optional isolated meter provider.
+func NewRouteHTTPHandler(handler http.Handler, operation string, providerFn func() trace.TracerProvider, isolateMetrics bool) http.Handler {
+	opts := []otelhttp.Option{
+		otelhttp.WithTracerProvider(dynamicTracerProvider{resolve: providerFn}),
+		otelhttp.WithPropagators(localParentPreservingPropagator{}),
+	}
+	if isolateMetrics {
+		opts = append(opts, otelhttp.WithMeterProvider(metricNoop.NewMeterProvider()))
+	}
+	return otelhttp.NewHandler(handler, operation, opts...)
+}
 
 const (
 	DefaultSwaggerFileName       = "openapi.json"
@@ -25,6 +89,8 @@ var errReadPermissionDenied = fmt.Errorf("file does not have read permission")
 type Router struct {
 	mux              *chi.Mux
 	RegisteredRoutes *[]string
+	tracerProviderFn func() trace.TracerProvider
+	isolateMetrics   bool
 }
 
 type Middleware func(handler http.Handler) http.Handler
@@ -36,6 +102,15 @@ func NewRouter() *Router {
 		mux:              chi.NewRouter(),
 		RegisteredRoutes: &routes,
 	}
+}
+
+// SetTelemetry configures instance-scoped OpenTelemetry instrumentation for routes added to this router.
+func (rou *Router) SetTelemetry(providerFn func() trace.TracerProvider, isolateMetrics bool) {
+	if rou == nil {
+		return
+	}
+	rou.tracerProviderFn = providerFn
+	rou.isolateMetrics = isolateMetrics
 }
 
 // ServeHTTP implements [http.Handler] interface with path normalization.
@@ -66,7 +141,7 @@ func (rou *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Add adds a new route with the given HTTP method, pattern, and handler, wrapping the handler with OpenTelemetry instrumentation.
 func (rou *Router) Add(method, pattern string, handler http.Handler) {
-	h := otelhttp.NewHandler(handler, "pi-router")
+	h := NewRouteHTTPHandler(handler, "pi-router", rou.tracerProviderFn, rou.isolateMetrics)
 	rou.mux.Method(method, pattern, h)
 }
 

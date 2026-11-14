@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/sllt/pi/pkg/pi/metrics/exporters"
 )
 
 // Run starts the application. If it is an HTTP server, it will start the server.
@@ -59,7 +61,7 @@ func (a *App) RunContext(ctx context.Context) error {
 	defer cancel()
 
 	if a.hasTelemetry() {
-		a.sendTelemetry(http.DefaultClient, false)
+		a.sendTelemetryContext(shutdownCtx, http.DefaultClient, false)
 	}
 
 	a.Logger().Infof("Shutting down server with a timeout of %v", timeout)
@@ -70,7 +72,7 @@ func (a *App) RunContext(ctx context.Context) error {
 		return stopErr
 	}
 
-	return errors.Join(cause, stopErr)
+	return joinShutdownErr(cause, stopErr)
 }
 
 // Start starts the application without installing signal handlers.
@@ -103,17 +105,22 @@ func (a *App) Start(ctx context.Context) error {
 	if a.pureBuild {
 		runtimeParent = context.WithoutCancel(ctx)
 	}
-	a.runtimeCtx, a.runtimeCancel = context.WithCancelCause(runtimeParent)
-	runtimeCtx := a.runtimeCtx
+	runtimeCtx := a.initRuntimeContextsLocked(runtimeParent, ctx)
 	a.runtimeMu.Unlock()
+
+	a.ensureDefaultGRPCHealth()
+	a.syncGRPCHealth()
+	a.startGRPCHealthSyncWorker()
 
 	var err error
 	if a.pureBuild {
-		startupCtx, cancel := context.WithCancel(ctx)
-		detach := context.AfterFunc(runtimeCtx, cancel)
+		startupCtx, cancel := context.WithCancelCause(ctx)
+		detach := context.AfterFunc(runtimeCtx, func() {
+			cancel(context.Cause(runtimeCtx))
+		})
 		err = a.startPure(startupCtx, runtimeCtx)
 		detach()
-		cancel()
+		cancel(nil)
 	} else {
 		err = a.startOnce(runtimeCtx)
 	}
@@ -131,8 +138,10 @@ func (a *App) Start(ctx context.Context) error {
 	close(a.startupDone)
 	if err == nil {
 		a.runtimeState = lifecycleRunning
+		a.startupCompleted.Store(true)
 		close(a.startDone)
 		a.runtimeMu.Unlock()
+		a.syncGRPCHealth()
 		if a.pureBuild {
 			go a.stopWhenCanceled(runtimeCtx)
 		}
@@ -148,28 +157,42 @@ func (a *App) Start(ctx context.Context) error {
 	return err
 }
 
-func (a *App) startPure(startupCtx, runtimeCtx context.Context) (err error) {
+func (a *App) startPure(startupCtx, _ context.Context) (err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			err = fmt.Errorf("%w: %v", errRuntimeStartPanic, v)
 		}
 	}()
+	if err = a.validateRoutesPreStart(); err != nil {
+		return err
+	}
 	if err = a.startResources(startupCtx); err != nil {
 		return err
 	}
 	if err = a.handleStartupHooks(startupCtx); err != nil {
 		return err
 	}
-	if err = startupCtx.Err(); err != nil {
+	if err = a.validateRoutesForStart(); err != nil {
 		return err
 	}
-	if err = a.startAllServers(runtimeCtx); err != nil {
+	if err = contextCauseOrErr(startupCtx); err != nil {
 		return err
 	}
-	return startupCtx.Err()
+	a.startTelemetryIfEnabled()
+	if err = a.startActorRuntime(startupCtx); err != nil {
+		return err
+	}
+	if err = a.startAllServers(a.intakeContext()); err != nil {
+		return err
+	}
+	if err = a.waitForRequiredWorkersReady(startupCtx); err != nil {
+		return err
+	}
+	return contextCauseOrErr(startupCtx)
 }
 
 func (a *App) stopWhenCanceled(ctx context.Context) {
+	defer func() { _ = recover() }()
 	<-ctx.Done()
 	timeout, _ := a.shutdownTimeout()
 	stopCtx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -208,7 +231,7 @@ func (a *App) Wait(ctx context.Context) error {
 	if errors.Is(cause, context.Canceled) {
 		cause = nil
 	}
-	return errors.Join(cause, a.stopErr)
+	return joinShutdownErr(cause, a.stopErr)
 }
 
 func (a *App) startOnce(ctx context.Context) (err error) {
@@ -220,18 +243,30 @@ func (a *App) startOnce(ctx context.Context) (err error) {
 	if a.initErr != nil {
 		return a.initErr
 	}
-	if err = ctx.Err(); err != nil {
+	if err = contextCauseOrErr(ctx); err != nil {
 		return err
 	}
 	if a.cmd != nil {
 		a.cmd.Run(a.container)
 		return nil
 	}
+	if err = a.validateRoutesPreStart(); err != nil {
+		return err
+	}
 	if err = a.handleStartupHooks(ctx); err != nil {
 		return err
 	}
+	if err = a.validateRoutesForStart(); err != nil {
+		return err
+	}
 	a.startTelemetryIfEnabled()
-	return a.startAllServers(ctx)
+	if err = a.startActorRuntime(ctx); err != nil {
+		return err
+	}
+	if err = a.startAllServers(a.intakeContext()); err != nil {
+		return err
+	}
+	return a.waitForRequiredWorkersReady(ctx)
 }
 
 func (a *App) runtimeContext() context.Context {
@@ -289,7 +324,7 @@ func (a *App) startShutdownHandler(ctx context.Context, timeout time.Duration) <
 		defer cancel()
 
 		if a.hasTelemetry() {
-			a.sendTelemetry(http.DefaultClient, false)
+			a.sendTelemetryContext(shutdownCtx, http.DefaultClient, false)
 		}
 
 		a.Logger().Infof("Shutting down server with a timeout of %v", timeout)
@@ -303,16 +338,30 @@ func (a *App) startShutdownHandler(ctx context.Context, timeout time.Duration) <
 	return done
 }
 
-// startTelemetryIfEnabled starts telemetry if it's enabled.
+// startTelemetryIfEnabled starts startup telemetry inside the managed runtime task barrier.
 func (a *App) startTelemetryIfEnabled() {
-	if a.hasTelemetry() {
-		go a.sendTelemetry(http.DefaultClient, true)
+	if !a.hasTelemetry() {
+		return
 	}
+	intakeCtx := a.intakeContext()
+	if !a.tryAdmitRuntimeTask() {
+		return
+	}
+	var appName, appVersion string
+	if a.container != nil {
+		appName = a.container.GetAppName()
+		appVersion = a.container.GetAppVersion()
+	}
+	go func() {
+		defer a.runtimeTasks.Done()
+		a.sendTelemetryContext(intakeCtx, http.DefaultClient, true)
+		exporters.SendFrameworkStartupTelemetryContext(intakeCtx, appName, appVersion)
+	}()
 }
 
 // startAllServers starts all registered servers concurrently.
 func (a *App) startAllServers(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
+	if err := contextCauseOrErr(ctx); err != nil {
 		return err
 	}
 	var err error
@@ -324,7 +373,7 @@ func (a *App) startAllServers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err = ctx.Err(); err != nil {
+	if err = contextCauseOrErr(ctx); err != nil {
 		return err
 	}
 
@@ -341,7 +390,7 @@ func (a *App) startMetricsServer() error {
 	if a.metricServer != nil {
 		return a.metricServer.start(a.container, func(err error) {
 			a.Logger().Errorf("Metrics server failed: %v", err)
-			a.requestShutdown(err)
+			a.recordFatalCause(err)
 		})
 	}
 
@@ -354,11 +403,13 @@ func (a *App) startHTTPServer() error {
 		return nil
 	}
 	if a.httpRegistered {
-		a.httpServerSetup()
+		if err := a.ensureHTTPCompiled(); err != nil {
+			return err
+		}
 
 		return a.httpServer.start(a.container, func(err error) {
 			a.Logger().Errorf("HTTP server failed: %v", err)
-			a.requestShutdown(err)
+			a.recordFatalCause(err)
 		})
 	}
 
@@ -371,10 +422,14 @@ func (a *App) startGRPCServer() error {
 		return nil
 	}
 	if a.grpcRegistered {
-		return a.grpcServer.start(a.container, func(err error) {
+		a.ensureDefaultGRPCHealth()
+		err := a.grpcServer.start(a.container, func(err error) {
 			a.Logger().Errorf("gRPC server failed: %v", err)
-			a.requestShutdown(err)
+			a.recordFatalCause(err)
 		})
+		a.syncGRPCHealth()
+		a.startGRPCHealthSyncWorker()
+		return err
 	}
 
 	return nil
@@ -382,10 +437,18 @@ func (a *App) startGRPCServer() error {
 
 // startSubscriptionManager starts the subscription manager.
 func (a *App) startSubscriptionManager(ctx context.Context, wg waitGroup) {
+	if a.isSubscribersSupervised() {
+		return
+	}
+	if len(a.subscriptionManager.subscriptions) == 0 {
+		return
+	}
+	if !a.tryAdmitRuntimeTask() {
+		return
+	}
 	if wg != nil {
 		wg.Add(1)
 	}
-	a.runtimeTasks.Add(1)
 
 	go func() {
 		if wg != nil {
@@ -395,7 +458,9 @@ func (a *App) startSubscriptionManager(ctx context.Context, wg waitGroup) {
 
 		err := a.startSubscriptions(ctx)
 		if err != nil {
-			a.Logger().Errorf("Subscription Error : %v", err)
+			if l := a.safeLogger(); l != nil {
+				l.Errorf("Subscription Error : %v", err)
+			}
 		}
 	}()
 }

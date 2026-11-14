@@ -17,29 +17,104 @@ func (c *Client) establishConnection() error {
 		return err
 	}
 
-	c.connManager = connManager
-
-	js, err := c.connManager.jetStream()
+	js, err := connManager.jetStream()
 	if err != nil {
 		return err
 	}
 
-	c.streamManager = newStreamManager(js, c.logger)
-	c.subManager = newSubscriptionManager(batchSize)
+	streamMgr := newStreamManager(js, c.logger)
+	subMgr := newSubscriptionManager(batchSize)
+
+	c.connMu.Lock()
+	c.connManager = connManager
+	c.streamManager = streamMgr
+	c.subManager = subMgr
+	c.connMu.Unlock()
 
 	c.logger.Logf("connected to NATS server '%s'", c.Config.Server)
 
 	return nil
 }
 
+func (c *Client) ensureStopCh() <-chan struct{} {
+	c.retryMu.Lock()
+	defer c.retryMu.Unlock()
+
+	if c.stopCh == nil {
+		c.stopCh = make(chan struct{})
+	}
+
+	return c.stopCh
+}
+
+func (c *Client) startRetryConnect() {
+	c.retryMu.Lock()
+	if c.closed || c.retryDone != nil {
+		c.retryMu.Unlock()
+		return
+	}
+
+	if c.stopCh == nil {
+		c.stopCh = make(chan struct{})
+	}
+
+	stopCh := c.stopCh
+	done := make(chan struct{})
+	c.retryDone = done
+	c.retryMu.Unlock()
+
+	go func() {
+		defer func() {
+			close(done)
+			c.retryMu.Lock()
+			if c.retryDone == done {
+				c.retryDone = nil
+			}
+			c.retryMu.Unlock()
+		}()
+
+		c.retryConnectWithStop(stopCh)
+	}()
+}
+
+func (c *Client) waitRetryOrCancel(ctx context.Context, stopCh <-chan struct{}) bool {
+	timer := time.NewTimer(defaultRetryTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-stopCh:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func (c *Client) retryConnect() {
+	c.retryConnectWithStop(c.ensureStopCh())
+}
+
+func (c *Client) retryConnectWithStop(stopCh <-chan struct{}) {
 	for {
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+
 		c.logger.Debugf("connecting to NATS server at %v", c.Config.Server)
 
 		if err := c.establishConnection(); err != nil {
 			c.logger.Errorf("failed to connect to NATS server at %v: %v", c.Config.Server, err)
 
-			time.Sleep(defaultRetryTimeout)
+			timer := time.NewTimer(defaultRetryTimeout)
+			select {
+			case <-stopCh:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 
 			continue
 		}
@@ -86,8 +161,12 @@ func (c *Client) processMessages(ctx context.Context, cons jetstream.Consumer, s
 func (c *Client) fetchAndProcessMessages(ctx context.Context, cons jetstream.Consumer, subject string, handler messageHandler) error {
 	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(c.Config.MaxWait))
 	if err != nil {
-		if !errors.Is(err, context.DeadlineExceeded) {
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			c.logger.Errorf("Error fetching messages for subject %s: %v", subject, err)
+		}
+
+		if errors.Is(err, context.Canceled) {
+			return nil
 		}
 
 		return err
@@ -251,11 +330,15 @@ func checkClient(c *Client) error {
 		return errClientNotConnected
 	}
 
-	if c.connManager == nil {
+	c.connMu.RLock()
+	connMgr := c.connManager
+	c.connMu.RUnlock()
+
+	if connMgr == nil {
 		return errClientNotConnected
 	}
 
-	if !c.connManager.isConnected() {
+	if !connMgr.isConnected() {
 		return errClientNotConnected
 	}
 

@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,11 @@ func Test_WebSocket_Success(t *testing.T) {
 	testutil.NewServerConfigs(t)
 
 	app := New()
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = app.Stop(stopCtx)
+	})
 
 	server := httptest.NewServer(app.httpServer.router)
 	defer server.Close()
@@ -72,9 +78,16 @@ func Test_WebSocket_Success(t *testing.T) {
 
 func Test_AddWSService(t *testing.T) {
 	port := testutil.GetFreePort(t)
+	metricsPort := testutil.GetFreePort(t)
 	t.Setenv("HTTP_PORT", fmt.Sprint(port))
+	t.Setenv("METRICS_PORT", fmt.Sprint(metricsPort))
 
 	app := New()
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = app.Stop(stopCtx)
+	})
 
 	app.WebSocket("/ws", func(ctx *Context) (any, error) {
 		var message string

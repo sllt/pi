@@ -2,6 +2,8 @@ package gcs
 
 import (
 	"context"
+	"io"
+	"sync"
 	"time"
 
 	"github.com/sllt/pi/pkg/pi/datasource/file"
@@ -11,6 +13,11 @@ const defaultTimeout = 10 * time.Second
 
 type fileSystem struct {
 	*file.CommonFileSystem
+
+	retryMu   sync.Mutex
+	stopCh    chan struct{}
+	retryDone chan struct{}
+	closed    bool
 }
 
 // Config represents the gcs configuration.
@@ -35,6 +42,7 @@ func New(config *Config) file.FileSystemProvider {
 			Location:     config.BucketName,
 			ProviderName: "GCS", // Set provider name for observability
 		},
+		stopCh: make(chan struct{}),
 	}
 
 	return fs
@@ -52,12 +60,12 @@ func (f *fileSystem) Connect() {
 	err := f.CommonFileSystem.Connect(ctx)
 	if err != nil {
 		if f.CommonFileSystem.Logger != nil {
-			f.CommonFileSystem.Logger.Errorf("GCS bucket %s not available, starting background retry: %v",
+			f.CommonFileSystem.Logger.Warnf("GCS bucket %s not available, starting background retry: %v",
 				f.CommonFileSystem.Location, err)
 		}
 
 		// Start background retry
-		go f.startRetryConnect()
+		f.launchRetryConnect()
 
 		return
 	}
@@ -68,38 +76,135 @@ func (f *fileSystem) Connect() {
 	}
 }
 
-// startRetryConnect retries connection every 30 seconds until success.
+func (f *fileSystem) ensureStopCh() <-chan struct{} {
+	f.retryMu.Lock()
+	defer f.retryMu.Unlock()
+
+	if f.stopCh == nil {
+		f.stopCh = make(chan struct{})
+	}
+
+	return f.stopCh
+}
+
+func (f *fileSystem) launchRetryConnect() {
+	f.retryMu.Lock()
+	if f.closed || f.retryDone != nil {
+		f.retryMu.Unlock()
+		return
+	}
+
+	if f.stopCh == nil {
+		f.stopCh = make(chan struct{})
+	}
+
+	done := make(chan struct{})
+	f.retryDone = done
+	f.retryMu.Unlock()
+
+	go func() {
+		defer func() {
+			close(done)
+			f.retryMu.Lock()
+			if f.retryDone == done {
+				f.retryDone = nil
+			}
+			f.retryMu.Unlock()
+		}()
+
+		f.startRetryConnect()
+	}()
+}
+
+// Close stops background connection retries and closes the underlying provider if closable.
+func (f *fileSystem) Close() error {
+	if f == nil {
+		return nil
+	}
+
+	if f.CommonFileSystem != nil {
+		f.CommonFileSystem.SetDisableRetry(true)
+	}
+
+	f.retryMu.Lock()
+	if !f.closed {
+		f.closed = true
+		if f.stopCh == nil {
+			f.stopCh = make(chan struct{})
+		}
+		close(f.stopCh)
+	}
+	done := f.retryDone
+	f.retryMu.Unlock()
+
+	if done != nil {
+		<-done
+	}
+
+	if f.CommonFileSystem != nil && f.CommonFileSystem.Provider != nil {
+		if closer, ok := f.CommonFileSystem.Provider.(io.Closer); ok {
+			return closer.Close()
+		}
+	}
+
+	return nil
+}
+
+// startRetryConnect retries connection every minute until success or shutdown.
 func (f *fileSystem) startRetryConnect() {
 	if f.CommonFileSystem.IsConnected() || f.CommonFileSystem.IsRetryDisabled() {
 		return
 	}
 
+	stopCh := f.ensureStopCh()
+
+	select {
+	case <-stopCh:
+		return
+	default:
+	}
+
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		if f.CommonFileSystem.IsConnected() || f.CommonFileSystem.IsRetryDisabled() {
+	for {
+		select {
+		case <-stopCh:
 			return
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-
-		err := f.CommonFileSystem.Connect(ctx)
-
-		cancel()
-
-		if err == nil {
-			// Success - exit retry loop
-			if f.CommonFileSystem.Logger != nil {
-				f.CommonFileSystem.Logger.Infof("GCS connection restored to bucket %s", f.CommonFileSystem.Location)
+		case <-ticker.C:
+			if f.CommonFileSystem.IsConnected() || f.CommonFileSystem.IsRetryDisabled() {
+				return
 			}
 
-			return
-		}
+			baseCtx, stopCancel := context.WithCancel(context.Background())
+			attemptDone := make(chan struct{})
+			go func() {
+				select {
+				case <-stopCh:
+					stopCancel()
+				case <-attemptDone:
+				}
+			}()
 
-		// Still failing - log and continue retrying
-		if f.CommonFileSystem.Logger != nil {
-			f.CommonFileSystem.Logger.Debugf("GCS retry failed, will try again: %v", err)
+			ctx, cancel := context.WithTimeout(baseCtx, defaultTimeout)
+			err := f.CommonFileSystem.Connect(ctx)
+			cancel()
+			close(attemptDone)
+			stopCancel()
+
+			if err == nil {
+				// Success - exit retry loop
+				if f.CommonFileSystem.Logger != nil {
+					f.CommonFileSystem.Logger.Infof("GCS connection restored to bucket %s", f.CommonFileSystem.Location)
+				}
+
+				return
+			}
+
+			// Still failing - log and continue retrying
+			if f.CommonFileSystem.Logger != nil {
+				f.CommonFileSystem.Logger.Debugf("GCS retry failed, will try again: %v", err)
+			}
 		}
 	}
 }

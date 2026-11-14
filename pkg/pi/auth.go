@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"io"
 	"net/http"
 	"time"
 
@@ -119,7 +120,21 @@ func (a *App) EnableOAuth(jwksEndpoint string,
 		RefreshInterval: time.Second * time.Duration(refreshInterval),
 	}
 
-	publicKeyProvider := middleware.NewOAuth(oauthOption)
+	var publicKeyProvider middleware.PublicKeyProvider
+	if a.pureBuild {
+		deferred := middleware.NewDeferredOAuth(oauthOption)
+		a.OnStart(func(*Context) error {
+			deferred.Start(a.intakeContext())
+			return nil
+		})
+		a.registerMiddlewareCloser(deferred.Close)
+		publicKeyProvider = deferred
+	} else {
+		publicKeyProvider = middleware.NewOAuth(oauthOption)
+		if closer, ok := publicKeyProvider.(io.Closer); ok {
+			a.registerMiddlewareCloser(closer.Close)
+		}
+	}
 
 	a.addAuthMiddleware(middleware.OAuth(publicKeyProvider, options...),
 		grpcMiddleware.OAuthUnaryInterceptor(publicKeyProvider, options...),

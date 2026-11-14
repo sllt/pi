@@ -31,7 +31,7 @@ func getDB(t *testing.T, logLevel logging.Level) (*DB, sqlmock.Sqlmock) {
 		t.Fatalf("an error '%s' was not expected when opening a stub database connection", err)
 	}
 
-	db := &DB{mockDB, logging.NewMockLogger(logLevel), nil, nil}
+	db := &DB{DB: mockDB, logger: logging.NewMockLogger(logLevel)}
 	db.config = &DBConfig{}
 
 	return db, mock
