@@ -539,10 +539,15 @@ func (a *App) startHTTPServer() error {
 			return err
 		}
 
-		return a.httpServer.start(a.kernel, func(err error) {
+		if err := a.httpServer.start(a.kernel, func(err error) {
 			a.Logger().Errorf("HTTP server failed: %v", err)
 			a.recordFatalCause(err)
-		})
+		}); err != nil {
+			return err
+		}
+
+		a.logOpenAPIEndpoints()
+		return nil
 	}
 
 	return nil

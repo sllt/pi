@@ -61,9 +61,19 @@ func (l *gRPCLog) PrettyPrint(writer io.Writer) {
 		streamInfo = fmt.Sprintf(" [%s]", l.StreamType)
 	}
 
-	fmt.Fprintf(writer, "\u001B[38;5;8m%s \u001B[38;5;%dm%-*d"+
+	if l.ID != "" && l.ID != "00000000000000000000000000000000" {
+		fmt.Fprintf(writer, "\u001B[38;5;8m%s \u001B[38;5;%dm%-*d"+
+			"\u001B[0m %*d\u001B[38;5;8mµs\u001B[0m %s%s %s\n",
+			l.ID, colorForGRPCCode(l.StatusCode),
+			statusCodeWidth, l.StatusCode,
+			responseTimeWidth, l.ResponseTime,
+			"GRPC", streamInfo, l.Method)
+		return
+	}
+
+	fmt.Fprintf(writer, "\u001B[38;5;%dm%-*d"+
 		"\u001B[0m %*d\u001B[38;5;8mµs\u001B[0m %s%s %s\n",
-		l.ID, colorForGRPCCode(l.StatusCode),
+		colorForGRPCCode(l.StatusCode),
 		statusCodeWidth, l.StatusCode,
 		responseTimeWidth, l.ResponseTime,
 		"GRPC", streamInfo, l.Method)

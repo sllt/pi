@@ -765,3 +765,64 @@ func TestRuntimeKernel_OwnedHTTPServiceTelemetryAndErrorHealthAdapters(t *testin
 	_, err = piSQL.OpenContextWithTracerProvider(nil, app.Config, app.Logger(), nil, nil)
 	require.Error(t, err)
 }
+
+func TestRuntimeKernel_DefaultIsolatedTracerGeneratesRealTraceID(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := logging.NewWriterLogger(logging.INFO, &logBuf, &logBuf)
+
+	app, err := Build(
+		WithConfig(map[string]string{
+			"HTTP_ENABLED": "false",
+			"GRPC_ENABLED": "false",
+		}),
+		WithLogger(logger),
+	)
+	require.NoError(t, err)
+	defer func() { _ = app.Stop(context.Background()) }()
+
+	var handlerTraceID string
+	app.GET("/ping", func(c *Context) (any, error) {
+		handlerTraceID = c.GetCorrelationID()
+		c.Info("handler executed")
+		return "pong", nil
+	})
+
+	h, err := app.HTTPHandler()
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ping", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Len(t, handlerTraceID, 32)
+	assert.NotEqual(t, "00000000000000000000000000000000", handlerTraceID)
+	assert.Equal(t, handlerTraceID, rec.Header().Get("X-Correlation-ID"))
+	assert.Contains(t, logBuf.String(), handlerTraceID)
+	assert.NotContains(t, logBuf.String(), "00000000000000000000000000000000")
+
+	// When TRACER_RATIO=0, sampling is disabled and zero TraceID is omitted.
+	var zeroBuf bytes.Buffer
+	zeroApp, err := Build(
+		WithConfig(map[string]string{
+			"HTTP_ENABLED": "false",
+			"GRPC_ENABLED": "false",
+			"TRACER_RATIO": "0",
+		}),
+		WithLogger(logging.NewWriterLogger(logging.INFO, &zeroBuf, &zeroBuf)),
+	)
+	require.NoError(t, err)
+	defer func() { _ = zeroApp.Stop(context.Background()) }()
+
+	zeroApp.GET("/ping", func(c *Context) (any, error) {
+		c.Info("unsampled")
+		return "ok", nil
+	})
+	zeroH, err := zeroApp.HTTPHandler()
+	require.NoError(t, err)
+
+	zeroRec := httptest.NewRecorder()
+	zeroH.ServeHTTP(zeroRec, httptest.NewRequest(http.MethodGet, "/ping", nil))
+	require.Equal(t, http.StatusOK, zeroRec.Code)
+	assert.Empty(t, zeroRec.Header().Get("X-Correlation-ID"))
+	assert.NotContains(t, zeroBuf.String(), "00000000000000000000000000000000")
+}

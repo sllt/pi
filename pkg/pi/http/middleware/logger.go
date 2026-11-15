@@ -73,9 +73,20 @@ type RequestLog struct {
 	Response     int    `json:"response,omitempty"`
 }
 
+const zeroTraceID = "00000000000000000000000000000000"
+
+func hasValidTraceID(id string) bool {
+	return id != "" && id != zeroTraceID
+}
+
 func (rl *RequestLog) PrettyPrint(writer io.Writer) {
-	fmt.Fprintf(writer, "\u001B[38;5;8m%s \u001B[38;5;%dm%-6d\u001B[0m "+
-		"%8d\u001B[38;5;8mµs\u001B[0m %s %s \n", rl.TraceID, colorForStatusCode(rl.Response), rl.Response, rl.ResponseTime, rl.Method, rl.URI)
+	if hasValidTraceID(rl.TraceID) {
+		fmt.Fprintf(writer, "\u001B[38;5;8m%s \u001B[38;5;%dm%-6d\u001B[0m "+
+			"%8d\u001B[38;5;8mµs\u001B[0m %s %s \n", rl.TraceID, colorForStatusCode(rl.Response), rl.Response, rl.ResponseTime, rl.Method, rl.URI)
+		return
+	}
+	fmt.Fprintf(writer, "\u001B[38;5;%dm%-6d\u001B[0m "+
+		"%8d\u001B[38;5;8mµs\u001B[0m %s %s \n", colorForStatusCode(rl.Response), rl.Response, rl.ResponseTime, rl.Method, rl.URI)
 }
 
 func colorForStatusCode(status int) int {
@@ -108,10 +119,13 @@ func Logging(probes LogProbes, logger logger) func(inner http.Handler) http.Hand
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			srw := &StatusResponseWriter{ResponseWriter: w}
-			traceID := trace.SpanFromContext(r.Context()).SpanContext().TraceID().String()
-			spanID := trace.SpanFromContext(r.Context()).SpanContext().SpanID().String()
-
-			srw.Header().Set("X-Correlation-ID", traceID)
+			sc := trace.SpanFromContext(r.Context()).SpanContext()
+			var traceID, spanID string
+			if sc.IsValid() {
+				traceID = sc.TraceID().String()
+				spanID = sc.SpanID().String()
+				srw.Header().Set("X-Correlation-ID", traceID)
+			}
 
 			defer func() { panicRecovery(recover(), srw, logger) }()
 

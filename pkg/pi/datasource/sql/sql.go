@@ -369,7 +369,7 @@ func printConnectionSuccessLog(status string, dbconfig *DBConfig, logger datasou
 
 func printConnectionFailureLog(action string, dbconfig *DBConfig, logger datasource.Logger, err error) {
 	if dbconfig.Dialect == sqlite {
-		logger.Errorf("could not %s database '%s', error: %v", action, dbconfig.Database, err)
+		logger.Errorf("could not %s database '%s', error: %v", action, dbconfig.Database, annotateSQLiteOpenError(dbconfig.Database, err))
 	} else {
 		logger.Errorf("could not %s '%s' user to '%s' database at '%s:%s', error: %v",
 			action, dbconfig.User, dbconfig.Database, dbconfig.HostName, dbconfig.Port, err)

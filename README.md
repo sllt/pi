@@ -29,13 +29,13 @@ Pair Pi with the official [pi-layout](https://github.com/sllt/pi-layout) Fx scaf
 ### Framework Module
 
 ```bash
-go get github.com/sllt/pi@v0.5.1
+go get github.com/sllt/pi@v0.5.2
 ```
 
 ### Pi CLI
 
 ```bash
-go install github.com/sllt/pi/cmd/pi@v0.5.1
+go install github.com/sllt/pi/cmd/pi@v0.5.2
 ```
 
 Scaffold a new production-ready project from [pi-layout](https://github.com/sllt/pi-layout):
@@ -248,7 +248,7 @@ func TestGreet(t *testing.T) {
 
 Pi keeps core SQL, Redis, local filesystem, and standard messaging contracts in the root module while isolating 25 third-party drivers in independent Go submodules (`FromEnv` + `ConnectContext` + `Shutdown`/`Close` + `HealthCheck`) so your `go.mod` stays lean.
 
-| Category | Built-in (`github.com/sllt/pi`) | Independent Adapter Submodules (`@v0.5.1`) |
+| Category | Built-in (`github.com/sllt/pi`) | Independent Adapter Submodules (`@v0.5.2`) |
 | --- | --- | --- |
 | **Relational SQL** | MySQL, PostgreSQL, SQLite | `oracle`, `dbresolver` |
 | **Key-Value / Cache** | Redis | `kv-store/badger`, `kv-store/dynamodb`, `kv-store/nats` |
@@ -262,9 +262,9 @@ Pi keeps core SQL, Redis, local filesystem, and standard messaging contracts in 
 Install any independent adapter submodule and mount it via `pi.WithAdapter`:
 
 ```bash
-go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.1
-go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.1
-go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.1
+go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.2
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.2
+go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.2
 ```
 
 ---

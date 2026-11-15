@@ -3,6 +3,8 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,6 +139,10 @@ func CreateContext(ctx context.Context, o Options) error {
 	if _, err = command(ctx, project, "go", "mod", "edit", "-module", o.Module); err != nil {
 		return err
 	}
+	envCreated, err := initLocalEnvFile(project)
+	if err != nil {
+		return err
+	}
 	if !o.Offline {
 		if _, err = command(ctx, project, "go", "build", "-mod=readonly", "./..."); err != nil {
 			return fmt.Errorf("generated application verification failed: %w", err)
@@ -174,7 +180,37 @@ func CreateContext(ctx context.Context, o Options) error {
 	} else {
 		fmt.Printf("Created and verified %s\n", dest)
 	}
+	if envCreated {
+		fmt.Printf("Generated local %s with a random JWT_SECRET.\n", filepath.Join(dest, "configs", ".env"))
+		fmt.Printf("Next steps:\n  cd %s\n  go run ./cmd/migration up\n  go run ./cmd/server\n", o.Directory)
+	}
 	return nil
+}
+
+var jwtSecretLinePattern = regexp.MustCompile(`(?m)^JWT_SECRET=.*$`)
+
+func initLocalEnvFile(projectDir string) (bool, error) {
+	examplePath := filepath.Join(projectDir, "configs", ".env.example")
+	data, err := os.ReadFile(examplePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	var randomBytes [32]byte
+	if _, err := rand.Read(randomBytes[:]); err != nil {
+		return false, fmt.Errorf("generate JWT_SECRET: %w", err)
+	}
+	secretHex := hex.EncodeToString(randomBytes[:])
+	rendered := jwtSecretLinePattern.ReplaceAll(data, []byte("JWT_SECRET="+secretHex))
+
+	envPath := filepath.Join(projectDir, "configs", ".env")
+	if err := os.WriteFile(envPath, rendered, 0600); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func command(ctx context.Context, dir, program string, args ...string) (string, error) {

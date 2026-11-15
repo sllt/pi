@@ -29,13 +29,13 @@
 ### 安装框架主模块
 
 ```bash
-go get github.com/sllt/pi@v0.5.1
+go get github.com/sllt/pi@v0.5.2
 ```
 
 ### 安装 Pi CLI
 
 ```bash
-go install github.com/sllt/pi/cmd/pi@v0.5.1
+go install github.com/sllt/pi/cmd/pi@v0.5.2
 ```
 
 基于 [pi-layout](https://github.com/sllt/pi-layout) 初始化并自动编译验证一个新项目：
@@ -247,7 +247,7 @@ func TestGreet(t *testing.T) {
 
 常用关系型数据库、Redis、本地文件系统与主流消息队列内置在主模块中；其余 25 个第三方驱动拆分为独立 Go 子模块（统一支持 `FromEnv`、`ConnectContext`、`Shutdown`/`Close` 与 `HealthCheck`），按需引入并通过 `pi.WithAdapter` 挂载，保持业务项目的 `go.mod` 精简干净。
 
-| 类别 | 主模块内置（`github.com/sllt/pi`） | 独立适配器子模块（`@v0.5.1`） |
+| 类别 | 主模块内置（`github.com/sllt/pi`） | 独立适配器子模块（`@v0.5.2`） |
 | --- | --- | --- |
 | **关系型数据库** | MySQL, PostgreSQL, SQLite | `oracle`, `dbresolver` |
 | **键值存储 / 缓存** | Redis | `kv-store/badger`, `kv-store/dynamodb`, `kv-store/nats` |
@@ -261,9 +261,9 @@ func TestGreet(t *testing.T) {
 按统一版本号按需安装独立子模块：
 
 ```bash
-go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.1
-go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.1
-go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.1
+go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.2
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.2
+go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.2
 ```
 
 ---

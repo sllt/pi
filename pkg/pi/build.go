@@ -521,6 +521,8 @@ func Build(options ...Option) (*App, error) {
 		mr.active.Store(o.tracerOwnership == Owned)
 		k.resources = append(k.resources, mr)
 		k.names["tracer"] = "core"
+	} else if sd, ok := k.tracerProvider.(interface{ Shutdown(context.Context) error }); ok {
+		a.ownedTracerShutdown = sd.Shutdown
 	}
 
 	if useManagedSQL {

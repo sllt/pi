@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -171,6 +172,39 @@ func (a *App) mountOpenAPIRoutesLocked() {
 	if a.openAPI.ServeUI && a.openAPI.UIPath != "" {
 		a.addSystemRouteLocked(http.MethodGet, a.openAPI.UIPath, a.serveOpenAPIUIHandler)
 		a.addSystemRouteLocked(http.MethodGet, swaggerAssetRoutePattern(a.openAPI.UIPath), a.serveOpenAPIUIHandler)
+	}
+}
+
+func (a *App) logOpenAPIEndpoints() {
+	if a == nil || a.httpServer == nil {
+		return
+	}
+	l := a.httpServer.listener.Load()
+	if l == nil || l.Addr() == nil {
+		return
+	}
+	tlsEnabled := a.httpServer.certFile != "" && a.httpServer.keyFile != ""
+	baseURL := formatClickableBaseURL(l.Addr().String(), tlsEnabled)
+
+	if a.hasOpenAPIConfig {
+		if a.openAPI.ServeUI && a.openAPI.UIPath != "" {
+			a.Logger().Infof("Swagger UI available at %s%s", baseURL, a.openAPI.UIPath)
+		} else if a.openAPI.ServeSpec && a.openAPI.SpecPath != "" {
+			a.Logger().Infof("OpenAPI spec available at %s%s", baseURL, a.openAPI.SpecPath)
+		}
+		return
+	}
+
+	if a.httpServer.registry != nil {
+		a.httpServer.registry.mu.Lock()
+		hasTyped := a.hasTypedRoutesLocked()
+		a.httpServer.registry.mu.Unlock()
+		if hasTyped {
+			return
+		}
+	}
+	if _, err := os.Stat("./static/" + piHTTP.DefaultSwaggerFileName); err == nil {
+		a.Logger().Infof("Swagger UI available at %s/.well-known/swagger", baseURL)
 	}
 }
 

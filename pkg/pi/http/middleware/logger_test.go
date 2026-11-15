@@ -211,6 +211,29 @@ func TestRequestLog_PrettyPrint(t *testing.T) {
 		"     1432\u001B[38;5;8mµs\u001B[0m GET /test \n", w.String())
 }
 
+func TestRequestLog_PrettyPrint_OmitsEmptyOrZeroTraceID(t *testing.T) {
+	for _, traceID := range []string{"", "00000000000000000000000000000000"} {
+		rl := &RequestLog{
+			TraceID:      traceID,
+			ResponseTime: 1432,
+			Method:       "GET",
+			URI:          "/test",
+			Response:     200,
+		}
+		w := new(bytes.Buffer)
+		rl.PrettyPrint(w)
+
+		assert.NotContains(t, w.String(), "00000000000000000000000000000000")
+		assert.Equal(t, "\u001B[38;5;34m200   \u001B[0m     1432\u001B[38;5;8mµs\u001B[0m GET /test \n", w.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://dummy/no-span", http.NoBody)
+	rr := httptest.NewRecorder()
+	handler := Logging(LogProbes{}, logging.NewMockLogger(logging.INFO))(http.HandlerFunc(testHandler))
+	handler.ServeHTTP(rr, req)
+	assert.Empty(t, rr.Header().Get("X-Correlation-ID"))
+}
+
 func Test_ColorForStatusCode(t *testing.T) {
 	testCases := []struct {
 		desc   string

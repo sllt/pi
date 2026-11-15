@@ -26,6 +26,20 @@ func TestOpenContextOwnsConnection(t *testing.T) {
 	require.Nil(t, db)
 }
 
+func TestOpenContextSQLiteMissingParentDirectoryHint(t *testing.T) {
+	missingDir := filepath.Join(t.TempDir(), "missing-storage")
+	cfg := config.NewMockConfig(map[string]string{
+		"DB_DIALECT": "sqlite",
+		"DB_NAME":    filepath.Join(missingDir, "app.db"),
+	})
+	l := logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard)
+	db, err := OpenContext(t.Context(), cfg, l, nil)
+	require.Nil(t, db)
+	require.Error(t, err)
+	require.ErrorContains(t, err, `sqlite directory`)
+	require.ErrorContains(t, err, `does not exist`)
+}
+
 func TestQuotePostgresValue(t *testing.T) {
 	for input, want := range map[string]string{"": "''", "plain": "plain", "two words": "'two words'", "a'b": "'a\\'b'", `a\b`: `'a\\b'`} {
 		require.Equal(t, want, quotePostgresValue(input))

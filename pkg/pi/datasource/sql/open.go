@@ -6,9 +6,11 @@ import (
 	"crypto/x509"
 	"database/sql"
 	sqldriver "database/sql/driver"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/XSAM/otelsql"
@@ -97,9 +99,38 @@ func OpenContextWithTracerProvider(
 	db.SetMaxOpenConns(cfg.MaxOpenConn)
 	if err = db.PingContext(ctx); err != nil {
 		_ = db.Close()
+		if driver == sqlite {
+			err = annotateSQLiteOpenError(cfg.Database, err)
+		}
 		return nil, fmt.Errorf("sql: ping: %w", err)
 	}
 	return &DB{DB: db, config: cfg, logger: logger, metrics: metrics}, nil
+}
+
+func annotateSQLiteOpenError(dbPath string, err error) error {
+	if err == nil {
+		return nil
+	}
+	cleaned := strings.TrimSpace(dbPath)
+	cleaned = strings.TrimPrefix(cleaned, "file:")
+	if idx := strings.IndexByte(cleaned, '?'); idx >= 0 {
+		cleaned = cleaned[:idx]
+	}
+	if cleaned == "" || cleaned == ":memory:" {
+		return err
+	}
+	dir := filepath.Dir(cleaned)
+	if dir == "" || dir == "." {
+		return err
+	}
+	info, statErr := os.Stat(dir)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("sqlite directory %q does not exist: %w", dir, err)
+	}
+	if statErr == nil && !info.IsDir() {
+		return fmt.Errorf("sqlite parent path %q is not a directory: %w", dir, err)
+	}
+	return err
 }
 
 // Unlike legacy NewSQL, the bounded path never installs MySQL's global TLS

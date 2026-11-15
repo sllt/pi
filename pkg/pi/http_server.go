@@ -92,17 +92,16 @@ func (s *httpServer) run(rt *runtimeKernel) error {
 func (s *httpServer) start(rt *runtimeKernel, onError func(error)) error {
 	logger := rt.getLogger()
 	if s.srv != nil {
-		logger.Logf("Server already running on port: %d", s.port)
+		logger.Logf("Server already running on %s", s.srv.Addr)
 		return nil
 	}
-
-	logger.Logf("Starting server on port: %d", s.port)
 
 	tlsConfig, err := serverTLS(s.certFile, s.keyFile)
 	if err != nil {
 		return err
 	}
 	addr := s.listenAddress(s.port)
+	logger.Debugf("Starting HTTP server on %s", addr)
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           s.router,
@@ -117,7 +116,7 @@ func (s *httpServer) start(rt *runtimeKernel, onError func(error)) error {
 	s.listener.Store(listener)
 
 	s.boundTo(listener.Addr())
-	logger.Infof("HTTP server listening on %s", listener.Addr())
+	logger.Infof("HTTP server listening on %s", formatClickableBaseURL(listener.Addr().String(), tlsConfig != nil))
 	if tlsConfig != nil {
 		go func() {
 			if err := s.srv.ServeTLS(listener, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -167,4 +166,19 @@ func validateCertificateAndKeyFiles(certificateFile, keyFile string) error {
 	}
 
 	return nil
+}
+
+func formatClickableBaseURL(addr string, tlsEnabled bool) string {
+	scheme := "http"
+	if tlsEnabled {
+		scheme = "https"
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return scheme + "://" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
 }

@@ -14,6 +14,9 @@ import (
 	_ "github.com/go-sql-driver/mysql" // Register MySQL driver for legacy database/sql usage.
 	"go.opentelemetry.io/otel"
 	metricNoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"go.opentelemetry.io/otel/trace"
 	traceNoop "go.opentelemetry.io/otel/trace/noop"
 
@@ -253,16 +256,32 @@ func newIsolatedKernel(
 	if isNilValue(m) {
 		m = metrics.NewMetricsManager(metricNoop.NewMeterProvider().Meter("pi"), logger)
 	}
-	hasCustomTP := !isNilValue(tp)
-	if !hasCustomTP {
-		tp = traceNoop.NewTracerProvider()
-	}
-
 	appName := "pi-app"
 	appVersion := "dev"
+	traceRatio := 1.0
 	if cfg != nil {
 		appName = cfg.GetOrDefault("APP_NAME", "pi-app")
 		appVersion = cfg.GetOrDefault("APP_VERSION", "dev")
+		if raw := strings.TrimSpace(cfg.Get("TRACER_RATIO")); raw != "" {
+			if parsed, err := strconv.ParseFloat(raw, 64); err == nil {
+				traceRatio = parsed
+			}
+		}
+	}
+
+	hasCustomTP := !isNilValue(tp)
+	if !hasCustomTP {
+		if traceRatio > 0 {
+			tp = sdktrace.NewTracerProvider(
+				sdktrace.WithResource(resource.NewWithAttributes(
+					semconv.SchemaURL,
+					semconv.ServiceNameKey.String(appName),
+				)),
+				sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(traceRatio))),
+			)
+		} else {
+			tp = traceNoop.NewTracerProvider()
+		}
 	}
 
 	k := &runtimeKernel{

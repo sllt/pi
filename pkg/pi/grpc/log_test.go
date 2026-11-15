@@ -120,6 +120,19 @@ func TestRPCLog_PrettyPrintWithStreamType(t *testing.T) {
 	output := buf.String()
 	assert.Contains(t, output, "[SERVER_STREAM]")
 	assert.Contains(t, output, "/test.Service/Method")
+
+	for _, id := range []string{"", "00000000000000000000000000000000"} {
+		var noIDBuf bytes.Buffer
+		zeroLog := gRPCLog{
+			ID:           id,
+			ResponseTime: 42,
+			Method:       "/test.Service/NoTrace",
+			StatusCode:   0,
+		}
+		zeroLog.PrettyPrint(&noIDBuf)
+		assert.NotContains(t, noIDBuf.String(), "00000000000000000000000000000000")
+		assert.Contains(t, noIDBuf.String(), "/test.Service/NoTrace")
+	}
 }
 
 func TestGetStreamTypeAndMethod(t *testing.T) {

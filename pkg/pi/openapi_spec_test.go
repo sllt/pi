@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/openapi"
 	"github.com/sllt/pi/pkg/pi/service"
 	"github.com/sllt/pi/pkg/pi/testkit"
@@ -756,5 +757,37 @@ func TestOpenAPISystemProbePathCollisions(t *testing.T) {
 				require.Contains(t, rec.Body.String(), `"CustomOK"`)
 			}
 		}
+	})
+
+	t.Run("HTTP server startup logs clickable Swagger UI URL when ServeUI is enabled", func(t *testing.T) {
+		var logBuf bytes.Buffer
+		app, err := pi.Build(
+			pi.WithConfig(map[string]string{
+				"HTTP_ADDR":       "127.0.0.1:0",
+				"HTTP_ENABLED":    "true",
+				"GRPC_ENABLED":    "false",
+				"METRICS_ENABLED": "false",
+				"PI_TELEMETRY":    "false",
+			}),
+			pi.WithLogger(logging.NewWriterLogger(logging.INFO, &logBuf, &logBuf)),
+			pi.WithOpenAPI(pi.OpenAPIConfig{
+				Title:     "StartupLogAPI",
+				Version:   "1.0.0",
+				ServeSpec: true,
+				ServeUI:   true,
+			}),
+		)
+		require.NoError(t, err)
+		require.NoError(t, pi.Register(app, func(ctx *pi.Context, req *oasPingReq) (*oasPingRes, error) {
+			return &oasPingRes{Status: "ok"}, nil
+		}))
+
+		require.NoError(t, app.Start(t.Context()))
+		t.Cleanup(func() { _ = app.Stop(t.Context()) })
+
+		logs := logBuf.String()
+		require.Contains(t, logs, "HTTP server listening on http://127.0.0.1:")
+		require.Contains(t, logs, "Swagger UI available at http://127.0.0.1:")
+		require.Contains(t, logs, "/.well-known/swagger")
 	})
 }
