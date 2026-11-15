@@ -1,217 +1,281 @@
 # Pi
 
-### 受监督运行时与类型化 HTTP / OpenAPI（v0.5.0）
+[![Go Reference](https://pkg.go.dev/badge/github.com/sllt/pi.svg)](https://pkg.go.dev/github.com/sllt/pi)
+[![Go Version](https://img.shields.io/badge/Go-1.27+-00ADD8?logo=go)](https://go.dev/)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 
-- **Tao Actor 受监督运行时**：内置基于 `github.com/sllt/tao/actor` 的隔离监督树，统一托管后台 Worker（`GoSupervised` / `WithRestartPolicy`）、Cron 调度（`CronSkipIfRunning` / `CronDelayIfRunning` 重入保护与优雅停机排空）、PubSub Subscriber（有界退避重连与 Ack/Nack 能力探针）及服务端/客户端 WebSocket 连接生命周期。
-- **探针与可观测性对齐**：新增 `/livez` 与 `/readyz` 健康探针（聚合受管资源与监督组件就绪态），并将 `WithMetrics` / `WithTracing` / `WithRemoteLogURL` 纳入 `Build` 显式生命周期管理，停止时按序排空并关闭导出器。
-- **泛型类型化路由与编译期/装配期预检**：提供 `pi.Handle`、`pi.GET` / `pi.POST` / `pi.PUT` / `pi.PATCH` / `pi.DELETE` 与 `RouteGroup` 泛型注册能力，请求结构体统一支持 `path` / `query` / `header` / `json` 绑定与 `validate` 校验。非法绑定标签、冲突参数、非法校验常量与不兼容的分组挂载在注册期立即记录并由 `app.RouteError()` / `Start` 拒绝，避免运行期 404 或 500。
-- **零外部工具 OpenAPI 3.0.3 与离线 Scalar UI**：无需 `swag` 注释生成，直接从已注册类型化路由导出或在线服务 OpenAPI 3.0.3（`app.OpenAPISpec` / `OpenAPIJSON` / `OpenAPIYAML`，在线端点 `/.well-known/openapi.json`、`/.well-known/openapi.yaml`），并内置零 CDN 依赖、预压缩的离线 Scalar API Reference 页面（默认 `/.well-known/swagger`）。
+English | [简体中文](./README.zh-CN.md)
 
-### 业务契约（v0.4.1）
+**Pi** is a production-grade Go microservice and web application framework built around explicit resource lifecycles, actor-supervised background runtimes, zero-reflection-call generic HTTP contracts, and built-in OpenAPI 3.0.3 with an offline Scalar API Reference UI.
 
-- `apperror.New(kind, code, publicMessage)` 定义业务错误，`WithCause` 保留内部错误链，`WithDetails` 只携带公开的字段/规则；未知错误统一脱敏。HTTP、`grpc.MapError`、`cmd.MapError` 分别映射协议状态和退出码，取消优先于其他错误，HTTP 兼容旧 Code/StatusCode 接口。
-- `auth.WithPrincipal` 仅用于已验证的 transport 或可信任务，不能从请求 userId 直接建立身份。`auth.Require` / `AuthorizeSubject` 让业务层执行本人或显式权限判断，权限切片跨 context 边界复制。
-- `response.OK/Created/Accepted/NoContent` 显式选择 200/201/202/204。`WithExplicitHTTPStatus()` 让其余成功结果默认 200；未选用时保留旧 method/data 推断。所有 204 都不写正文；error 优先于 data 和特殊响应。`response.Stream` 在 Handler 返回后同步写入，只继承客户端取消，长流自行设定时限；已提交后的错误只记录，不补 JSON。`response.Handled` 仅供明确接管响应的适配器。
-- HTTP Handler 独占请求体、header 和路由参数快照；超时后业务仍可能继续，迟到结果不会重新写响应。multipart 临时文件等到 Handler 和响应均结束后清理。Build 默认正文上限 1 MiB（`HTTP_MAX_BODY_BYTES` 可调），旧 New 上限 32 MiB。请求超时也约束读取正文；自定义 writer 需支持 ResponseController 的 deadline 或由宿主设置读超时。
-- SQL `BeginTxContext(ctx, opts)` 返回 Pi Tx/Executor 并保留所属 DB；嵌入的标准库 `BeginTx` 仍返回 `*database/sql.Tx`。`DB.Owns` / `Handle.Owns` 检查归属，`IsUniqueViolation` 分类唯一约束错误。SQL 日志不记录参数值。
-- gRPC wrapper 使用完整服务名、按 App 隔离的 health、安全错误映射与 protobuf 克隆绑定。`Bind` 目标必须是同类型 protobuf 指针，业务 DTO 由手写 adapter 显式转换；重新生成时保留手写 server。`NewPrincipalUnaryInterceptor` / `NewPrincipalStreamInterceptor` 只从已验证 Bearer 建立身份，授权继续放在 service。
+Pair Pi with the official [pi-layout](https://github.com/sllt/pi-layout) Fx scaffold and the `pi` CLI to generate reproducible, multi-transport Go services out of the box.
 
-框架与 pi-layout 的业务事务、跨入口授权示例以 SQLite 实测为基线；HTTP/gRPC 仍由应用选择注册。
-`make generator-integration` 使用固定 protoc/插件编译双 service 的 unary、server/client streaming、bidi 生成物。
-本地候选生成测试使用临时 replace；发布消费另外以无 replace 的实际 tag 验证。
+---
 
-### 显式构造与宿主集成（v0.4.0）
+## Highlights
 
-```go
-cfg, err := config.LoadSnapshot("configs", os.Environ()) // .env < 环境覆盖文件 < 显式环境
-if err != nil { return err }
-app, err := pi.Build(pi.WithConfig(cfg.Values()), pi.WithManagedSQL())
-if err != nil { return err }
-// 注册路由、OnStart/OnStop、Go workers，然后由宿主调用 Start/Stop。
-```
+- **Explicit Construction & Lifecycle (`pi.Build`)** — Pure, side-effect-free construction with explicit `Owned` / `Borrowed` resource ownership (`WithManagedSQL`, `WithResource`), deterministic reverse-order shutdown, and portless integration testing via `pkg/pi/testkit`.
+- **Typed HTTP Contracts & Pre-flight Validation** — Generic `pi.Register[Req, Res]` and `pi.Meta` struct tags bind `path`, `query`, `header`, and `json` inputs without `reflect.Value.Call` on the hot path. Route conflicts, invalid validation rules, and incompatible group mounts are caught before serving via `app.RouteError()`.
+- **Zero-Tooling OpenAPI 3.0.3 & Offline Scalar UI** — Export or serve deterministic OpenAPI 3.0.3 JSON/YAML directly from registered routes—no `swag` comment annotations or external codegen required. Includes a 100% air-gapped, pre-compressed Scalar API Reference UI (`/.well-known/swagger`).
+- **Actor-Supervised Runtime** — Powered by `github.com/sllt/tao/actor`, Pi supervises background workers (`AddWorker` with `SuperviseFatal`, `SuperviseRestart`, `SuperviseDegrade`), overlap-protected Cron jobs (`AddCron`), resilient Pub/Sub subscribers with bounded backoff and Ack/Nack capabilities, and managed WebSocket sessions.
+- **Unified Business Contracts & Security** — Protocol-agnostic `pkg/pi/apperror` maps cleanly across HTTP, gRPC, and CLI exit codes while sanitizing internal failures. `pkg/pi/auth` propagates verified `Principal` identities across transports; strict CORS, TLS validation, and bounded request body limits are enforced by default.
+- **Observability & Health Probes** — Instance-isolated OpenTelemetry tracing, Prometheus metrics, structured logging with secret redaction, dynamic remote log levels, and built-in `/livez` & `/readyz` probes.
+- **Reproducible CLI & Code Generation** — `cmd/pi` scaffolds verified projects (`pi init`), generates module skeletons (`pi create`), wraps protobuf gRPC servers (`pi wrap grpc`), and manages database migrations (`pi migrate`).
 
-`Build` 不读取隐式环境，不连接数据库、监听端口、安装全局 telemetry provider 或启动后台任务；
-配置快照与默认校验器按 App 隔离，`Snapshot.Redacted()` 可用于脱敏输出。`WithLogger`、`WithMetrics`、
-`WithValidator` 支持注入；指标监听默认关闭，启用时须提供 `WithMetricsHandler`，由应用显式管理 exporter。
-`WithManagedSQL` 在构造时提供稳定的 `Container().SQL` 句柄，`Start` 在应用 Hook 前激活连接；
-构造后的查询返回 `sql.ErrNotStarted`。不需要数据库时省略该选项。
+---
 
-外部 SQL 用 `WithSQL(db, pi.Borrowed)` 或 `pi.Owned` 声明关闭责任。其他资源用 `WithResource`：
-Owned 按登记顺序启动、逆序关闭，失败的 Start 也执行 Stop；Borrowed 不执行启动/关闭 Hook。
-仅已成功进入启动的资源与已经持有的 Owned 资源参与清理。构造参数不能在 Start 后修改。
+## Installation
 
-新入口的 `Start(ctx)` 仅把 ctx 用作启动预算；运行期由 `Stop`、`RunContext` 的外部取消或 fatal Worker
-错误结束。`Wait(ctx)` 等待完整清理并返回运行错误和清理错误，等待者超时不取消资源清理。
-单一启动/关闭、失败回滚、停止后不重启语义保持不变。旧 `New()` 保留环境加载、自动连接和旧 Start
-父 context 契约；迁移到 Build 时必须显式选用资源。完整观测 provider 管理与后台重连监督仍是后续范围。
-
-`app.HTTPHandler()` 编译完整路由但不监听端口；`app.Handler(fn)` 包装单个 Handler；`app.NewContext(ctx)`
-提供应用依赖但不授予身份。`pkg/pi/testkit` 提供自动清理、HTTP 请求与生命周期 Probe。
-路由注册应在首次 HTTPHandler/Start 前完成。示例见 `examples/build`；Fx 与一次性迁移的参考实现分别
-位于 pi-layout 的 `internal/bootstrap` 和 `internal/migrationcmd`。
-
-### Reproducible projects (v0.3.2)
-
-Install a specific CLI (`go install github.com/sllt/pi/cmd/pi@v0.5.0`), then run
-`pi init --module example.com/company/orders ./orders`. The default template ref
-matches the CLI version. `--ref` selects another tag/commit explicitly. Generated
-`.pi-template.json` records the CLI, framework, template ref/commit and verification
-result. Imports, proto options and serialized protobuf metadata use your module.
-Initialization builds with `-mod=readonly` in a temporary directory before delivery.
-`--offline --template /path/to/local/git-template` skips build verification and
-records `verified: false`; it never reports a verified application.
-
-Generators render/format before writing. Existing handwritten skeletons are
-preserved; wrapper regeneration replaces only files marked as generated. An init
-directory is delivered by rename; multi-file regeneration is not a filesystem
-transaction, so an uncatchable SIGKILL may require rerunning the generator.
-Use `make unit`, `make race`, `make generator` and `make modules` for separate
-checks. `make integration` enables migration real-backend checks when their
-`PI_MIGRATION_TEST_*` variables point to disposable databases. Independent adapter
-module builds are separate from the root module and do not certify backend behavior.
-
-一个为微服务开发而设计的 Go 语言框架。
-
-项目已由 Kite 更名为 Pi，CLI 命令为 `pi`，脚手架为 [pi-layout](https://github.com/sllt/pi-layout)。新 module 从 v0.2.4 开始发布；v0.3.0 提供 Migration v2。历史 `v0.2.3` 仍使用旧路径。
-
-## 核心特性
-
-### v0.3.1 配置与错误响应
-
-- `HTTP_ADDR`、`GRPC_ADDR`、`METRICS_ADDR` 接受 `host:port`，优先于对应 `*_HOST`/`*_PORT`；`[::1]:0` 支持 IPv6 和随机端口。启动后通过 `HTTPAddress()`、`GRPCAddress()`、`MetricsAddress()` 获取实际地址。
-- `*_ENABLED=false` 显式禁用；旧 HTTP/GRPC `PORT=0` 仍回落默认端口，旧 `METRICS_PORT=0` 仍禁用。端口冲突由 Start 返回，不在注册/构造阶段 Fatal。
-- HTTP 使用 `CERT_FILE`/`KEY_FILE`，gRPC 使用 `GRPC_CERT_FILE`/`GRPC_KEY_FILE`；必须成对、可解析且匹配，错误导致启动失败。
-- CORS 由框架统一处理，默认不允许跨域。`CORS_ALLOWED_ORIGINS` 是逗号分隔的完整 origin；另有 `CORS_ALLOWED_METHODS`、`CORS_ALLOWED_HEADERS`、`CORS_ALLOW_CREDENTIALS`、`CORS_EXPOSE_HEADERS`、`CORS_MAX_AGE`。新键优先于旧 `ACCESS_CONTROL_*` 键；通配 origin 不能同时允许 credentials。
-- HTTP 错误支持包装/Join。取消优先，其余按深度优先、从左到右选第一个状态错误，业务码与消息来自同一错误。5xx/未知错误默认隐藏内部消息；实现 `PublicMessage() string` 可显式提供安全消息。Handler 响应的 `X-Request-ID` 对应服务端错误日志中的 trace_id。
-
-安全兼容变化：依赖默认 `*` 的跨域客户端需要配置来源；未知错误不再把原始 Error 文本发给客户端，错误响应也不会返回附带的成功数据/文件。
-
-- **简洁的 API 语法** - 轻松定义路由和处理器
-- **RESTful 规范** - 默认遵循 REST 最佳实践
-- **配置管理** - 灵活的配置加载和管理
-- **完整的可观测性** - 内置日志、追踪和指标支持
-- **认证中间件** - 开箱即用的认证和自定义中间件
-- **gRPC 支持** - 原生支持 gRPC 服务
-- **HTTP 服务客户端** - 内置熔断器的 HTTP 客户端
-- **发布/订阅** - 简化的消息队列集成
-- **健康检查** - 所有数据源的自动健康检查
-- **数据库迁移** - 内置迁移管理工具
-- **定时任务** - Cron 任务调度支持
-- **动态日志级别** - 无需重启即可更改日志级别
-- **OpenAPI 与 Scalar 文档** - 自动从类型化路由生成 OpenAPI 3.0.3 规范并内置离线 Scalar UI
-- **文件系统抽象** - 统一的文件操作接口
-- **WebSocket** - 原生 WebSocket 支持
-
-## 快速开始
-
-### 安装
+### Framework Module
 
 ```bash
-go get github.com/sllt/pi
+go get github.com/sllt/pi@v0.5.0
 ```
 
-### 简单示例
-
-```go
-package main
-
-import "github.com/sllt/pi/pkg/pi"
-
-func main() {
-    app := pi.New()
-
-    app.GET("/greet", func(ctx *pi.Context) (any, error) {
-        return "Hello World!", nil
-    })
-
-    app.Run() // 监听 localhost:8000
-}
-```
-
-运行应用：
+### Pi CLI
 
 ```bash
-go run main.go
+go install github.com/sllt/pi/cmd/pi@v0.5.0
 ```
 
-访问 `http://localhost:8000/greet` 查看结果。
+Scaffold a new production-ready project from [pi-layout](https://github.com/sllt/pi-layout):
 
-### 使用数据库
+```bash
+pi init --module example.com/acme/orders ./orders
+```
+
+---
+
+## Quick Start
+
+Define strongly-typed request/response DTOs with `pi.Meta`, register handlers with `pi.Register`, and enable live OpenAPI 3.0.3 + Scalar UI:
 
 ```go
 package main
 
 import (
-    "fmt"
-    "github.com/sllt/pi/pkg/pi"
+	"log"
+
+	"github.com/sllt/pi/pkg/pi"
 )
 
+type GreetRequest struct {
+	pi.Meta `path:"/greetings/{name}" method:"GET" tags:"Greetings" summary:"Greet a user"`
+	Name    string `path:"name" validate:"required" dc:"Target user name"`
+	Title   string `query:"title" default:"friend" dc:"Optional honorific"`
+}
+
+type GreetResponse struct {
+	Message string `json:"message"`
+}
+
+func Greet(ctx *pi.Context, req *GreetRequest) (*GreetResponse, error) {
+	return &GreetResponse{
+		Message: "Hello, " + req.Title + " " + req.Name + "!",
+	}, nil
+}
+
 func main() {
-    app := pi.New()
+	app, err := pi.Build(
+		pi.WithConfig(map[string]string{
+			"APP_NAME":  "greeting-service",
+			"HTTP_ADDR": "127.0.0.1:8000",
+		}),
+		pi.WithExplicitHTTPStatus(),
+		pi.WithOpenAPI(pi.OpenAPIConfig{
+			Title:     "Greeting API",
+			Version:   "1.0.0",
+			ServeSpec: true,
+			ServeUI:   true,
+		}),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    app.GET("/redis", func(c *pi.Context) (any, error) {
-        val, err := c.Redis.Get(c, "key").Result()
-        if err != nil {
-            return nil, err
-        }
-        return val, nil
-    })
+	if err := pi.Register(app, Greet); err != nil {
+		log.Fatal(err)
+	}
 
-    app.GET("/sql", func(c *pi.Context) (any, error) {
-        var result int
-        err := c.SQL.QueryRowContext(c, "SELECT 2+2").Scan(&result)
-        if err != nil {
-            return nil, err
-        }
-        return result, nil
-    })
-
-    app.Run()
+	app.Run()
 }
 ```
 
-## 支持的数据源
+Run the server and explore the built-in endpoints:
 
-Pi 支持广泛的数据存储和服务：
+- `GET http://127.0.0.1:8000/greetings/alice?title=captain` — Typed JSON endpoint
+- `GET http://127.0.0.1:8000/.well-known/openapi.json` — Generated OpenAPI 3.0.3 JSON (`openapi.yaml` also available)
+- `GET http://127.0.0.1:8000/.well-known/swagger` — Built-in offline Scalar API Reference UI
+- `GET http://127.0.0.1:8000/livez` & `/readyz` — Liveness and readiness probes
 
-| 类别 | 数据源 |
-|------|--------|
-| **关系型数据库** | MySQL, PostgreSQL, SQLite, Oracle |
-| **NoSQL 数据库** | MongoDB, CouchBase, ArangoDB, SurrealDB |
-| **键值存储** | Redis, KV-Store |
-| **时序数据库** | InfluxDB, OpenTSDB |
-| **搜索引擎** | Elasticsearch, Solr |
-| **列式存储** | Cassandra, ScyllaDB, ClickHouse |
-| **图数据库** | Dgraph |
-| **消息队列** | PubSub (Kafka, Google PubSub 等) |
-| **文件系统** | 本地文件系统、S3、GCS 等抽象文件系统 |
-| **数据库路由** | DBResolver (多数据源管理) |
+---
 
-## 项目结构
+## Core Capabilities
 
+### 1. Explicit Configuration, Managed SQL & Transactions
+
+`pi.Build` never reads implicit global state or opens network sockets during construction. Connections activate in `Start` and close in reverse order during `Stop`:
+
+```go
+cfg, err := config.LoadSnapshot("configs", os.Environ())
+if err != nil {
+	return err
+}
+
+app, err := pi.Build(
+	pi.WithConfig(cfg.Values()),
+	pi.WithManagedSQL(),
+)
+if err != nil {
+	return err
+}
 ```
+
+Inside repositories or services, `BeginTxContext` returns a Pi `Tx` (`Executor`) with ownership tracking (`Owns`) and dialect-aware unique violation detection (`IsUniqueViolation`).
+
+### 2. Route Groups, Middleware & OpenAPI Security
+
+Group routes cleanly while inheriting middleware, OpenAPI tags, and security schemes:
+
+```go
+v1 := app.Group("/api/v1").WithDoc(pi.DocTags("Users"))
+_ = pi.Register(v1, userHandler.Login)
+
+authed := v1.Group("/users").
+	UseMiddleware(requireBearerMiddleware).
+	WithDoc(pi.DocSecurity("Bearer"))
+_ = pi.Register(authed, userHandler.GetProfile)
+_ = pi.Register(authed, userHandler.UpdateProfile)
+
+if err := app.RouteError(); err != nil {
+	return err
+}
+```
+
+To export OpenAPI specifications in CI without starting listeners or hooks, call `app.OpenAPIJSON()` or `app.OpenAPIYAML()`.
+
+### 3. Supervised Workers & Cron Scheduling
+
+Register resilient background workers and overlap-safe scheduled jobs under Pi's actor supervisor:
+
+```go
+// Restarting background worker with bounded exponential backoff
+err := app.AddWorker("outbox-relay", pi.WorkerPolicy{
+	Mode:          pi.SuperviseRestart,
+	Required:      true,
+	MaxRestarts:   5,
+	RestartWindow: time.Minute,
+}, func(ctx *pi.Context) error {
+	return relayOutbox(ctx.Context)
+})
+
+// Overlap-protected Cron job drained gracefully before resources close
+err = app.AddCron("0 */5 * * * *", "cleanup-expired-sessions", func(ctx *pi.Context) error {
+	return cleanupSessions(ctx.Context)
+}, pi.CronJobOptions{
+	Overlap:  pi.CronSkipIfRunning,
+	Location: time.UTC,
+})
+```
+
+### 4. Protocol-Agnostic Errors & Principal Authorization
+
+Define domain errors once with `pkg/pi/apperror` and enforce authorization in your service layer with `pkg/pi/auth`:
+
+```go
+var ErrEmailTaken = apperror.New(
+	apperror.KindConflict,
+	"USER_EMAIL_TAKEN",
+	"email address is already registered",
+)
+
+// Transport-neutral authorization check (self or explicit permission)
+if err := auth.AuthorizeSubject(ctx, targetUserID, "users:write:any"); err != nil {
+	return err
+}
+```
+
+`apperror.Error` maps automatically to HTTP status envelopes, `grpc.MapError` status codes, and `cmd.MapError` process exit codes without leaking internal causes on 5xx errors.
+
+### 5. Portless Testing with `testkit`
+
+Exercise full routing, middleware, binding, validation, and lifecycle cleanup in unit/integration tests without opening TCP ports:
+
+```go
+func TestGreet(t *testing.T) {
+	app := testkit.New(t, pi.WithExplicitHTTPStatus())
+	if err := pi.Register(app, Greet); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/greetings/world", nil)
+	rec := testkit.Request(t, app, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+```
+
+---
+
+## Datasources & Adapter Submodules
+
+Pi keeps core SQL, Redis, and standard messaging support in the root module while isolating heavy third-party drivers in independent Go submodules so your `go.mod` stays lean.
+
+| Category | Built-in (`github.com/sllt/pi`) | Independent Adapter Submodules (`@v0.5.0`) |
+| --- | --- | --- |
+| **Relational SQL** | MySQL, PostgreSQL, SQLite | `oracle`, `dbresolver` |
+| **Key-Value / Cache** | Redis | `kv-store/badger`, `kv-store/dynamodb`, `kv-store/nats` |
+| **Document / NoSQL** | — | `mongo`, `couchbase`, `arangodb`, `surrealdb` |
+| **Columnar / Wide-Column** | — | `clickhouse`, `cassandra`, `scylladb` |
+| **Time-Series** | — | `influxdb`, `opentsdb` |
+| **Search & Graph** | — | `elasticsearch`, `solr`, `dgraph` |
+| **Pub/Sub Messaging** | Kafka, MQTT, Google Pub/Sub | `pubsub/nats`, `pubsub/sqs`, `pubsub/eventhub` |
+| **File Storage** | Local Filesystem | `file/s3`, `file/gcs`, `file/azure`, `file/sftp`, `file/ftp` |
+
+Install any independent adapter submodule with matching version tags:
+
+```bash
+go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.0
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.0
+go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.0
+```
+
+---
+
+## Repository Structure
+
+```text
 pi/
-├── pkg/pi/              # 核心框架代码
-│   ├── datasource/        # 数据源连接器
-│   ├── metrics/           # 指标收集
-│   └── ...
-├── examples/              # 示例应用
-│   ├── http-server/       # HTTP 服务示例
-│   ├── grpc/              # gRPC 示例
-│   ├── using-migrations/  # 数据库迁移示例
-│   └── ...
-└── docs/                  # 文档
+├── cmd/pi/                  # Pi CLI (init, create, wrap, migrate)
+├── pkg/pi/                  # Core runtime, typed HTTP router, supervision & lifecycle
+│   ├── apperror/            # Protocol-agnostic business error model
+│   ├── auth/                # Verified Principal propagation & authorization helpers
+│   ├── cli/                 # CLI subcommand & template generators
+│   ├── config/              # Deterministic env/config snapshot loader & redaction
+│   ├── datasource/          # Built-in SQL/Redis/PubSub + 25 independent adapter modules
+│   ├── grpc/                # gRPC interceptors, health & error mapping
+│   ├── http/                # Router, middleware, responder & contract compiler
+│   ├── migration/           # Lock-protected Migration v2 engine
+│   ├── openapi/             # OpenAPI 3.0.3 AST, JSON/YAML serializer & Scalar UI helper
+│   ├── service/             # Circuit-breaker, retry & rate-limited HTTP client
+│   ├── testkit/             # Portless testing harness & lifecycle probes
+│   └── websocket/           # Managed WebSocket connections & hubs
+└── examples/                # Runnable HTTP, gRPC, Cron, PubSub & migration examples
 ```
 
-## 文档
+---
 
-- [GoDoc](https://pkg.go.dev/github.com/sllt/pi) - API 参考文档
-- [示例目录](examples/) - 更多可运行示例
+## Development & Verification
 
-## 许可证
+```bash
+make build          # Build root packages in readonly module mode
+make unit           # Run unit tests
+make race           # Run tests with the Go race detector enabled
+make modules        # Build all 25 independent datasource submodules + OpenAPI verifier
+make openapi-verify # Validate generated OpenAPI 3.0.3 schemas via kin-openapi
+```
 
-本项目采用 [Apache License 2.0](LICENSE) 许可证。
+---
 
-## 贡献
+## License
 
-欢迎贡献代码、提出建议或报告问题。
+Licensed under the [Apache License, Version 2.0](./LICENSE).
