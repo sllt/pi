@@ -21,7 +21,6 @@ import (
 
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/response"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
@@ -54,15 +53,13 @@ func TestHandler_ServeHTTP(t *testing.T) {
 	for i, tc := range testCases {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(tc.method, "/", http.NoBody)
-		c := &infra.Container{
-			Logger: logging.NewLogger(logging.FATAL),
-		}
+		c := newTestKernel(logging.NewLogger(logging.FATAL))
 
 		handler{
 			function: func(*Context) (any, error) {
 				return tc.data, tc.err
 			},
-			container: c,
+			rt: c,
 		}.ServeHTTP(w, r)
 
 		if tc.statusCode == http.StatusNoContent {
@@ -80,7 +77,7 @@ func TestHandler_ServeHTTP_Timeout(t *testing.T) {
 
 	h := handler{requestTimeout: 100 * time.Millisecond}
 
-	h.container = &infra.Container{Logger: logging.NewLogger(logging.FATAL)}
+	h.rt = newTestKernel(logging.NewLogger(logging.FATAL))
 	h.function = func(*Context) (any, error) {
 		time.Sleep(200 * time.Millisecond)
 
@@ -99,7 +96,7 @@ func TestHandler_ServeHTTP_Panic(t *testing.T) {
 
 	h := handler{}
 
-	h.container = &infra.Container{Logger: logging.NewLogger(logging.FATAL)}
+	h.rt = newTestKernel(logging.NewLogger(logging.FATAL))
 	h.function = func(*Context) (any, error) {
 		panic("runtime panic")
 	}
@@ -152,15 +149,13 @@ func TestHandler_ServeHTTP_WithHeaders(t *testing.T) {
 	for i, tc := range testCases {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(tc.method, "/", http.NoBody)
-		c := &infra.Container{
-			Logger: logging.NewLogger(logging.FATAL),
-		}
+		c := newTestKernel(logging.NewLogger(logging.FATAL))
 
 		handler{
 			function: func(*Context) (any, error) {
 				return tc.data, tc.err
 			},
-			container: c,
+			rt: c,
 		}.ServeHTTP(w, r)
 
 		assert.Containsf(t, w.Body.String(), tc.body, "TEST[%d], Failed.\n%s", i, tc.desc)
@@ -261,7 +256,7 @@ func TestHandler_healthHandler(t *testing.T) {
 
 	r := piHTTP.NewRequest(req)
 
-	ctx := newContext(nil, r, a.container)
+	ctx := newContext(nil, r, a.kernel)
 
 	h, err := healthHandler(ctx)
 
@@ -280,7 +275,7 @@ func TestHandler_ServeHTTP_ContextCanceled(t *testing.T) {
 	r = r.WithContext(ctx)
 
 	h := handler{
-		container: &infra.Container{Logger: logging.NewLogger(logging.FATAL)},
+		rt: newTestKernel(logging.NewLogger(logging.FATAL)),
 	}
 
 	h.function = func(*Context) (any, error) {
@@ -305,7 +300,7 @@ func TestHandler_ServeHTTP_ContextTimeout(t *testing.T) {
 	r = r.WithContext(ctx)
 
 	h := handler{
-		container: &infra.Container{Logger: logging.NewLogger(logging.FATAL)},
+		rt: newTestKernel(logging.NewLogger(logging.FATAL)),
 	}
 
 	h.function = func(*Context) (any, error) {

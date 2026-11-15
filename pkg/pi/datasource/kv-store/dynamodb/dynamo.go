@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -19,6 +20,7 @@ var (
 	errClientNotConnected = errors.New("client not connected, call Connect() first")
 	errKeyNotFound        = errors.New("key not found")
 	errStatusDown         = errors.New("status down")
+	errInvalidConfig      = errors.New("dynamodb: table and region are required")
 )
 
 type Configs struct {
@@ -67,16 +69,112 @@ func New(configs Configs) *Client {
 	return &Client{configs: &configs, connected: false}
 }
 
+// FromEnv constructs an unstarted DynamoDB KV client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
+
+	firstNonEmpty := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(get(k)); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	table := firstNonEmpty("DYNAMODB_TABLE")
+	region := firstNonEmpty("DYNAMODB_REGION", "AWS_REGION")
+	if table == "" || region == "" {
+		return nil, errInvalidConfig
+	}
+
+	return New(Configs{
+		Table:            table,
+		Region:           region,
+		Endpoint:         firstNonEmpty("DYNAMODB_ENDPOINT"),
+		PartitionKeyName: firstNonEmpty("DYNAMODB_PARTITION_KEY"),
+	}), nil
+}
+
+// ConnectContext initializes the DynamoDB client and verifies table reachability within ctx.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil || c.configs == nil || strings.TrimSpace(c.configs.Table) == "" || strings.TrimSpace(c.configs.Region) == "" {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.connected && c.db != nil {
+		return nil
+	}
+
+	if c.logger != nil {
+		c.logger.Debugf("connecting to DynamoDB table %v in region %v", c.configs.Table, c.configs.Region)
+	}
+
+	if c.metrics != nil {
+		dynamoBuckets := []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000}
+		c.metrics.NewHistogram("app_dynamodb_duration_ms", "Response time of DynamoDB queries in milliseconds.", dynamoBuckets...)
+	}
+
+	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(c.configs.Region))
+	if err != nil {
+		return err
+	}
+
+	var opts []func(*dynamodb.Options)
+	if c.configs.Endpoint != "" {
+		opts = append(opts, func(o *dynamodb.Options) {
+			o.BaseEndpoint = aws.String(c.configs.Endpoint)
+		})
+	}
+
+	db := dynamodb.NewFromConfig(awsCfg, opts...)
+	if _, err := db.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(c.configs.Table)}); err != nil {
+		return err
+	}
+
+	c.db = db
+	c.connected = true
+
+	if c.logger != nil {
+		c.logger.Infof("connected to DynamoDB table %v in region %v", c.configs.Table, c.configs.Region)
+	}
+
+	return nil
+}
+
+// Close resets the DynamoDB client state idempotently.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.db = nil
+	c.connected = false
+	return nil
+}
+
 // Connect establishes a connection to DynamoDB and registers metrics using the provided configuration.
 func (c *Client) Connect() {
-	c.logger.Debugf("connecting to DynamoDB table %v in region %v", c.configs.Table, c.configs.Region)
+	if c.logger != nil {
+		c.logger.Debugf("connecting to DynamoDB table %v in region %v", c.configs.Table, c.configs.Region)
+	}
 
-	dynamoBuckets := []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000}
-	c.metrics.NewHistogram("app_dynamodb_duration_ms", "Response time of DynamoDB queries in milliseconds.", dynamoBuckets...)
+	if c.metrics != nil {
+		dynamoBuckets := []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000}
+		c.metrics.NewHistogram("app_dynamodb_duration_ms", "Response time of DynamoDB queries in milliseconds.", dynamoBuckets...)
+	}
 
 	awsCfg, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(c.configs.Region))
 	if err != nil {
-		c.logger.Errorf("error loading AWS config: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("error loading AWS config: %v", err)
+		}
 		return
 	}
 
@@ -92,7 +190,9 @@ func (c *Client) Connect() {
 	c.db = db
 	c.connected = true
 
-	c.logger.Infof("connected to DynamoDB table %v in region %v", c.configs.Table, c.configs.Region)
+	if c.logger != nil {
+		c.logger.Infof("connected to DynamoDB table %v in region %v", c.configs.Table, c.configs.Region)
+	}
 }
 
 // UseLogger sets the logger for the Dynamo client which asserts the Logger interface.
@@ -136,7 +236,7 @@ func FromJSON(jsonData string, dest any) error {
 }
 
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
-	if !c.connected {
+	if c == nil || !c.connected || c.db == nil || c.configs == nil {
 		return "", errClientNotConnected
 	}
 
@@ -152,7 +252,9 @@ func (c *Client) Get(ctx context.Context, key string) (string, error) {
 
 	out, err := c.db.GetItem(ctx, input)
 	if err != nil {
-		c.logger.Errorf("error while fetching data for key: %v, error: %v", key, err)
+		if c.logger != nil {
+			c.logger.Errorf("error while fetching data for key: %v, error: %v", key, err)
+		}
 		return "", err
 	}
 
@@ -172,7 +274,7 @@ func (c *Client) Get(ctx context.Context, key string) (string, error) {
 }
 
 func (c *Client) Set(ctx context.Context, key, value string) error {
-	if !c.connected {
+	if c == nil || !c.connected || c.db == nil || c.configs == nil {
 		return errClientNotConnected
 	}
 
@@ -192,7 +294,9 @@ func (c *Client) Set(ctx context.Context, key, value string) error {
 
 	_, err := c.db.PutItem(ctx, input)
 	if err != nil {
-		c.logger.Errorf("error while setting data for key: %v, error: %v", key, err)
+		if c.logger != nil {
+			c.logger.Errorf("error while setting data for key: %v, error: %v", key, err)
+		}
 		return err
 	}
 
@@ -200,7 +304,7 @@ func (c *Client) Set(ctx context.Context, key, value string) error {
 }
 
 func (c *Client) Delete(ctx context.Context, key string) error {
-	if !c.connected {
+	if c == nil || !c.connected || c.db == nil || c.configs == nil {
 		return errClientNotConnected
 	}
 
@@ -216,7 +320,9 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 
 	_, err := c.db.DeleteItem(ctx, input)
 	if err != nil {
-		c.logger.Errorf("error while deleting data for key: %v, error: %v", key, err)
+		if c.logger != nil {
+			c.logger.Errorf("error while deleting data for key: %v, error: %v", key, err)
+		}
 
 		return err
 	}
@@ -230,8 +336,11 @@ type Health struct {
 }
 
 func (c *Client) HealthCheck(ctx context.Context) (any, error) {
-	if !c.connected {
+	if c == nil || c.configs == nil || !c.connected || c.db == nil {
 		return &Health{Status: "DOWN", Details: map[string]any{"error": "client not connected"}}, errStatusDown
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	h := Health{
@@ -263,12 +372,14 @@ func (c *Client) sendOperationsStats(start time.Time, methodType, method string,
 		key = kv[0]
 	}
 
-	c.logger.Debug(&Log{
-		Type:     methodType,
-		Duration: duration.Microseconds(),
-		Key:      key,
-		Value:    c.configs.Table,
-	})
+	if c.logger != nil {
+		c.logger.Debug(&Log{
+			Type:     methodType,
+			Duration: duration.Microseconds(),
+			Key:      key,
+			Value:    c.configs.Table,
+		})
+	}
 
 	if span != nil {
 		defer span.End()
@@ -276,9 +387,11 @@ func (c *Client) sendOperationsStats(start time.Time, methodType, method string,
 		span.SetAttributes(attribute.Int64(fmt.Sprintf("dynamodb.%v.duration(μs)", method), duration.Microseconds()))
 	}
 
-	c.metrics.RecordHistogram(context.Background(), "app_dynamodb_duration_ms", float64(duration.Milliseconds()),
-		"table", c.configs.Table,
-		"operation", methodType)
+	if c.metrics != nil {
+		c.metrics.RecordHistogram(context.Background(), "app_dynamodb_duration_ms", float64(duration.Milliseconds()),
+			"table", c.configs.Table,
+			"operation", methodType)
+	}
 }
 
 func (c *Client) addTrace(ctx context.Context, method, key string) trace.Span {

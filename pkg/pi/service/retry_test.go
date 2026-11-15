@@ -22,13 +22,6 @@ func (*mockHTTP) HealthCheck(_ context.Context) *Health {
 	}
 }
 
-func (*mockHTTP) getHealthResponseForEndpoint(_ context.Context, _ string, _ int) *Health {
-	return &Health{
-		Status:  "UP",
-		Details: map[string]any{"host": "http://test.com"},
-	}
-}
-
 func (*mockHTTP) Get(_ context.Context, _ string, _ map[string]any) (*http.Response, error) {
 	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 }

@@ -442,3 +442,46 @@ func newService(t *testing.T, server *httptest.Server) *httpService {
 		Logger: logging.NewMockLogger(logging.INFO),
 	}
 }
+
+func TestHTTPService_NilLoggerMetricsAndTelemetryInjection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/alive" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Standalone nil logger & nil metrics must not panic on requests or HealthCheck.
+	svc := NewHTTPService(server.URL, nil, nil, &RetryConfig{MaxRetries: 1}, &CircuitBreakerConfig{Threshold: 3})
+	resp, err := svc.Get(t.Context(), "items", nil)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	_ = resp.Body.Close()
+
+	health := svc.HealthCheck(t.Context())
+	require.NotNil(t, health)
+	assert.Equal(t, serviceUp, health.Status)
+
+	// Telemetry injection propagates through decorator chains.
+	ctrl := gomock.NewController(t)
+	mockMetrics := NewMockMetrics(ctrl)
+	mockMetrics.EXPECT().SetGauge("app_http_circuit_breaker_state", 0.0, "service", "orders").Times(1)
+	mockMetrics.EXPECT().RecordHistogram(gomock.Any(), "app_http_service_response", gomock.Any(),
+		"path", server.URL, "method", http.MethodGet, "status", "200", "service", "orders").Times(1)
+
+	tp := trace.NewTracerProvider()
+	defer func() { _ = tp.Shutdown(t.Context()) }()
+
+	propagateServiceName(svc, "orders")
+	propagateLogger(svc, logging.NewMockLogger(logging.INFO))
+	propagateMetrics(svc, mockMetrics)
+	propagateTracerProvider(svc, tp)
+
+	resp2, err := svc.Get(t.Context(), "items", nil)
+	require.NoError(t, err)
+	require.NotNil(t, resp2)
+	_ = resp2.Body.Close()
+	require.NoError(t, CloseService(svc))
+}

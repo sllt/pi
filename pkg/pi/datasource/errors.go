@@ -1,9 +1,21 @@
 package datasource
 
 import (
+	stdErrors "errors"
 	"net/http"
 
 	"github.com/pkg/errors"
+)
+
+var (
+	// ErrAdapterNotFound indicates no registered adapter or core resource matches the lookup.
+	ErrAdapterNotFound = stdErrors.New("datasource: adapter not found")
+	// ErrAmbiguousAdapter indicates two or more registered adapters/resources satisfy the lookup type.
+	ErrAmbiguousAdapter = stdErrors.New("datasource: multiple adapters match requested type")
+	// ErrInvalidAdapterType indicates an unsupported lookup type (such as empty interface `any`) or incompatible type assertion.
+	ErrInvalidAdapterType = stdErrors.New("datasource: invalid or incompatible adapter type")
+	// ErrTransactionalDatasource indicates a migration attempted to resolve an underlying non-transactional pool while an active transaction/pipeline owns the connection.
+	ErrTransactionalDatasource = stdErrors.New("datasource: use transactional Datasource field instead of underlying pool during migration")
 )
 
 // ErrorDB represents an error specific to database operations.

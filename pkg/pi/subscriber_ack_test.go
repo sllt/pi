@@ -10,9 +10,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 )
+
+func newTestSubscriptionKernel(client pubsub.Subscriber) *runtimeKernel {
+	k := newLegacyKernel(nil, logging.NewLogger(logging.FATAL), false)
+	if ps, ok := client.(pubsub.Client); ok {
+		k.pubsub = ps
+	}
+	return k
+}
 
 type subscriptionReadProbe struct {
 	mockSubscriber
@@ -61,7 +68,7 @@ func TestSubscription_CommitOnlySuccessfulActiveMessage(t *testing.T) {
 				}
 				return message, nil
 			}}
-			manager := newSubscriptionManager(&infra.Container{Logger: logging.NewLogger(logging.FATAL), PubSub: client})
+			manager := newSubscriptionManager(newTestSubscriptionKernel(client))
 			err := manager.handleSubscription(ctx, "orders", func(*Context) error {
 				calls++
 				switch outcome {
@@ -116,7 +123,7 @@ func TestSubscription_RuntimeCancelsDetachedMessage(t *testing.T) {
 	commits := &commitProbe{}
 	message.Committer = commits
 	client := subscriptionReadProbe{read: func(context.Context, string) (*pubsub.Message, error) { return message, nil }}
-	manager := newSubscriptionManager(&infra.Container{Logger: logging.NewLogger(logging.FATAL), PubSub: client})
+	manager := newSubscriptionManager(newTestSubscriptionKernel(client))
 	entered, result := make(chan struct{}), make(chan error, 1)
 	go func() {
 		result <- manager.handleSubscription(ctx, "orders", func(c *Context) error {
@@ -140,7 +147,7 @@ func TestSubscription_CancelStopsRetryLoop(t *testing.T) {
 	message.Committer = commits
 	var reads int
 	client := subscriptionReadProbe{read: func(context.Context, string) (*pubsub.Message, error) { reads++; return message, nil }}
-	manager := newSubscriptionManager(&infra.Container{Logger: logging.NewLogger(logging.FATAL), PubSub: client})
+	manager := newSubscriptionManager(newTestSubscriptionKernel(client))
 	err := manager.startSubscriber(ctx, "orders", func(*Context) error { cancel(); panic("failed on shutdown") })
 	require.NoError(t, err)
 	assert.Equal(t, 1, reads)

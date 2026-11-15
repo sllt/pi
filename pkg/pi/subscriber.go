@@ -7,7 +7,6 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 )
 
@@ -16,13 +15,13 @@ type SubscribeFunc func(c *Context) error
 var errSubscriptionHandlerPanic = errors.New("subscription handler panicked")
 
 type SubscriptionManager struct {
-	container     *infra.Container
+	rt            *runtimeKernel
 	subscriptions map[string]SubscribeFunc
 }
 
-func newSubscriptionManager(c *infra.Container) SubscriptionManager {
+func newSubscriptionManager(rt *runtimeKernel) SubscriptionManager {
 	return SubscriptionManager{
-		container:     c,
+		rt:            rt,
 		subscriptions: make(map[string]SubscribeFunc),
 	}
 }
@@ -34,7 +33,7 @@ func (s *SubscriptionManager) startSubscriber(ctx context.Context, topic string,
 	for {
 		select {
 		case <-ctx.Done():
-			s.container.Logger.Infof("shutting down subscriber for topic %s", topic)
+			s.rt.getLogger().Infof("shutting down subscriber for topic %s", topic)
 			return nil
 		case <-time.After(delay):
 			err := s.handleSubscription(ctx, topic, handler)
@@ -42,7 +41,7 @@ func (s *SubscriptionManager) startSubscriber(ctx context.Context, topic string,
 				return nil
 			}
 			if err != nil {
-				s.container.Logger.Errorf("error in subscription for topic %s: %v", topic, err)
+				s.rt.getLogger().Errorf("error in subscription for topic %s: %v", topic, err)
 
 				delay = time.Second * 2
 			} else {
@@ -56,9 +55,13 @@ func (s *SubscriptionManager) handleSubscription(ctx context.Context, topic stri
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	msg, err := s.container.GetSubscriber().Subscribe(ctx, topic)
+	sub := s.rt.getSubscriber()
+	if sub == nil {
+		return errSubscriberNotInitialized
+	}
+	msg, err := sub.Subscribe(ctx, topic)
 	if err != nil {
-		s.container.Logger.Errorf("error while reading from topic %v, err: %v", topic, err.Error())
+		s.rt.getLogger().Errorf("error while reading from topic %v, err: %v", topic, err.Error())
 
 		return err
 	}
@@ -79,13 +82,14 @@ func (s *SubscriptionManager) handleSubscription(ctx context.Context, topic stri
 	if err := handlerCtx.Err(); err != nil {
 		return err
 	}
-	msgCtx := newContext(nil, msg, s.container)
+	msgCtx := newContext(nil, msg, s.rt)
 	msgCtx.Context = handlerCtx
+	msgCtx.ContextLogger.UpdateContext(handlerCtx)
 
 	err = func(ctx *Context) (handlerErr error) {
 		defer func() {
 			if re := recover(); re != nil {
-				panicRecovery(re, s.container.Logger)
+				panicRecovery(re, s.rt.getLogger())
 				handlerErr = fmt.Errorf("%w: %v", errSubscriptionHandlerPanic, re)
 			}
 		}()
@@ -93,7 +97,7 @@ func (s *SubscriptionManager) handleSubscription(ctx context.Context, topic stri
 		return handler(ctx)
 	}(msgCtx)
 	if err != nil {
-		s.container.Logger.Errorf("error in handler for topic %s: %v", topic, err)
+		s.rt.getLogger().Errorf("error in handler for topic %s: %v", topic, err)
 
 		return err
 	}

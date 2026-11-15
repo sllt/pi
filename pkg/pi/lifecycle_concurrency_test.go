@@ -12,9 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sllt/pi/pkg/pi/config"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
-	"github.com/sllt/pi/pkg/pi/websocket"
 )
 
 type lifecycleCloseProbe struct {
@@ -32,9 +30,10 @@ func newLifecycleProbe(t *testing.T) (*App, *lifecycleCloseProbe) {
 	t.Helper()
 	p := &lifecycleCloseProbe{}
 	a := &App{
-		Config:    config.NewMockConfig(map[string]string{"SHUTDOWN_GRACE_PERIOD": "2s"}),
-		container: &infra.Container{Logger: logging.NewLogger(logging.FATAL), PubSub: p, WSManager: websocket.New()},
+		Config: config.NewMockConfig(map[string]string{"SHUTDOWN_GRACE_PERIOD": "2s"}),
+		kernel: newLegacyKernel(nil, logging.NewLogger(logging.FATAL), false),
 	}
+	require.NoError(t, a.SetPubSub(p, Owned))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()

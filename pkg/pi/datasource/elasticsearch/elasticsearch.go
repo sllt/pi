@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,17 +23,42 @@ const (
 )
 
 var (
-	errEmptyIndex        = errors.New("index name cannot be empty")
-	errEmptyDocumentID   = errors.New("document ID cannot be empty")
-	errEmptyQuery        = errors.New("query cannot be empty")
-	errEmptyOperations   = errors.New("operations cannot be empty")
-	errHealthCheckFailed = errors.New("elasticsearch health check failed")
-	errOperation         = errors.New("elasticsearch operation error")
-	errMarshaling        = errors.New("error marshaling data")
-	errParsingResponse   = errors.New("error parsing response")
-	errResponse          = errors.New("invalid elasticsearch response")
-	errEncodingOperation = errors.New("error encoding operation")
+	errEmptyIndex         = errors.New("index name cannot be empty")
+	errEmptyDocumentID    = errors.New("document ID cannot be empty")
+	errEmptyQuery         = errors.New("query cannot be empty")
+	errEmptyOperations    = errors.New("operations cannot be empty")
+	errHealthCheckFailed  = errors.New("elasticsearch health check failed")
+	errOperation          = errors.New("elasticsearch operation error")
+	errMarshaling         = errors.New("error marshaling data")
+	errParsingResponse    = errors.New("error parsing response")
+	errResponse           = errors.New("invalid elasticsearch response")
+	errEncodingOperation  = errors.New("error encoding operation")
+	errInvalidConfig      = errors.New("elasticsearch: at least one address is required")
+	errClientNotConnected = errors.New("elasticsearch: client not connected")
 )
+
+func redactAddresses(addresses []string) []string {
+	if len(addresses) == 0 {
+		return nil
+	}
+	out := make([]string, len(addresses))
+	for i, raw := range addresses {
+		out[i] = redactAddress(raw)
+	}
+	return out
+}
+
+func redactAddress(raw string) string {
+	if !strings.Contains(raw, "@") {
+		return raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.User == nil {
+		return raw
+	}
+	parsed.User = nil
+	return parsed.String()
+}
 
 // Config holds the configuration for connecting to Elasticsearch.
 type Config struct {
@@ -78,34 +104,138 @@ func New(config Config) *Client {
 	}
 }
 
-func (c *Client) Connect() {
+// FromEnv constructs an unstarted Elasticsearch client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
+
+	rawAddresses := strings.TrimSpace(get("ELASTICSEARCH_ADDRESSES"))
+	if rawAddresses == "" {
+		rawAddresses = strings.TrimSpace(get("ELASTICSEARCH_URL"))
+	}
+	var addresses []string
+	for _, part := range strings.Split(rawAddresses, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			addresses = append(addresses, trimmed)
+		}
+	}
+	if len(addresses) == 0 {
+		return nil, errInvalidConfig
+	}
+
+	username := strings.TrimSpace(get("ELASTICSEARCH_USERNAME"))
+	if username == "" {
+		username = strings.TrimSpace(get("ELASTICSEARCH_USER"))
+	}
+
+	return New(Config{
+		Addresses: addresses,
+		Username:  username,
+		Password:  get("ELASTICSEARCH_PASSWORD"),
+	}), nil
+}
+
+// ConnectContext creates an Elasticsearch client and verifies connectivity within ctx.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil || len(c.config.Addresses) == 0 {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.client != nil {
+		return nil
+	}
+
 	cfg := es.Config{
 		Addresses: c.config.Addresses,
 		Username:  c.config.Username,
 		Password:  c.config.Password,
 	}
 
-	c.logger.Debugf("connecting to Elasticsearch at %v", c.config.Addresses)
+	if c.logger != nil {
+		c.logger.Debugf("connecting to Elasticsearch at %v", redactAddresses(c.config.Addresses))
+	}
 
 	client, err := es.NewClient(cfg)
 	if err != nil {
-		c.logger.Errorf("error creating Elasticsearch client: %v", err)
+		return err
+	}
+
+	c.client = client
+
+	if c.metrics != nil {
+		responseTimeBuckets := []float64{0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0}
+		c.metrics.NewHistogram("es_request_duration_ms", "Duration of Elasticsearch requests in ms", responseTimeBuckets...)
+	}
+
+	if _, err := c.HealthCheck(ctx); err != nil {
+		_ = c.Close()
+		return err
+	}
+
+	if c.logger != nil {
+		c.logger.Logf("connected to Elasticsearch successfully at : %v", redactAddresses(c.config.Addresses))
+	}
+
+	return nil
+}
+
+// Close resets the Elasticsearch client idempotently.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.client = nil
+	return nil
+}
+
+func (c *Client) Connect() {
+	if c == nil {
+		return
+	}
+
+	cfg := es.Config{
+		Addresses: c.config.Addresses,
+		Username:  c.config.Username,
+		Password:  c.config.Password,
+	}
+
+	if c.logger != nil {
+		c.logger.Debugf("connecting to Elasticsearch at %v", redactAddresses(c.config.Addresses))
+	}
+
+	client, err := es.NewClient(cfg)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Errorf("error creating Elasticsearch client: %v", err)
+		}
 
 		return
 	}
 
 	c.client = client
 
-	var responseTimeBuckets = []float64{0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0}
+	if c.metrics != nil {
+		var responseTimeBuckets = []float64{0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0}
 
-	c.metrics.NewHistogram("es_request_duration_ms", "Duration of Elasticsearch requests in ms", responseTimeBuckets...)
+		c.metrics.NewHistogram("es_request_duration_ms", "Duration of Elasticsearch requests in ms", responseTimeBuckets...)
+	}
 
 	if _, err := c.HealthCheck(context.Background()); err != nil {
-		c.logger.Errorf("Elasticsearch health check failed: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("Elasticsearch health check failed: %v", err)
+		}
 		return
 	}
 
-	c.logger.Logf("connected to Elasticsearch successfully at : %v", c.config.Addresses)
+	if c.logger != nil {
+		c.logger.Logf("connected to Elasticsearch successfully at : %v", redactAddresses(c.config.Addresses))
+	}
 }
 
 // CreateIndex creates an index in Elasticsearch with the specified settings.
@@ -113,10 +243,16 @@ func (c *Client) CreateIndex(ctx context.Context, index string, settings map[str
 	if strings.TrimSpace(index) == "" {
 		return errEmptyIndex
 	}
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
 
 	start := time.Now()
 
 	tracedCtx, span := c.addTrace(ctx, "create-index", []string{index}, "")
+	if span != nil {
+		defer span.End()
+	}
 
 	body, err := json.Marshal(settings)
 	if err != nil {
@@ -148,10 +284,16 @@ func (c *Client) DeleteIndex(ctx context.Context, index string) error {
 	if strings.TrimSpace(index) == "" {
 		return errEmptyIndex
 	}
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
 
 	start := time.Now()
 
 	tracedCtx, span := c.addTrace(ctx, "delete-index", []string{index}, "")
+	if span != nil {
+		defer span.End()
+	}
 
 	req := esapi.IndicesDeleteRequest{
 		Index: []string{index},
@@ -184,9 +326,16 @@ func (c *Client) Search(ctx context.Context, indices []string, query map[string]
 		return nil, errEmptyQuery
 	}
 
+	if c == nil || c.client == nil {
+		return nil, errClientNotConnected
+	}
+
 	start := time.Now()
 
 	tracedCtx, span := c.addTrace(ctx, "search", indices, "")
+	if span != nil {
+		defer span.End()
+	}
 
 	body, err := json.Marshal(query)
 	if err != nil {
@@ -227,8 +376,15 @@ func (c *Client) Bulk(ctx context.Context, operations []map[string]any) (map[str
 		return nil, errEmptyOperations
 	}
 
+	if c == nil || c.client == nil {
+		return nil, errClientNotConnected
+	}
+
 	start := time.Now()
 	tracedCtx, span := c.addTrace(ctx, "bulk", nil, "")
+	if span != nil {
+		defer span.End()
+	}
 
 	var buf bytes.Buffer
 	for _, op := range operations {
@@ -271,11 +427,28 @@ type Health struct {
 
 // HealthCheck verifies connectivity via Ping, then enriches via Info().
 func (c *Client) HealthCheck(ctx context.Context) (any, error) {
+	if c == nil {
+		return &Health{
+			Status:  statusDown,
+			Details: map[string]any{"error": "elasticsearch client is nil"},
+		}, errHealthCheckFailed
+	}
+
 	h := Health{Details: make(map[string]any)}
-	h.Details["addresses"] = c.config.Addresses
+	h.Details["addresses"] = redactAddresses(c.config.Addresses)
 	h.Details["username"] = c.config.Username
 
-	// 1) Ping with a 2s timeout
+	if c.client == nil {
+		h.Status = statusDown
+		h.Details["error"] = "elasticsearch not connected"
+		return &h, errHealthCheckFailed
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// 1) Ping with bounded timeout
 	pingCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
@@ -298,7 +471,7 @@ func (c *Client) HealthCheck(ctx context.Context) (any, error) {
 	}
 
 	// 2) Fetch cluster info for more details
-	infoRes, err := c.client.Info()
+	infoRes, err := c.client.Info(c.client.Info.WithContext(pingCtx))
 	if err == nil {
 		defer infoRes.Body.Close()
 
@@ -360,7 +533,9 @@ func (c *Client) sendOperationStats(start time.Time,
 		span.End()
 	}
 
-	c.metrics.RecordHistogram(context.Background(), "es_request_duration_ms", float64(duration))
+	if c.metrics != nil {
+		c.metrics.RecordHistogram(context.Background(), "es_request_duration_ms", float64(duration))
+	}
 
 	// Structured log
 	ql := QueryLog{

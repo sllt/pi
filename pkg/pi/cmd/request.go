@@ -12,6 +12,7 @@ import (
 // to create cmd applications in same way we would create a HTTP server application.
 // Pi's http.Request is another such abstraction.
 type Request struct {
+	ctx    context.Context
 	flags  map[string]bool
 	params map[string]string
 	args   []string // positional arguments (non-flag arguments after command)
@@ -24,7 +25,13 @@ const trueString = "true"
 // NewRequest creates a Request from a list of arguments. This way we can simulate running a command without actually
 // doing it. It makes the code more testable this way.
 func NewRequest(args []string) *Request {
+	return NewRequestWithContext(nil, args)
+}
+
+// NewRequestWithContext creates a Request bound to the given lifecycle/cancellation context.
+func NewRequestWithContext(ctx context.Context, args []string) *Request {
 	r := Request{
+		ctx:    ctx,
 		flags:  make(map[string]bool),
 		params: make(map[string]string),
 		args:   make([]string, 0),
@@ -109,7 +116,11 @@ func (r *Request) Args() []string {
 	return r.args
 }
 
-func (*Request) Context() context.Context {
+func (r *Request) Context() context.Context {
+	if r != nil && r.ctx != nil {
+		return r.ctx
+	}
+
 	return context.Background()
 }
 

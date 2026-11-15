@@ -12,7 +12,6 @@ import (
 
 	"github.com/sllt/pi/pkg/pi/config"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 // TestRouteRegistry_BasicCompile tests that routes registered via the registry
@@ -20,7 +19,7 @@ import (
 func TestRouteRegistry_BasicCompile(t *testing.T) {
 	reg := newRouteRegistry()
 	mux := chi.NewRouter()
-	container := infra.NewContainer(config.NewMockConfig(nil))
+	container := newTestKernel(nil)
 
 	reg.root.routes = append(reg.root.routes, RouteDef{
 		Method:  "GET",
@@ -45,7 +44,7 @@ func TestRouteRegistry_BasicCompile(t *testing.T) {
 func TestRouteRegistry_GroupPrefix(t *testing.T) {
 	reg := newRouteRegistry()
 	mux := chi.NewRouter()
-	container := infra.NewContainer(config.NewMockConfig(nil))
+	container := newTestKernel(nil)
 
 	child := &GroupNode{prefix: "/api"}
 	child.routes = append(child.routes, RouteDef{
@@ -80,7 +79,7 @@ func TestRouteRegistry_GroupPrefix(t *testing.T) {
 func TestRouteRegistry_NestedGroups(t *testing.T) {
 	reg := newRouteRegistry()
 	mux := chi.NewRouter()
-	container := infra.NewContainer(config.NewMockConfig(nil))
+	container := newTestKernel(nil)
 
 	api := &GroupNode{prefix: "/api"}
 	v1 := &GroupNode{prefix: "/v1"}
@@ -109,7 +108,7 @@ func TestRouteRegistry_NestedGroups(t *testing.T) {
 func TestRouteRegistry_HTTPMiddleware(t *testing.T) {
 	reg := newRouteRegistry()
 	mux := chi.NewRouter()
-	container := infra.NewContainer(config.NewMockConfig(nil))
+	container := newTestKernel(nil)
 
 	child := &GroupNode{prefix: "/api"}
 	child.httpMWs = append(child.httpMWs, func(next http.Handler) http.Handler {
@@ -141,7 +140,7 @@ func TestRouteRegistry_HTTPMiddleware(t *testing.T) {
 func TestRouteRegistry_HTTPMiddlewareIsolation(t *testing.T) {
 	reg := newRouteRegistry()
 	mux := chi.NewRouter()
-	container := infra.NewContainer(config.NewMockConfig(nil))
+	container := newTestKernel(nil)
 
 	// Group A with middleware
 	groupA := &GroupNode{prefix: "/a"}
@@ -183,7 +182,7 @@ func TestRouteRegistry_HTTPMiddlewareIsolation(t *testing.T) {
 func TestRouteRegistry_PiMiddleware(t *testing.T) {
 	reg := newRouteRegistry()
 	mux := chi.NewRouter()
-	container := infra.NewContainer(config.NewMockConfig(nil))
+	container := newTestKernel(nil)
 
 	var order []string
 
@@ -230,7 +229,7 @@ func TestRouteRegistry_PiMiddleware(t *testing.T) {
 func TestRouteRegistry_PiMiddlewareShortCircuit(t *testing.T) {
 	reg := newRouteRegistry()
 	mux := chi.NewRouter()
-	container := infra.NewContainer(config.NewMockConfig(nil))
+	container := newTestKernel(nil)
 
 	handlerCalled := false
 
@@ -304,7 +303,7 @@ func TestComposePiMiddleware(t *testing.T) {
 func TestRouteRegistry_MergeDuplicatePrefixesDefensively(t *testing.T) {
 	reg := newRouteRegistry()
 	mux := chi.NewRouter()
-	container := infra.NewContainer(config.NewMockConfig(nil))
+	container := newTestKernel(nil)
 
 	first := &GroupNode{prefix: "/api"}
 	first.routes = append(first.routes, RouteDef{
@@ -355,7 +354,7 @@ func TestAppGroup_NormalizesAndMergesPrefixes(t *testing.T) {
 		})
 	})
 
-	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/users", http.NoBody)
 	rec := httptest.NewRecorder()
@@ -378,7 +377,7 @@ func TestAppGroup_ReturnedGroupStyle(t *testing.T) {
 		return "healthy", nil
 	})
 
-	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", http.NoBody)
 	rec := httptest.NewRecorder()
@@ -402,7 +401,7 @@ func TestRouteGroup_ReturnedNestedGroupStyle(t *testing.T) {
 		return "ok", nil
 	})
 
-	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", http.NoBody)
 	rec := httptest.NewRecorder()
@@ -434,7 +433,7 @@ func TestAppGroup_EmptyPrefixWithMiddlewareDoesNotPanic(t *testing.T) {
 	})
 
 	assert.NotPanics(t, func() {
-		app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+		app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/base", http.NoBody)
@@ -474,7 +473,7 @@ func TestRouteRegistry_MutationsAfterCompileAreBlocked(t *testing.T) {
 		})
 	})
 
-	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
 
 	rootRoutes := len(app.httpServer.registry.root.routes)
 	rootHTTPMWs := len(app.httpServer.registry.root.httpMWs)
@@ -590,7 +589,7 @@ func TestRouteRegistry_NestedAndFlatParameterGroupsCoexistWithMiddlewareIsolatio
 		}
 
 		assert.NotPanics(t, func() {
-			app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+			app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
 		})
 
 		piTrace = nil
@@ -648,7 +647,7 @@ func TestRouteRegistry_OverlappingStaticPrefixGroupsAndRecursiveEmptyFolding(t *
 		})
 
 		assert.NotPanics(t, func() {
-			app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+			app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
 		})
 
 		for _, tc := range []struct {
@@ -676,7 +675,7 @@ func TestRouteRegistry_OverlappingStaticPrefixGroupsAndRecursiveEmptyFolding(t *
 	t.Run("recursive empty-prefix GroupNode folding preserves middlewares and routes", func(t *testing.T) {
 		reg := newRouteRegistry()
 		mux := chi.NewRouter()
-		container := infra.NewContainer(config.NewMockConfig(nil))
+		container := newTestKernel(nil)
 
 		var piOrder []string
 		appendPi := func(name string) PiMiddleware {
@@ -779,7 +778,7 @@ func newRouteRegistryTestApp() *App {
 			registry: newRouteRegistry(),
 			port:     8080,
 		},
-		container:      infra.NewContainer(config.NewMockConfig(nil)),
+		kernel:         newTestKernel(nil),
 		Config:         config.NewMockConfig(nil),
 		httpRegistered: true,
 	}

@@ -33,6 +33,10 @@ type Graph struct {
 // Returns ErrGraphExists if the graph already exists.
 // Returns an error if the edgeDefinitions parameter is not of type *EdgeDefinition or is nil.
 func (g *Graph) CreateGraph(ctx context.Context, database, graph string, edgeDefinitions any) error {
+	if g == nil || g.client == nil || g.client.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := g.client.addTrace(ctx, "createGraph", map[string]string{"graph": graph})
 	startTime := time.Now()
 
@@ -51,7 +55,9 @@ func (g *Graph) CreateGraph(ctx context.Context, database, graph string, edgeDef
 	}
 
 	if exists {
-		g.client.logger.Debugf("graph %s already exists in database %s", graph, database)
+		if g.client.logger != nil {
+			g.client.logger.Debugf("graph %s already exists in database %s", graph, database)
+		}
 		return ErrGraphExists
 	}
 
@@ -90,6 +96,10 @@ func (g *Graph) CreateGraph(ctx context.Context, database, graph string, edgeDef
 //
 // Returns an error if the graph does not exist or if there is an issue with the database connection.
 func (g *Graph) DropGraph(ctx context.Context, database, graphName string) error {
+	if g == nil || g.client == nil || g.client.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := g.client.addTrace(ctx, "dropGraph", map[string]string{"graph": graphName})
 	startTime := time.Now()
 
@@ -135,6 +145,10 @@ func (c *Client) GetEdges(ctx context.Context, dbName, graphName, edgeCollection
 	edgeResp, ok := resp.(*EdgeDetails)
 	if !ok {
 		return fmt.Errorf("%w: must be *[]arangodb.EdgeDetails", errInvalidResponseType)
+	}
+
+	if c == nil || c.client == nil {
+		return errClientNotConnected
 	}
 
 	tracerCtx, span := c.addTrace(ctx, "getEdges", map[string]string{

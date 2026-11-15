@@ -18,6 +18,10 @@ func (c *Client) ExecuteBatchCAS(name string, dest ...any) (bool, error) {
 }
 
 func (c *Client) BatchQueryWithCtx(ctx context.Context, name, stmt string, values ...any) error {
+	if c == nil || c.config == nil || c.cassandra == nil {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "batch-query", stmt)
 
 	defer c.sendOperationStats(&QueryLog{
@@ -37,6 +41,10 @@ func (c *Client) BatchQueryWithCtx(ctx context.Context, name, stmt string, value
 }
 
 func (c *Client) ExecuteBatchWithCtx(ctx context.Context, name string) error {
+	if c == nil || c.config == nil || c.cassandra == nil {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "execute-batch", "batch")
 
 	defer c.sendOperationStats(&QueryLog{
@@ -50,10 +58,18 @@ func (c *Client) ExecuteBatchWithCtx(ctx context.Context, name string) error {
 		return errBatchNotInitialized
 	}
 
+	if c.cassandra.session == nil {
+		return errClientNotConnected
+	}
+
 	return c.cassandra.session.executeBatch(b)
 }
 
 func (c *Client) ExecuteBatchCASWithCtx(ctx context.Context, name string, dest ...any) (bool, error) {
+	if c == nil || c.config == nil || c.cassandra == nil {
+		return false, errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "execute-batch-cas", "batch")
 
 	defer c.sendOperationStats(&QueryLog{
@@ -65,6 +81,10 @@ func (c *Client) ExecuteBatchCASWithCtx(ctx context.Context, name string, dest .
 	b, ok := c.cassandra.batches[name]
 	if !ok {
 		return false, errBatchNotInitialized
+	}
+
+	if c.cassandra.session == nil {
+		return false, errClientNotConnected
 	}
 
 	return c.cassandra.session.executeBatchCAS(b, dest...)

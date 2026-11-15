@@ -554,7 +554,7 @@ func (s *workerSlot) runGeneration(
 		}
 	}()
 
-	piCtx := newContext(nil, noopRequest{ctx: execCtx}, s.app.container)
+	piCtx := newContext(nil, noopRequest{ctx: execCtx}, s.app.kernel)
 	piCtx.workerExec = &workerExecHandle{
 		slot:       s,
 		generation: gen,

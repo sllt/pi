@@ -1,5 +1,5 @@
 // versions:
-// 	pi-cli v0.6.0
+// 	pi-cli v0.5.1
 // 	github.com/sllt/pi v1.37.0
 // 	source: hello.proto
 

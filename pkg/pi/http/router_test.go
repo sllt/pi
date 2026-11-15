@@ -11,21 +11,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sllt/pi/pkg/pi/config"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
-	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestRouter(t *testing.T) {
-	port := testutil.GetFreePort(t)
-
-	cfg := map[string]string{"HTTP_PORT": fmt.Sprint(port), "LOG_LEVEL": "INFO"}
-	c := infra.NewContainer(config.NewMockConfig(cfg))
-
-	c.Metrics().NewCounter("test-counter", "test")
-
-	// Create a new router instance using the mock container
 	router := NewRouter()
 
 	// Add a test handler to the router
@@ -43,14 +32,6 @@ func TestRouter(t *testing.T) {
 }
 
 func TestRouterWithMiddleware(t *testing.T) {
-	port := testutil.GetFreePort(t)
-
-	cfg := map[string]string{"HTTP_PORT": fmt.Sprint(port), "LOG_LEVEL": "INFO"}
-	c := infra.NewContainer(config.NewMockConfig(cfg))
-
-	c.Metrics().NewCounter("test-counter", "test")
-
-	// Create a new router instance using the mock container
 	router := NewRouter()
 
 	router.UseMiddleware(func(inner http.Handler) http.Handler {

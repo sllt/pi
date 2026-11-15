@@ -14,7 +14,6 @@ import (
 	"github.com/sllt/pi/pkg/pi"
 	"github.com/sllt/pi/pkg/pi/cmd"
 	"github.com/sllt/pi/pkg/pi/datasource/file"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
@@ -30,11 +29,13 @@ func (mockFileInfo) IsDir() bool        { return false }
 func (mockFileInfo) Sys() any           { return nil }
 
 func getContext(request pi.Request, fileMock file.FileSystem) *pi.Context {
-	return &pi.Context{
-		Context:   context.Background(),
-		Request:   request,
-		Container: &infra.Container{File: fileMock},
-	}
+	app, _ := pi.Build(
+		pi.WithConfig(map[string]string{"HTTP_ENABLED": "false", "GRPC_ENABLED": "false"}),
+		pi.WithFile(fileMock, pi.Borrowed),
+	)
+	ctx := app.NewContext(context.Background())
+	ctx.Request = request
+	return ctx
 }
 
 func TestPwdCommandHandler(t *testing.T) {

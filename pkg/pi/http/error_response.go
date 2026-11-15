@@ -27,6 +27,9 @@ func ErrorResponse(err error) (status, code int, message string) {
 	if app, ok := selected.(*apperror.Error); ok {
 		return applicationStatus(app.Kind()), app.Code(), app.PublicMessage()
 	}
+	if _, ok := selected.(*http.MaxBytesError); ok {
+		return http.StatusRequestEntityTooLarge, http.StatusRequestEntityTooLarge, "request body too large"
+	}
 	var classified interface {
 		error
 		StatusCode() int
@@ -87,7 +90,7 @@ func firstClassifiedError(err error) error {
 		return nil
 	}
 	switch err.(type) {
-	case *apperror.Error, interface {
+	case *apperror.Error, *http.MaxBytesError, interface {
 		error
 		StatusCode() int
 	}:
@@ -97,6 +100,10 @@ func firstClassifiedError(err error) error {
 		var app *apperror.Error
 		if custom.As(&app) && app != nil {
 			return app
+		}
+		var maxBytes *http.MaxBytesError
+		if custom.As(&maxBytes) && maxBytes != nil {
+			return maxBytes
 		}
 		var legacy interface {
 			error

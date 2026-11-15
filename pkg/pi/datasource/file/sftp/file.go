@@ -22,7 +22,9 @@ type sftpFile struct {
 func (f sftpFile) Size() int64 {
 	stat, err := f.File.Stat()
 	if err != nil {
-		f.logger.Errorf("failed to get file size: %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("failed to get file size: %v", err)
+		}
 
 		return 0
 	}
@@ -33,7 +35,9 @@ func (f sftpFile) Size() int64 {
 func (f sftpFile) ModTime() time.Time {
 	stat, err := f.File.Stat()
 	if err != nil {
-		f.logger.Errorf("failed to get file modification time: %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("failed to get file modification time: %v", err)
+		}
 
 		return time.Unix(0, 0)
 	}
@@ -44,7 +48,9 @@ func (f sftpFile) ModTime() time.Time {
 func (f sftpFile) IsDir() bool {
 	stat, err := f.File.Stat()
 	if err != nil {
-		f.logger.Errorf("failed to check if file is directory: %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("failed to check if file is directory: %v", err)
+		}
 
 		return false
 	}
@@ -55,7 +61,9 @@ func (f sftpFile) IsDir() bool {
 func (f sftpFile) Mode() os.FileMode {
 	stat, err := f.File.Stat()
 	if err != nil {
-		f.logger.Errorf("failed to get file mode: %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("failed to get file mode: %v", err)
+		}
 		return 0
 	}
 
@@ -65,7 +73,9 @@ func (f sftpFile) Mode() os.FileMode {
 func (f sftpFile) Sys() any {
 	stat, err := f.File.Stat()
 	if err != nil {
-		f.logger.Errorf("failed to get file system info: %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("failed to get file system info: %v", err)
+		}
 
 		return nil
 	}
@@ -118,7 +128,9 @@ func (f sftpFile) createJSONReader() (file.RowReader, error) {
 
 	token, err := f.peekJSONToken(decoder)
 	if err != nil {
-		f.logger.Errorf("failed to decode JSON token %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("failed to decode JSON token %v", err)
+		}
 		return nil, err
 	}
 
@@ -148,13 +160,17 @@ func (f sftpFile) createJSONObjectReader() (file.RowReader, error) {
 	name := f.File.Name()
 
 	if err := f.File.Close(); err != nil {
-		f.logger.Errorf("failed to close JSON file for reading as object %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("failed to close JSON file for reading as object %v", err)
+		}
 		return nil, err
 	}
 
 	newFile, err := os.Open(name)
 	if err != nil {
-		f.logger.Errorf("failed to open JSON file for reading as object %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("failed to open JSON file for reading as object %v", err)
+		}
 		return nil, err
 	}
 

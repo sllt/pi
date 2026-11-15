@@ -53,16 +53,68 @@ type Client struct {
 
 type messageHandler func(context.Context, jetstream.Msg) error
 
+// ConnectContext establishes a connection to NATS and sets up JetStream without spawning background retry loops on failure.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil {
+		return errClientNotConnected
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	c.connMu.RLock()
+	connMgr := c.connManager
+	c.connMu.RUnlock()
+	if connMgr != nil && connMgr.isConnected() {
+		return nil
+	}
+
+	if c.Config == nil {
+		return errServerNotProvided
+	}
+	if err := validateConfigs(c.Config); err != nil {
+		if c.logger != nil {
+			c.logger.Errorf("could not initialize NATS jStream: %v", err)
+		}
+		return err
+	}
+
+	safeServer := redactServerURL(c.Config.Server)
+	if c.logger != nil {
+		c.logger.Debugf("connecting to NATS server at %v", safeServer)
+	}
+
+	if err := c.establishConnectionContext(ctx); err != nil {
+		if c.logger != nil {
+			c.logger.Errorf("failed to connect to NATS server at %v: %v", safeServer, err)
+		}
+		return err
+	}
+
+	return nil
+}
+
 // Connect establishes a connection to NATS and sets up jStream.
 func (c *Client) Connect() error {
-	c.logger.Debugf("connecting to NATS server at %v", c.Config.Server)
+	var safeServer string
+	if c != nil && c.Config != nil {
+		safeServer = redactServerURL(c.Config.Server)
+	}
+	if c != nil && c.logger != nil {
+		c.logger.Debugf("connecting to NATS server at %v", safeServer)
+	}
 
 	if err := validateAndPrepare(c.Config, c.logger); err != nil {
 		return err
 	}
 
 	if err := c.establishConnection(); err != nil {
-		c.logger.Errorf("failed to connect to NATS server at %v: %v", c.Config.Server, err)
+		if c.logger != nil {
+			c.logger.Errorf("failed to connect to NATS server at %v: %v", safeServer, err)
+		}
 
 		c.startRetryConnect()
 
@@ -112,6 +164,9 @@ func (c *Client) Publish(ctx context.Context, subject string, message []byte) er
 
 // Subscribe subscribes to a topic and returns a single message.
 func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, error) {
+	if c == nil {
+		return nil, errClientNotConnected
+	}
 	stopCh := c.ensureStopCh()
 
 	for {
@@ -137,7 +192,9 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, 
 			return subMgr.Subscribe(ctx, topic, js, c.Config, c.logger, c.metrics)
 		}
 
-		c.logger.Debugf("Waiting for NATS connection to be established for topic %s", topic)
+		if c.logger != nil {
+			c.logger.Debugf("Waiting for NATS connection to be established for topic %s", topic)
+		}
 
 		if !c.waitRetryOrCancel(ctx, stopCh) {
 			if ctx.Err() != nil {
@@ -150,6 +207,9 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, 
 }
 
 func (c *Client) SubscribeWithHandler(ctx context.Context, subject string, handler messageHandler) error {
+	if c == nil {
+		return errClientNotConnected
+	}
 	c.subMutex.Lock()
 	defer c.subMutex.Unlock()
 
@@ -204,6 +264,13 @@ func (c *Client) cancelExistingSubscription(subject string) {
 
 // Close closes the Client, stopping any background reconnect loops and active subscriptions.
 func (c *Client) Close(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	c.retryMu.Lock()
 	if !c.closed {
 		c.closed = true
@@ -216,7 +283,10 @@ func (c *Client) Close(ctx context.Context) error {
 	c.retryMu.Unlock()
 
 	if done != nil {
-		<-done
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 	}
 
 	c.subMutex.Lock()
@@ -225,8 +295,6 @@ func (c *Client) Close(ctx context.Context) error {
 		delete(c.subscriptions, subject)
 	}
 	c.subMutex.Unlock()
-
-	c.subWG.Wait()
 
 	c.connMu.RLock()
 	subMgr := c.subManager
@@ -237,11 +305,24 @@ func (c *Client) Close(ctx context.Context) error {
 		subMgr.Close()
 	}
 
+	waitDone := make(chan struct{})
+	go func() {
+		c.subWG.Wait()
+		close(waitDone)
+	}()
+
+	var waitErr error
+	select {
+	case <-waitDone:
+	case <-ctx.Done():
+		waitErr = ctx.Err()
+	}
+
 	if connMgr != nil {
 		connMgr.Close(ctx)
 	}
 
-	return nil
+	return waitErr
 }
 
 // Query retrieves messages from a NATS stream/subject.

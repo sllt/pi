@@ -114,7 +114,7 @@ func Test_AddWSService(t *testing.T) {
 
 	// Verify the connection is registered
 	// WebSocket service communication should be handled through the Context
-	conn := app.container.WSManager.GetConnectionByServiceName(serviceName)
+	conn := app.WebSocketHub().GetConnectionByServiceName(serviceName)
 	require.NotNil(t, conn, "Connection should be registered")
 }
 

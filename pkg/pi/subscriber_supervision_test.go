@@ -292,10 +292,10 @@ func TestSubscriberDrain_ContextIsolationAndDrainCommit(t *testing.T) {
 	type traceKey struct{}
 
 	var (
-		pulls           atomic.Int32
-		handlerEntered  = make(chan struct{})
-		pullBlocked     = make(chan struct{})
-		pullStopErrCh   = make(chan error, 1)
+		pulls                    atomic.Int32
+		handlerEntered           = make(chan struct{})
+		pullBlocked              = make(chan struct{})
+		pullStopErrCh            = make(chan error, 1)
 		brokerClosedBeforeCommit atomic.Bool
 	)
 

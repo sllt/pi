@@ -9,8 +9,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 func TestNewBasicAuthProvider(t *testing.T) {
@@ -30,21 +28,18 @@ func TestNewBasicAuthProvider(t *testing.T) {
 }
 
 func TestNewBasicAuthProviderWithValidateFunc(t *testing.T) {
-	validateFunc := func(_ *infra.Container, _, _ string) bool { return true }
+	validateFunc := func(_ *http.Request, _, _ string) bool { return true }
 
 	testCases := []struct {
-		c            *infra.Container
-		validateFunc func(c *infra.Container, username, password string) bool
-
-		err error
+		validateFunc func(r *http.Request, username, password string) bool
+		err          error
 	}{
 		{err: errValidateFuncEmpty},
-		{validateFunc: validateFunc, err: errContainerNil},
-		{c: &infra.Container{}, validateFunc: validateFunc},
+		{validateFunc: validateFunc},
 	}
 	for i, tc := range testCases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			authProvider, err := NewBasicAuthProviderWithValidateFunc(tc.c, tc.validateFunc)
+			authProvider, err := NewBasicAuthProviderWithValidateFunc(tc.validateFunc)
 			assert.Equal(t, tc.err, err)
 
 			if err != nil {
@@ -130,48 +125,51 @@ func TestBasicAuthMiddleware_validateCredentials(t *testing.T) {
 	validateFuncPass := func(_, _ string) bool { return true }
 	validateFuncFail := func(_, _ string) bool { return false }
 
-	validateFuncDataStorePass := func(_ *infra.Container, _, _ string) bool { return true }
-	validateFuncDataStoreFail := func(_ *infra.Container, _, _ string) bool { return false }
+	validateFuncReqPass := func(r *http.Request, _, _ string) bool {
+		return r != nil && r.Header.Get("X-Tenant") == "acme"
+	}
+	validateFuncReqFail := func(_ *http.Request, _, _ string) bool { return false }
+
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.Header.Set("X-Tenant", "acme")
 
 	testCases := []struct {
-		username                    string
-		password                    string
-		validateFunc                func(username, password string) bool
-		validateFuncWithDatasources func(c *infra.Container, username, password string) bool
-		users                       map[string]string
-		success                     bool
+		username                string
+		password                string
+		validateFunc            func(username, password string) bool
+		validateFuncWithRequest func(r *http.Request, username, password string) bool
+		users                   map[string]string
+		success                 bool
 	}{
 		{
-			username:                    "storedUser",
-			password:                    "storedPass",
-			validateFunc:                validateFuncPass,
-			validateFuncWithDatasources: validateFuncDataStoreFail,
-			users:                       users,
-			success:                     false,
+			username:                "storedUser",
+			password:                "storedPass",
+			validateFunc:            validateFuncPass,
+			validateFuncWithRequest: validateFuncReqFail,
+			users:                   users,
+			success:                 false,
 		},
 		{
-			username:                    "storedUser",
-			password:                    "storedPass",
-			validateFunc:                validateFuncFail,
-			validateFuncWithDatasources: validateFuncDataStorePass,
-			users:                       users,
-			success:                     true,
+			username:                "storedUser",
+			password:                "storedPass",
+			validateFunc:            validateFuncFail,
+			validateFuncWithRequest: validateFuncReqPass,
+			users:                   users,
+			success:                 true,
 		},
 		{
-			username:                    "storedUser",
-			password:                    "storedPass",
-			validateFunc:                validateFuncPass,
-			validateFuncWithDatasources: nil,
-			users:                       users,
-			success:                     true,
+			username:     "storedUser",
+			password:     "storedPass",
+			validateFunc: validateFuncPass,
+			users:        users,
+			success:      true,
 		},
 		{
-			username:                    "storedUser",
-			password:                    "storedPass",
-			validateFunc:                validateFuncFail,
-			validateFuncWithDatasources: nil,
-			users:                       users,
-			success:                     false,
+			username:     "storedUser",
+			password:     "storedPass",
+			validateFunc: validateFuncFail,
+			users:        users,
+			success:      false,
 		},
 		{
 			username: "storedUser",
@@ -195,12 +193,11 @@ func TestBasicAuthMiddleware_validateCredentials(t *testing.T) {
 	for i, tc := range testCases {
 		t.Run(fmt.Sprintf("Test Case #%d", i), func(t *testing.T) {
 			provider := BasicAuthProvider{
-				Users:                       tc.users,
-				ValidateFunc:                tc.validateFunc,
-				ValidateFuncWithDatasources: tc.validateFuncWithDatasources,
-				Container:                   nil,
+				Users:                   tc.users,
+				ValidateFunc:            tc.validateFunc,
+				ValidateFuncWithRequest: tc.validateFuncWithRequest,
 			}
-			success := provider.validateCredentials(tc.username, tc.password)
+			success := provider.validateCredentials(req, tc.username, tc.password)
 			assert.Equal(t, tc.success, success)
 		})
 	}

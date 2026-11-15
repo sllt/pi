@@ -17,6 +17,7 @@ func main() {
 	chatClient, err := client.NewChatServicePiClient(app.Config.Get("GRPC_SERVER_HOST"), app.Metrics())
 	if err != nil {
 		app.Logger().Errorf("Failed to create Chat client: %v", err)
+		return
 	}
 
 	chat := NewChatHandler(chatClient)
@@ -76,7 +77,7 @@ func (c *ChatHandler) ServerStreamHandler(ctx *pi.Context) (any, error) {
 			Direction: "received",
 		}
 		responses = append(responses, response)
-		ctx.Logger.Infof("Received server stream message: %s at %v", res.Message, response.Timestamp)
+		ctx.Infof("Received server stream message: %s at %v", res.Message, response.Timestamp)
 	}
 
 	// Return detailed stream information
@@ -118,7 +119,7 @@ func (c *ChatHandler) ClientStreamHandler(ctx *pi.Context) (any, error) {
 			Timestamp: sendTime,
 			Direction: "sent",
 		})
-		ctx.Logger.Infof("Sent client stream message %d: %s at %v", i+1, req.Message, sendTime)
+		ctx.Infof("Sent client stream message %d: %s at %v", i+1, req.Message, sendTime)
 	}
 
 	// Close the stream and get final response
@@ -194,7 +195,7 @@ func (c *ChatHandler) receiveBiDiResponses(ctx *pi.Context, stream client.ChatSe
 			return
 		}
 		timestamp := time.Now()
-		ctx.Logger.Infof("Received bidirectional message: %s at %v", res.Message, timestamp)
+		ctx.Infof("Received bidirectional message: %s at %v", res.Message, timestamp)
 		respChan <- StreamResponse{
 			Message:   res.Message,
 			Timestamp: timestamp,
@@ -212,7 +213,7 @@ func (c *ChatHandler) sendBiDiMessages(ctx *pi.Context, stream client.ChatServic
 		if err := stream.Send(&client.Request{Message: msg}); err != nil {
 			return nil, fmt.Errorf("failed to send message %q: %v", msg, err)
 		}
-		ctx.Logger.Infof("Sent bidirectional message: %s at %v", msg, timestamp)
+		ctx.Infof("Sent bidirectional message: %s at %v", msg, timestamp)
 		*streamLog = append(*streamLog, StreamResponse{
 			Message:   msg,
 			Timestamp: timestamp,

@@ -529,3 +529,23 @@ func TestErrors(t *testing.T) {
 	assert.Equal(t, "sqs queue not found", errQueueNotFound.Error())
 	assert.Equal(t, "queue name cannot be empty", errEmptyQueueName.Error())
 }
+
+func TestConnectContext_And_FromEnv(t *testing.T) {
+	c := New(&Config{})
+	require.ErrorIs(t, c.ConnectContext(context.Background()), errRegionRequired)
+	assert.False(t, c.isRetrying.Load())
+
+	_, err := FromEnv(func(string) string { return "" })
+	require.ErrorIs(t, err, errRegionRequired)
+
+	env := map[string]string{
+		"AWS_REGION":            "ap-northeast-1",
+		"SQS_ENDPOINT":          "http://127.0.0.1:4566",
+		"AWS_ACCESS_KEY_ID":     "ak",
+		"AWS_SECRET_ACCESS_KEY": "sk",
+	}
+	fromEnvClient, err := FromEnv(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	assert.Equal(t, "ap-northeast-1", fromEnvClient.cfg.Region)
+	assert.Equal(t, "http://127.0.0.1:4566", fromEnvClient.cfg.Endpoint)
+}

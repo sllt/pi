@@ -51,10 +51,9 @@ func (cb *circuitBreaker) allowRequest() bool {
 	}
 
 	// Try to transition from open to half-open
-	openState := circuitStateOpen
 	halfOpenState := circuitStateHalfOpen
 
-	return cb.state.CompareAndSwap(&openState, &halfOpenState)
+	return cb.state.CompareAndSwap(state, &halfOpenState)
 }
 
 func (cb *circuitBreaker) recordSuccess() {

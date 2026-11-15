@@ -22,7 +22,9 @@ func main() {
 
 	fileSystemProvider := configureFileServer(app)
 
-	app.AddFileStore(fileSystemProvider)
+	if err := app.SetFile(fileSystemProvider, pi.Owned); err != nil {
+		app.Logger().Errorf("failed to configure file store: %v", err)
+	}
 
 	app.SubCommand("pwd", pwdCommandHandler)
 	app.SubCommand("ls", lsCommandHandler)
@@ -34,7 +36,7 @@ func main() {
 }
 
 func pwdCommandHandler(c *pi.Context) (any, error) {
-	workingDirectory, err := c.File.Getwd()
+	workingDirectory, err := c.File().Getwd()
 
 	return workingDirectory, err
 }
@@ -42,7 +44,7 @@ func pwdCommandHandler(c *pi.Context) (any, error) {
 func lsCommandHandler(c *pi.Context) (any, error) {
 	path := c.Param("path")
 
-	files, err := c.File.ReadDir(path)
+	files, err := c.File().ReadDir(path)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +58,7 @@ func grepCommandHandler(c *pi.Context) (any, error) {
 	keyword := c.Param("keyword")
 	path := c.Param("path")
 
-	files, err := c.File.ReadDir(path)
+	files, err := c.File().ReadDir(path)
 
 	if err != nil {
 		return nil, err
@@ -70,7 +72,7 @@ func grepCommandHandler(c *pi.Context) (any, error) {
 func createFileCommandHandler(c *pi.Context) (any, error) {
 	fileName := c.Param("filename")
 
-	_, err := c.File.Create(fileName)
+	_, err := c.File().Create(fileName)
 	if err != nil {
 		return fmt.Sprintln("File Creation error"), err
 	}
@@ -81,7 +83,7 @@ func createFileCommandHandler(c *pi.Context) (any, error) {
 func rmCommandHandler(c *pi.Context) (any, error) {
 	fileName := c.Param("filename")
 
-	err := c.File.Remove(fileName)
+	err := c.File().Remove(fileName)
 	if err != nil {
 		return fmt.Sprintln("File removal error"), err
 	}

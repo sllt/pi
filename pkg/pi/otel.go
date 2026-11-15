@@ -20,24 +20,24 @@ import (
 func (a *App) initTracer() {
 	traceRatio, err := strconv.ParseFloat(a.Config.GetOrDefault("TRACER_RATIO", "1"), 64)
 	if err != nil {
-		a.container.Error(err)
+		a.Logger().Error(err)
 	}
 
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(resource.NewWithAttributes(
 			semconv.SchemaURL,
-			semconv.ServiceNameKey.String(a.container.GetAppName()),
+			semconv.ServiceNameKey.String(a.AppName()),
 		)),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(traceRatio))),
 	)
-	if a.container != nil {
-		a.container.TracerProvider = tp
+	if a.kernel != nil {
+		a.kernel.setTracerProvider(tp)
 	}
 	a.ownedTracerShutdown = tp.Shutdown
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	otel.SetErrorHandler(&otelErrorHandler{
-		logger: a.container.Logger,
+		logger: a.Logger(),
 	})
 
 	traceExporter := a.Config.Get("TRACE_EXPORTER")
@@ -53,7 +53,7 @@ func (a *App) initTracer() {
 
 	exporter, err := a.getExporter(traceExporter, tracerHost, tracerPort, tracerURL)
 	if err != nil {
-		a.container.Error(err)
+		a.Logger().Error(err)
 	}
 
 	batcher := sdktrace.NewBatchSpanProcessor(exporter)
@@ -148,7 +148,7 @@ func (a *App) getExporter(name, host, port, url string) (sdktrace.SpanExporter, 
 	case piTraceExporter:
 		exporter = buildPiExporter(a.Logger(), url)
 	default:
-		a.container.Errorf("unsupported TRACE_EXPORTER: %s", name)
+		a.Logger().Errorf("unsupported TRACE_EXPORTER: %s", name)
 	}
 
 	return exporter, err

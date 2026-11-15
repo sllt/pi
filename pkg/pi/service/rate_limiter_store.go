@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -243,14 +245,33 @@ return {allowed, retryAfter}
 
 // RedisRateLimiterStore implements RateLimiterStore using Redis.
 type RedisRateLimiterStore struct {
-	client *piRedis.Redis
+	client piRedis.Client
 }
 
-func NewRedisRateLimiterStore(client *piRedis.Redis) *RedisRateLimiterStore {
+func isNilRedisClient(c piRedis.Client) bool {
+	if c == nil {
+		return true
+	}
+	rv := reflect.ValueOf(c)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
+func NewRedisRateLimiterStore(client piRedis.Client) *RedisRateLimiterStore {
+	if isNilRedisClient(client) {
+		return &RedisRateLimiterStore{client: nil}
+	}
 	return &RedisRateLimiterStore{client: client}
 }
 
 func (r *RedisRateLimiterStore) Allow(ctx context.Context, key string, config RateLimiterConfig) (bool, time.Duration, error) {
+	if r == nil || r.client == nil {
+		return true, 0, errors.New("redis rate limiter client is nil") // Fail open
+	}
 	now := time.Now().UnixNano()
 	cmd := r.client.Eval(
 		ctx,

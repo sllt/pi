@@ -37,6 +37,14 @@ func getLocation(bucket string) string {
 // Since S3 uses a flat storage structure, directories are represented by object keys with trailing slashes.
 // The method processes the path segments and ensures that each segment (directory) exists in S3.
 func (f *FileSystem) Mkdir(name string, _ os.FileMode) error {
+	if f == nil || f.config == nil {
+		return errS3ConfigNil
+	}
+	conn := f.getConn()
+	if conn == nil {
+		return errS3NotConnected
+	}
+
 	var msg string
 
 	st := statusErr
@@ -55,7 +63,7 @@ func (f *FileSystem) Mkdir(name string, _ os.FileMode) error {
 	for _, dir := range directories {
 		currentdir = path.Join(currentdir, dir)
 
-		_, err := f.conn.PutObject(context.TODO(), &s3.PutObjectInput{
+		_, err := conn.PutObject(context.TODO(), &s3.PutObjectInput{
 			Bucket: aws.String(f.config.BucketName),
 			Key:    aws.String(currentdir + "/"),
 		})
@@ -68,7 +76,7 @@ func (f *FileSystem) Mkdir(name string, _ os.FileMode) error {
 	st = statusSuccess
 	msg = fmt.Sprintf("Directories on path %q created successfully", name)
 
-	f.logger.Logf("Created directories on path %q", name)
+	f.logLogf("Created directories on path %q", name)
 
 	return nil
 }
@@ -92,6 +100,13 @@ func (f *FileSystem) RemoveAll(name string) error {
 	if path.Ext(name) != "" {
 		return f.Remove(name)
 	}
+	if f == nil || f.config == nil {
+		return errS3ConfigNil
+	}
+	conn := f.getConn()
+	if conn == nil {
+		return errS3NotConnected
+	}
 
 	var msg string
 
@@ -104,7 +119,7 @@ func (f *FileSystem) RemoveAll(name string) error {
 		Message:   &msg,
 	}, time.Now())
 
-	res, err := f.conn.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
+	res, err := conn.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
 		Bucket: aws.String(f.config.BucketName),
 		Prefix: aws.String(name + "/"),
 	})
@@ -121,21 +136,21 @@ func (f *FileSystem) RemoveAll(name string) error {
 		}
 	}
 
-	_, err = f.conn.DeleteObjects(context.TODO(), &s3.DeleteObjectsInput{
+	_, err = conn.DeleteObjects(context.TODO(), &s3.DeleteObjectsInput{
 		Bucket: aws.String(f.config.BucketName),
 		Delete: &types.Delete{
 			Objects: objects,
 		},
 	})
 	if err != nil {
-		f.logger.Errorf("Error while deleting directory: %v", err)
+		f.logErrorf("Error while deleting directory: %v", err)
 		return err
 	}
 
 	st = statusSuccess
 	msg = fmt.Sprintf("Directory with path %q, deleted successfully", name)
 
-	f.logger.Logf("Directory %s deleted.", name)
+	f.logLogf("Directory %s deleted.", name)
 
 	return nil
 }
@@ -161,6 +176,14 @@ func getRelativepath(key, filePath string) string {
 //   - Directories are represented by the prefixes of the file keys in S3, and this method retrieves file entries
 //     only one level deep from the specified directory.
 func (f *FileSystem) ReadDir(name string) ([]file.FileInfo, error) {
+	if f == nil || f.config == nil {
+		return nil, errS3ConfigNil
+	}
+	conn := f.getConn()
+	if conn == nil {
+		return nil, errS3NotConnected
+	}
+
 	var filePath, msg string
 
 	st := statusErr
@@ -181,7 +204,7 @@ func (f *FileSystem) ReadDir(name string) ([]file.FileInfo, error) {
 	// TODO: Enhance the implementation to fetch only data that is one level deep.
 	// Currently, the system retrieves metadata of all files matching the prefix,
 	// which may include files in nested directories. This takes more memory.
-	entries, err := f.conn.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
+	entries, err := conn.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
 		Bucket: aws.String(f.config.BucketName),
 		Prefix: aws.String(filePath),
 	})
@@ -208,7 +231,7 @@ func (f *FileSystem) ReadDir(name string) ([]file.FileInfo, error) {
 		}
 
 		fileInfo = append(fileInfo, &S3File{
-			conn:         f.conn,
+			conn:         conn,
 			logger:       f.logger,
 			metrics:      f.metrics,
 			size:         *entries.Contents[i].Size,
@@ -220,7 +243,7 @@ func (f *FileSystem) ReadDir(name string) ([]file.FileInfo, error) {
 	st = statusSuccess
 	msg = fmt.Sprintf("Directory/Files in directory with path %q retrieved successfully", name)
 
-	f.logger.Logf("Reading directory/files from S3 at path %q successful.", name)
+	f.logLogf("Reading directory/files from S3 at path %q successful.", name)
 
 	return fileInfo, nil
 }
@@ -230,6 +253,9 @@ func (f *FileSystem) ReadDir(name string) ([]file.FileInfo, error) {
 // This method attempts to change the current directory, but S3 does not support directory changes due to its flat file structure.
 // The bucket is constant and fixed, so directory operations are not applicable.
 func (f *FileSystem) ChDir(string) error {
+	if f == nil || f.config == nil {
+		return errS3ConfigNil
+	}
 	st := statusErr
 
 	defer f.sendOperationStats(&FileLog{
@@ -246,6 +272,9 @@ func (f *FileSystem) ChDir(string) error {
 //
 // This method retrieves the name of the bucket that is currently set for S3 operations.
 func (f *FileSystem) Getwd() (string, error) {
+	if f == nil || f.config == nil {
+		return "", errS3ConfigNil
+	}
 	status := statusSuccess
 
 	f.sendOperationStats(&FileLog{Operation: "GETWD", Location: getLocation(f.config.BucketName), Status: &status}, time.Now())
@@ -258,12 +287,17 @@ func (f *FileSystem) Getwd() (string, error) {
 // This method handles the process of renaming a directory in an S3 bucket. It first lists all objects under the old
 // directory path, copies each object to the new directory path, and then deletes the old directory and its contents.
 func (f *FileSystem) renameDirectory(st, msg *string, oldPath, newPath string) error {
-	entries, err := f.conn.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
+	conn := f.getConn()
+	if conn == nil {
+		return errS3NotConnected
+	}
+
+	entries, err := conn.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
 		Bucket: aws.String(f.config.BucketName),
 		Prefix: aws.String(oldPath + "/"),
 	})
 	if err != nil {
-		f.logger.Errorf("Error while listing objects: %v", err)
+		f.logErrorf("Error while listing objects: %v", err)
 		return err
 	}
 
@@ -271,7 +305,7 @@ func (f *FileSystem) renameDirectory(st, msg *string, oldPath, newPath string) e
 	for _, obj := range entries.Contents {
 		newFilePath := strings.Replace(*obj.Key, oldPath, newPath, 1)
 
-		_, err = f.conn.CopyObject(context.TODO(), &s3.CopyObjectInput{
+		_, err = conn.CopyObject(context.TODO(), &s3.CopyObjectInput{
 			Bucket:             aws.String(f.config.BucketName),
 			CopySource:         aws.String(f.config.BucketName + "/" + *obj.Key),
 			Key:                aws.String(newFilePath),
@@ -305,6 +339,14 @@ func (f *FileSystem) renameDirectory(st, msg *string, oldPath, newPath string) e
 // For directories, the method aggregates the sizes of all objects within the directory and returns the latest modified
 // time among them. For files, it returns the file's size and last modified time.
 func (f *FileSystem) Stat(name string) (file.FileInfo, error) {
+	if f == nil || f.config == nil {
+		return nil, errS3ConfigNil
+	}
+	conn := f.getConn()
+	if conn == nil {
+		return nil, errS3NotConnected
+	}
+
 	var msg string
 
 	st := statusErr
@@ -331,12 +373,12 @@ func (f *FileSystem) Stat(name string) (file.FileInfo, error) {
 		}
 	}
 
-	res, err := f.conn.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
+	res, err := conn.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
 		Bucket: aws.String(f.config.BucketName),
 		Prefix: aws.String(name),
 	})
 	if err != nil {
-		f.logger.Errorf("Error returning file info: %v", err)
+		f.logErrorf("Error returning file info: %v", err)
 		return nil, err
 	}
 
@@ -362,7 +404,7 @@ func (f *FileSystem) Stat(name string) (file.FileInfo, error) {
 		msg = fmt.Sprintf("Directory with path %q info retrieved successfully", name)
 
 		return &S3File{
-			conn:         f.conn,
+			conn:         conn,
 			logger:       f.logger,
 			metrics:      f.metrics,
 			size:         size,
@@ -373,7 +415,7 @@ func (f *FileSystem) Stat(name string) (file.FileInfo, error) {
 	}
 
 	return &S3File{
-		conn:         f.conn,
+		conn:         conn,
 		logger:       f.logger,
 		metrics:      f.metrics,
 		size:         *res.Contents[0].Size,
@@ -389,5 +431,7 @@ func (f *FileSystem) sendOperationStats(fl *FileLog, startTime time.Time) {
 
 	fl.Duration = duration
 
-	f.logger.Debug(fl)
+	if f != nil && f.logger != nil {
+		f.logger.Debug(fl)
+	}
 }

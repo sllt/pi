@@ -15,6 +15,10 @@ type DB struct {
 // It first checks if the database already exists before attempting to create it.
 // Returns ErrDatabaseExists if the database already exists.
 func (d *DB) CreateDB(ctx context.Context, database string) error {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := d.client.addTrace(ctx, "createDB", map[string]string{"DB": database})
 	startTime := time.Now()
 
@@ -27,7 +31,9 @@ func (d *DB) CreateDB(ctx context.Context, database string) error {
 	}
 
 	if exists {
-		d.client.logger.Debugf("database %s already exists", database)
+		if d.client.logger != nil {
+			d.client.logger.Debugf("database %s already exists", database)
+		}
 		return ErrDatabaseExists
 	}
 
@@ -38,6 +44,10 @@ func (d *DB) CreateDB(ctx context.Context, database string) error {
 
 // DropDB deletes a database from ArangoDB.
 func (d *DB) DropDB(ctx context.Context, database string) error {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := d.client.addTrace(ctx, "dropDB", map[string]string{"DB": database})
 	startTime := time.Now()
 
@@ -60,6 +70,10 @@ func (d *DB) DropDB(ctx context.Context, database string) error {
 // It first checks if the collection already exists before attempting to create it.
 // Returns ErrCollectionExists if the collection already exists.
 func (d *DB) CreateCollection(ctx context.Context, database, collection string, isEdge bool) error {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := d.client.addTrace(ctx, "createCollection", map[string]string{"collection": collection})
 	startTime := time.Now()
 
@@ -78,7 +92,9 @@ func (d *DB) CreateCollection(ctx context.Context, database, collection string, 
 	}
 
 	if exists {
-		d.client.logger.Debugf("collection %s already exists in database %s", collection, database)
+		if d.client.logger != nil {
+			d.client.logger.Debugf("collection %s already exists in database %s", collection, database)
+		}
 		return ErrCollectionExists
 	}
 
@@ -102,6 +118,10 @@ func (d *DB) DropCollection(ctx context.Context, database, collectionName string
 }
 
 func (d *DB) getCollection(ctx context.Context, dbName, collectionName string) (arangodb.Collection, error) {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return nil, errClientNotConnected
+	}
+
 	db, err := d.client.client.GetDatabase(ctx, dbName, nil)
 	if err != nil {
 		return nil, err
@@ -118,6 +138,10 @@ func (d *DB) getCollection(ctx context.Context, dbName, collectionName string) (
 // handleCollectionOperation handles common logic for collection operations.
 func (d *DB) handleCollectionOperation(ctx context.Context, operation, database, collectionName string,
 	action func(arangodb.Collection) error) error {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := d.client.addTrace(ctx, operation, map[string]string{"collection": collectionName})
 	startTime := time.Now()
 

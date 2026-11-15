@@ -10,17 +10,16 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/sllt/pi/pkg/pi"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 // createTestContext creates a test pi.Context
 func createTestContext() *pi.Context {
-	container := &infra.Container{}
-	return &pi.Context{
-		Context:   context.Background(),
-		Container: container,
-	}
+	app, _ := pi.Build(pi.WithConfig(map[string]string{
+		"HTTP_ENABLED": "false",
+		"GRPC_ENABLED": "false",
+	}))
+	return app.NewContext(context.Background())
 }
 
 func TestPiHelloClientWrapper_Creation(t *testing.T) {
@@ -141,7 +140,7 @@ func TestPiHelloClientWrapper_MultipleInstances(t *testing.T) {
 
 		assert.NotNil(t, client1, "First Pi hello client should not be nil")
 		assert.NotNil(t, client2, "Second Pi hello client should not be nil")
-		assert.NotEqual(t, client1, client2, "Pi hello client instances should be different")
+		assert.NotSame(t, client1, client2, "Pi hello client instances should be different")
 	})
 }
 
@@ -209,6 +208,29 @@ func TestPiHelloClientWrapper_ConcurrentAccess(t *testing.T) {
 		}
 
 		// Wait for all goroutines to complete
+		for i := 0; i < numGoroutines; i++ {
+			<-done
+		}
+	})
+
+	t.Run("ConcurrentSharedPiContextCalls", func(t *testing.T) {
+		app := pi.New()
+		helloClient, err := NewHelloPiClient(configs.GRPCHost, app.Metrics())
+		require.NoError(t, err, "Pi hello client creation should not fail")
+
+		sharedCtx := createTestContext()
+		numGoroutines := 5
+		done := make(chan bool, numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			go func() {
+				req := &HelloRequest{Name: "shared-ctx-test"}
+				_, err := helloClient.SayHello(sharedCtx, req)
+				assert.Error(t, err, "Should fail with invalid connection")
+				done <- true
+			}()
+		}
+
 		for i := 0; i < numGoroutines; i++ {
 			<-done
 		}

@@ -48,7 +48,7 @@ func GetHandler(c *pi.Context) (any, error) {
 
 	var emp Employee
 
-	err := c.SQL.QueryRowContext(c, queryGetEmployee, name).
+	err := c.SQL().QueryRowContext(c, queryGetEmployee, name).
 		Scan(&emp.ID, &emp.Name, &emp.Gender, &emp.Phone, &emp.DOB)
 	if err != nil {
 		return nil, errors.New(fmt.Sprintf("DB Error: %v", err))
@@ -61,12 +61,12 @@ func GetHandler(c *pi.Context) (any, error) {
 func PostHandler(c *pi.Context) (any, error) {
 	var emp Employee
 	if err := c.Bind(&emp); err != nil {
-		c.Logger.Errorf("error in binding: %v", err)
+		c.Errorf("error in binding: %v", err)
 		return nil, errors.New("invalid body")
 	}
 
 	// Execute the INSERT query
-	_, err := c.SQL.ExecContext(c, queryInsertEmployee, emp.ID, emp.Name, emp.Gender, emp.Phone, emp.DOB)
+	_, err := c.SQL().ExecContext(c, queryInsertEmployee, emp.ID, emp.Name, emp.Gender, emp.Phone, emp.DOB)
 	if err != nil {
 		return nil, errors.New(fmt.Sprintf("DB Error: %v", err))
 	}

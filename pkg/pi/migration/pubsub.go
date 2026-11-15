@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 type pubsubDS struct {
@@ -27,7 +25,6 @@ type migrationRecord struct {
 	Duration  int64  `json:"duration"`
 }
 
-// pubsubMigrator struct remains the same but uses our adapter.
 type pubsubMigrator struct {
 	PubSub
 	migrator
@@ -52,33 +49,41 @@ func (ds pubsubDS) apply(m migrator) migrator {
 	}
 }
 
-func (pm pubsubMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
+func (pm pubsubMigrator) checkAndCreateMigrationTable(ctx context.Context, deps *Deps) error {
 	err := pm.CreateTopic(ctx, pubsubMigrationTopic)
 	if err != nil {
-		c.Debug("Migration topic might already exist:", err)
+		deps.log().Debug("Migration topic might already exist:", err)
 	}
 
-	return pm.migrator.checkAndCreateMigrationTable(ctx, c)
+	if pm.migrator == nil {
+		return nil
+	}
+
+	return pm.migrator.checkAndCreateMigrationTable(ctx, deps)
 }
 
-func (pm pubsubMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
-	queryTopic := resolveMigrationTopic(c)
+func (pm pubsubMigrator) getLastMigration(ctx context.Context, deps *Deps) (int64, error) {
+	queryTopic := resolveMigrationTopic(deps)
 
 	ctx, cancel := context.WithTimeout(ctx, migrationTimeout)
 	defer cancel()
 
 	var pubsubLastMigration int64
 
-	result, err := c.PubSub.Query(ctx, queryTopic, int64(0), defaultQueryLimit)
+	result, err := deps.PubSub.Query(ctx, queryTopic, int64(0), defaultQueryLimit)
 	if err != nil {
 		return -1, fmt.Errorf("pubsub: %w", err)
 	}
 
 	if len(result) != 0 {
-		pubsubLastMigration = extractLastVersion(c, result)
+		pubsubLastMigration = extractLastVersion(deps, result)
 	}
 
-	nextMigratorLastMigration, err := pm.migrator.getLastMigration(ctx, c)
+	if pm.migrator == nil {
+		return pubsubLastMigration, nil
+	}
+
+	nextMigratorLastMigration, err := pm.migrator.getLastMigration(ctx, deps)
 	if err != nil {
 		return -1, err
 	}
@@ -86,19 +91,20 @@ func (pm pubsubMigrator) getLastMigration(ctx context.Context, c *infra.Containe
 	return max(pubsubLastMigration, nextMigratorLastMigration), nil
 }
 
-func resolveMigrationTopic(c *infra.Container) string {
-	// Check if the PubSub client provides a GetTopicName method
-	if topicResolver, ok := c.PubSub.(interface{ GetEventHubName() string }); ok {
-		topicName := topicResolver.GetEventHubName()
-		if topicName != "" {
-			return topicName
+func resolveMigrationTopic(deps *Deps) string {
+	if deps != nil && deps.PubSub != nil {
+		if topicResolver, ok := deps.PubSub.(interface{ GetEventHubName() string }); ok {
+			topicName := topicResolver.GetEventHubName()
+			if topicName != "" {
+				return topicName
+			}
 		}
 	}
 
 	return pubsubMigrationTopic
 }
 
-func extractLastVersion(c *infra.Container, data []byte) int64 {
+func extractLastVersion(deps *Deps, data []byte) int64 {
 	if len(data) == 0 {
 		return 0
 	}
@@ -115,7 +121,7 @@ func extractLastVersion(c *infra.Container, data []byte) int64 {
 		var rec migrationRecord
 
 		if err := json.Unmarshal(line, &rec); err != nil {
-			c.Errorf("Error decoding JSON: %v for line: %s", err, string(line))
+			deps.log().Errorf("Error decoding JSON: %v for line: %s", err, string(line))
 
 			continue
 		}
@@ -125,12 +131,12 @@ func extractLastVersion(c *infra.Container, data []byte) int64 {
 		}
 	}
 
-	c.Debugf("Last completed migration version: %d", lastVersion)
+	deps.log().Debugf("Last completed migration version: %d", lastVersion)
 
 	return lastVersion
 }
 
-func (pm pubsubMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
+func (pm pubsubMigrator) commitMigration(ctx context.Context, deps *Deps, data transactionData) error {
 	record := migrationRecord{
 		Version:   data.MigrationNumber,
 		Method:    "UP",
@@ -143,14 +149,18 @@ func (pm pubsubMigrator) commitMigration(ctx context.Context, c *infra.Container
 		return err
 	}
 
-	publishTopic := resolveMigrationTopic(c)
+	publishTopic := resolveMigrationTopic(deps)
 
-	err = c.PubSub.Publish(ctx, publishTopic, recordBytes)
+	err = deps.PubSub.Publish(ctx, publishTopic, recordBytes)
 	if err != nil {
 		return err
 	}
 
-	c.Debugf("Inserted record for migration %v in PubSub kite_migrations topic", data.MigrationNumber)
+	deps.log().Debugf("Inserted record for migration %v in PubSub kite_migrations topic", data.MigrationNumber)
 
-	return pm.migrator.commitMigration(ctx, c, data)
+	if pm.migrator == nil {
+		return nil
+	}
+
+	return pm.migrator.commitMigration(ctx, deps, data)
 }

@@ -209,8 +209,8 @@ func (a *App) beginStopIntake(cause error) {
 	}
 
 	a.closeIntakeGate()
-	if a.container != nil {
-		a.container.CloseHealthAdmission()
+	if a.kernel != nil {
+		a.kernel.CloseHealthAdmission()
 	}
 	a.syncGRPCHealth()
 	a.cancelCompatWSServices()
@@ -343,6 +343,7 @@ func (a *App) finishStop(ctx context.Context, startupDone <-chan struct{}) {
 		a.runtimeMu.Lock()
 		a.stopErr = joinShutdownErr(err, ctx.Err())
 		a.runtimeState = lifecycleStopped
+		a.atomicState.Store(uint32(lifecycleStopped))
 		close(a.stopDone)
 		if a.waitDone != nil {
 			close(a.waitDone)

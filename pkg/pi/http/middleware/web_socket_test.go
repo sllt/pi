@@ -10,46 +10,41 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
-	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
 	piWebSocket "github.com/sllt/pi/pkg/pi/websocket"
 )
 
 var errConnection = errors.New("can't create connection")
 
-func initializeWebSocketMocks(t *testing.T) (piWebSocket.MockUpgrader, *piWebSocket.Manager) {
+func initializeWebSocketMocks(t *testing.T) (*piWebSocket.MockUpgrader, *piWebSocket.Manager) {
 	t.Helper()
 
 	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	mockUpgrader := piWebSocket.NewMockUpgrader(mockCtrl)
 
 	wsManager := piWebSocket.New()
 	wsManager.WebSocketUpgrader = &piWebSocket.WSUpgrader{Upgrader: mockUpgrader}
 
-	return *mockUpgrader, wsManager
+	return mockUpgrader, wsManager
 }
 
 func TestWSConnectionCreate_Error(t *testing.T) {
 	mockUpgrader, wsManager := initializeWebSocketMocks(t)
-	mockContainer, _ := infra.NewMockContainer(t)
+	logger := logging.NewMockLogger(logging.DEBUG)
 
 	mockUpgrader.EXPECT().Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil,
 		errConnection).Times(1)
 
-	handler := WSHandlerUpgrade(mockContainer, wsManager)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	handler := WSHandlerUpgrade(logger, wsManager)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 	}))
 
-	// Create a test request with incomplete upgrade header
 	req := httptest.NewRequest(http.MethodGet, "/ws", http.NoBody)
 	req.Header.Set("Connection", "upgrade")
 	req.Header.Set("Upgrade", "websocket")
 
-	// Serve the request through the middleware
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, req)
 
-	// No response expected, status code should be 400 (Bad Request)
 	if status := recorder.Code; status != http.StatusBadRequest {
 		t.Errorf("Unexpected status code: %d", status)
 	}
@@ -57,7 +52,7 @@ func TestWSConnectionCreate_Error(t *testing.T) {
 
 func Test_WSConnectionCreate_Success(t *testing.T) {
 	mockUpgrader, wsManager := initializeWebSocketMocks(t)
-	mockContainer, _ := infra.NewMockContainer(t)
+	logger := logging.NewMockLogger(logging.DEBUG)
 
 	mockConn := &piWebSocket.Connection{
 		Conn: &websocket.Conn{},
@@ -65,7 +60,7 @@ func Test_WSConnectionCreate_Success(t *testing.T) {
 
 	mockUpgrader.EXPECT().Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).Return(mockConn.Conn, nil).Times(1)
 
-	middleware := WSHandlerUpgrade(mockContainer, wsManager)
+	middleware := WSHandlerUpgrade(logger, wsManager)
 
 	innerHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

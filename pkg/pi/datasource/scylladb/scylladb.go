@@ -3,7 +3,10 @@ package scylladb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -16,7 +19,11 @@ const (
 	CounterBatch
 )
 
-var errStatusDown = errors.New("status down")
+var (
+	errStatusDown         = errors.New("status down")
+	errInvalidConfig      = errors.New("scylladb: host and keyspace are required")
+	errClientNotConnected = errors.New("scylladb: client not connected")
+)
 
 // Config holds the configuration settings for connecting to a ScyllaDB cluster,
 // including host addresses, keyspace, port, and authentication credentials.
@@ -29,11 +36,10 @@ type Config struct {
 }
 
 // ScyllaDB represents the connection and operations context for interacting with a ScyllaDB cluster,
-// including configuration, active session, query handling, and initialized batches.
+// including configuration, active session, and initialized batches.
 type ScyllaDB struct {
 	clusterConfig clusterConfig
 	session       session
-	query         query
 	batches       map[string]batch
 }
 
@@ -53,7 +59,7 @@ type Client struct {
 // Health represents the health status of the ScyllaDB cluster,
 // including the overall status (e.g., "UP" or "DOWN") and additional details.
 type Health struct {
-	Status  string         `json:" status,omitempty"`
+	Status  string         `json:"status,omitempty"`
 	Details map[string]any `json:"details,omitempty"`
 }
 
@@ -64,20 +70,130 @@ func New(conf Config) *Client {
 	return &Client{config: &conf, scylla: scylla}
 }
 
-// Connect establishes a connection to Scylladb.
-func (c *Client) Connect() {
-	c.logger.Debugf("connecting to ScyllaDB at %v on port %v to keyspace %v", c.config.Host, c.config.Port, c.config.Keyspace)
+// FromEnv constructs an unstarted ScyllaDB client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
+
+	firstNonEmpty := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(get(k)); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	host := firstNonEmpty("SCYLLADB_HOST", "SCYLLA_HOST")
+	keyspace := firstNonEmpty("SCYLLADB_KEYSPACE", "SCYLLA_KEYSPACE")
+	if host == "" || keyspace == "" {
+		return nil, errInvalidConfig
+	}
+
+	port := 9042
+	if rawPort := firstNonEmpty("SCYLLADB_PORT", "SCYLLA_PORT"); rawPort != "" {
+		parsed, err := strconv.Atoi(rawPort)
+		if err != nil || parsed <= 0 || parsed > 65535 {
+			return nil, fmt.Errorf("scylladb: invalid SCYLLADB_PORT %q", rawPort)
+		}
+		port = parsed
+	}
+
+	return New(Config{
+		Host:     host,
+		Keyspace: keyspace,
+		Port:     port,
+		Username: firstNonEmpty("SCYLLADB_USERNAME", "SCYLLA_USERNAME", "SCYLLADB_USER"),
+		Password: firstNonEmpty("SCYLLADB_PASSWORD", "SCYLLA_PASSWORD"),
+	}), nil
+}
+
+// ConnectContext establishes a ScyllaDB session within ctx and returns any error.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil || c.config == nil || c.scylla == nil {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.scylla.session != nil {
+		return nil
+	}
+	if strings.TrimSpace(c.config.Host) == "" || strings.TrimSpace(c.config.Keyspace) == "" {
+		return errInvalidConfig
+	}
+
+	if c.logger != nil {
+		c.logger.Debugf("connecting to ScyllaDB at %v on port %v to keyspace %v", c.config.Host, c.config.Port, c.config.Keyspace)
+	}
 
 	sess, err := c.scylla.clusterConfig.createSession()
 	if err != nil {
-		c.logger.Error("failed to connect to ScyllaDB:", err)
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		if closer, ok := sess.(interface{ Close() }); ok {
+			closer.Close()
+		}
+		return err
+	}
+
+	if c.metrics != nil {
+		scyllaBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_scylla_stats", "Response time of ScyllaDB queries in microseconds", scyllaBuckets...)
+	}
+
+	if c.logger != nil {
+		c.logger.Logf("connected to '%s' keyspace at host '%s' and port '%d'", c.config.Keyspace, c.config.Host, c.config.Port)
+	}
+	c.scylla.session = sess
+
+	return nil
+}
+
+// Close closes the underlying ScyllaDB session idempotently.
+func (c *Client) Close() error {
+	if c == nil || c.scylla == nil || c.scylla.session == nil {
+		return nil
+	}
+
+	sess := c.scylla.session
+	c.scylla.session = nil
+	c.scylla.batches = nil
+
+	if closer, ok := sess.(interface{ Close() }); ok {
+		closer.Close()
+	}
+
+	return nil
+}
+
+// Connect establishes a connection to Scylladb.
+func (c *Client) Connect() {
+	if c.logger != nil {
+		c.logger.Debugf("connecting to ScyllaDB at %v on port %v to keyspace %v", c.config.Host, c.config.Port, c.config.Keyspace)
+	}
+
+	sess, err := c.scylla.clusterConfig.createSession()
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Error("failed to connect to ScyllaDB:", err)
+		}
 		return
 	}
 
-	scyllaBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
-	c.metrics.NewHistogram("app_scylla_stats", "Response time of ScyllaDB queries in microseconds", scyllaBuckets...)
+	if c.metrics != nil {
+		scyllaBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_scylla_stats", "Response time of ScyllaDB queries in microseconds", scyllaBuckets...)
+	}
 
-	c.logger.Logf("connected to '%s' keyspace at host '%s' and port '%d'", c.config.Keyspace, c.config.Host, c.config.Port)
+	if c.logger != nil {
+		c.logger.Logf("connected to '%s' keyspace at host '%s' and port '%d'", c.config.Keyspace, c.config.Host, c.config.Port)
+	}
 	c.scylla.session = sess
 }
 
@@ -116,8 +232,16 @@ func (c *Client) Exec(stmt string, values ...any) error {
 
 // ExecWithCtx executes a CQL statement by using the context,statement,values and returns error.
 func (c *Client) ExecWithCtx(ctx context.Context, stmt string, values ...any) error {
+	if c == nil || c.config == nil || c.scylla == nil {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "exec", stmt)
 	defer c.sendOperationStats(&QueryLog{Operation: "ExecWithCtx", Query: stmt, Keyspace: c.config.Keyspace}, time.Now(), "exec", span)
+
+	if c.scylla.session == nil {
+		return errClientNotConnected
+	}
 
 	return c.scylla.session.Query(stmt, values...).Exec()
 }
@@ -131,6 +255,10 @@ func (c *Client) ExecCAS(dest any, stmt string, values ...any) (bool, error) {
 //
 //nolint:exhaustive // We just want to take care of slice and struct in this case.
 func (c *Client) ExecCASWithCtx(ctx context.Context, dest any, stmt string, values ...any) (bool, error) {
+	if c == nil || c.config == nil || c.scylla == nil {
+		return false, errClientNotConnected
+	}
+
 	var (
 		applied bool
 		err     error
@@ -142,9 +270,15 @@ func (c *Client) ExecCASWithCtx(ctx context.Context, dest any, stmt string, valu
 
 	rvo := reflect.ValueOf(dest)
 	if rvo.Kind() != reflect.Ptr {
-		c.logger.Errorf("we did not get a pointer. data is not settable.")
+		if c.logger != nil {
+			c.logger.Errorf("we did not get a pointer. data is not settable.")
+		}
 
 		return false, errDestinationIsNotPointer
+	}
+
+	if c.scylla.session == nil {
+		return false, errClientNotConnected
 	}
 
 	rv := rvo.Elem()
@@ -155,12 +289,16 @@ func (c *Client) ExecCASWithCtx(ctx context.Context, dest any, stmt string, valu
 		applied, err = c.rowsToStructCAS(q, rv)
 
 	case reflect.Slice:
-		c.logger.Debugf("a slice of %v was not expected.", reflect.SliceOf(reflect.TypeOf(dest)).String())
+		if c.logger != nil {
+			c.logger.Debugf("a slice of %v was not expected.", reflect.SliceOf(reflect.TypeOf(dest)).String())
+		}
 
 		return false, errUnexpectedSlice{target: reflect.SliceOf(reflect.TypeOf(dest)).String()}
 
 	case reflect.Map:
-		c.logger.Debugf("a map was not expected.")
+		if c.logger != nil {
+			c.logger.Debugf("a map was not expected.")
+		}
 
 		return false, errUnexpectedMap
 
@@ -175,14 +313,24 @@ func (c *Client) ExecCASWithCtx(ctx context.Context, dest any, stmt string, valu
 //
 //nolint:exhaustive // We just want to take care of slice and struct in this case
 func (c *Client) QueryWithCtx(ctx context.Context, dest any, stmt string, values ...any) error {
+	if c == nil || c.config == nil || c.scylla == nil {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "query", stmt)
 
 	defer c.sendOperationStats(&QueryLog{Operation: "QueryWithCtx", Query: stmt, Keyspace: c.config.Keyspace}, time.Now(), "query", span)
 
 	rvo := reflect.ValueOf(dest)
 	if rvo.Kind() != reflect.Ptr {
-		c.logger.Debug("we did not get a pointer. data is not settable.")
+		if c.logger != nil {
+			c.logger.Debug("we did not get a pointer. data is not settable.")
+		}
 		return errDestinationIsNotPointer
+	}
+
+	if c.scylla.session == nil {
+		return errClientNotConnected
 	}
 
 	rv := rvo.Elem()
@@ -214,7 +362,9 @@ func (c *Client) QueryWithCtx(ctx context.Context, dest any, stmt string, values
 		c.rowsToStruct(iter, rv)
 
 	default:
-		c.logger.Debugf("a pointer to %v was not expected.", rv.Kind().String())
+		if c.logger != nil {
+			c.logger.Debugf("a pointer to %v was not expected.", rv.Kind().String())
+		}
 
 		return errUnexpectedPointer{target: rv.Kind().String()}
 	}
@@ -230,8 +380,16 @@ func (c *Client) NewBatch(name string, batchType int) error {
 
 // NewBatchWithCtx uses context ,batch name,and batch type, and returns error.
 func (c *Client) NewBatchWithCtx(_ context.Context, name string, batchType int) error {
+	if c == nil || c.scylla == nil {
+		return errClientNotConnected
+	}
+
 	switch batchType {
 	case LoggedBatch, UnLoggedBatch, CounterBatch:
+		if c.scylla.session == nil {
+			return errClientNotConnected
+		}
+
 		if len(c.scylla.batches) == 0 {
 			c.scylla.batches = make(map[string]batch)
 		}
@@ -252,6 +410,10 @@ func (c *Client) BatchQuery(name, stmt string, values ...any) error {
 
 // BatchQueryWithCtx executes Query with  the provided context,batch name, statement and values.
 func (c *Client) BatchQueryWithCtx(ctx context.Context, name, stmt string, values ...any) error {
+	if c == nil || c.config == nil || c.scylla == nil {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "batch-query", stmt)
 
 	defer c.sendOperationStats(&QueryLog{
@@ -272,6 +434,10 @@ func (c *Client) BatchQueryWithCtx(ctx context.Context, name, stmt string, value
 
 // ExecuteBatchWithCtx executes batch with provided context, batch name and returns err.
 func (c *Client) ExecuteBatchWithCtx(ctx context.Context, name string) error {
+	if c == nil || c.config == nil || c.scylla == nil {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "execute-batch", "batch")
 
 	defer c.sendOperationStats(&QueryLog{
@@ -285,6 +451,10 @@ func (c *Client) ExecuteBatchWithCtx(ctx context.Context, name string) error {
 		return errBatchNotInitialized
 	}
 
+	if c.scylla.session == nil {
+		return errClientNotConnected
+	}
+
 	return c.scylla.session.executeBatch(b)
 }
 
@@ -295,6 +465,10 @@ func (c *Client) ExecuteBatchCAS(name string, dest ...any) (bool, error) {
 
 // ExecuteBatchCASWithCtx takes default context, batch name and destination returns bool and error.
 func (c *Client) ExecuteBatchCASWithCtx(ctx context.Context, name string, dest ...any) (bool, error) {
+	if c == nil || c.config == nil || c.scylla == nil {
+		return false, errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "execute-batch-cas", "batch")
 
 	defer c.sendOperationStats(&QueryLog{
@@ -306,6 +480,10 @@ func (c *Client) ExecuteBatchCASWithCtx(ctx context.Context, name string, dest .
 	b, ok := c.scylla.batches[name]
 	if !ok {
 		return false, errBatchNotInitialized
+	}
+
+	if c.scylla.session == nil {
+		return false, errClientNotConnected
 	}
 
 	return c.scylla.session.executeBatchCAS(b, dest...)
@@ -326,6 +504,11 @@ func (c *Client) HealthCheck(context.Context) (any, error) {
 
 	h := Health{
 		Details: make(map[string]any),
+	}
+	if c == nil || c.config == nil || c.scylla == nil {
+		h.Status = statusDown
+		h.Details["message"] = "ScyllaDB not configured"
+		return &h, errStatusDown
 	}
 
 	h.Details["host"] = c.config.Host

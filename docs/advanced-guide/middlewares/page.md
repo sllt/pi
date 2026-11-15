@@ -23,46 +23,52 @@ The CORS middleware provides the following overridable configs:
 
 ## Adding Custom Middleware in Pi
 
-By adding custom middleware to your Pi application, user can easily extend its functionality and implement
+By adding custom middleware to your Pi application, you can extend its functionality and implement
 cross-cutting concerns in a modular and reusable way.
-User can use the `UseMiddleware` or `UseMiddlewareWithContainer` method on your Pi application instance to register your custom middleware.
+Use `app.Use(...)` for standard `net/http` middleware, or `app.UseMiddleware(...)` for `pi.PiMiddleware` when you need access to `*pi.Context` (`ctx.SQL()`, `ctx.Redis()`, `pi.Use[T](ctx)`, etc.).
 
-### Using UseMiddleware method for Custom Middleware
-The UseMiddleware method is ideal for simple middleware that doesn't need direct access to the application's container.
-
-#### Example:
+### Using `Use` for Standard `net/http` Middleware
 
 ```go
 import (
 	"net/http"
 
-	piHTTP "github.com/sllt/pi/pkg/pi/http"
+	"github.com/sllt/pi/pkg/pi"
 )
 
-// Define your custom middleware function
-func customMiddleware() piHTTP.Middleware {
-	return func(inner http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Your custom logic here
-			// For example, logging, authentication, etc.
+func customHTTPMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Custom pre/post request logic
+		next.ServeHTTP(w, r)
+	})
+}
 
-			// Call the next handler in the chain
-			inner.ServeHTTP(w, r)
-		})
+func main() {
+	app := pi.New()
+	app.Use(customHTTPMiddleware)
+	app.Run()
+}
+```
+
+### Using `UseMiddleware` with `*pi.Context`
+
+```go
+import (
+	"net/http"
+
+	"github.com/sllt/pi/pkg/pi"
+)
+
+func auditMiddleware(next pi.PiHandler) pi.PiHandler {
+	return func(ctx *pi.Context, w http.ResponseWriter, r *http.Request) {
+		ctx.Infof("incoming %s %s", r.Method, r.URL.Path)
+		next(ctx, w, r)
 	}
 }
 
 func main() {
-	// Create a new instance of your Pi application
 	app := pi.New()
-
-	// Add your custom middleware to the application
-	app.UseMiddleware(customMiddleware())
-
-	// Define your application routes and handlers
-	// ...
-
-	// Run your Pi application
+	app.UseMiddleware(auditMiddleware)
 	app.Run()
 }
 ```

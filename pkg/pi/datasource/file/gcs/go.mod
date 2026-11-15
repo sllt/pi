@@ -1,9 +1,10 @@
 module github.com/sllt/pi/pkg/pi/datasource/file/gcs
 
-go 1.25.0
+go 1.27.0
 
 require (
 	cloud.google.com/go/storage v1.59.1
+	github.com/sllt/pi v0.5.0
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/mock v0.6.0
 	google.golang.org/api v0.263.0
@@ -37,7 +38,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/sllt/pi v0.3.1
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.38.0 // indirect

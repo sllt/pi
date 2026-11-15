@@ -1,6 +1,10 @@
 package service
 
-import "context"
+import (
+	"context"
+
+	"go.opentelemetry.io/otel/trace"
+)
 
 type HealthConfig struct {
 	HealthEndpoint string
@@ -15,8 +19,10 @@ func (h *HealthConfig) AddOption(svc HTTP) HTTP {
 
 	// Set health config on the parent httpService so other options can access it
 	if httpSvc := extractHTTPService(svc); httpSvc != nil {
+		httpSvc.mu.Lock()
 		httpSvc.healthEndpoint = h.HealthEndpoint
 		httpSvc.healthTimeout = h.Timeout
+		httpSvc.mu.Unlock()
 	}
 
 	return &customHealthService{
@@ -33,5 +39,33 @@ type customHealthService struct {
 }
 
 func (c *customHealthService) HealthCheck(ctx context.Context) *Health {
-	return c.HTTP.getHealthResponseForEndpoint(ctx, c.healthEndpoint, c.timeout)
+	return checkEndpointHealth(ctx, c.HTTP, c.healthEndpoint, c.timeout)
+}
+
+func (c *customHealthService) UseServiceName(name string) {
+	if c == nil {
+		return
+	}
+	propagateServiceName(c.HTTP, name)
+}
+
+func (c *customHealthService) UseLogger(logger any) {
+	if c == nil {
+		return
+	}
+	propagateLogger(c.HTTP, logger)
+}
+
+func (c *customHealthService) UseMetrics(metrics any) {
+	if c == nil {
+		return
+	}
+	propagateMetrics(c.HTTP, metrics)
+}
+
+func (c *customHealthService) UseTracerProvider(tp trace.TracerProvider) {
+	if c == nil {
+		return
+	}
+	propagateTracerProvider(c.HTTP, tp)
 }

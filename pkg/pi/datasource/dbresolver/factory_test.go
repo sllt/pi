@@ -1,12 +1,13 @@
 package dbresolver
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/sllt/pi/pkg/pi"
 	"github.com/sllt/pi/pkg/pi/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,32 +15,78 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
-func TestNewDBResolverProvider(t *testing.T) {
-	app := &pi.App{}
-	cfg := Config{
-		Strategy:     StrategyRoundRobin,
-		ReadFallback: true,
+func TestFromEnv(t *testing.T) {
+	env := map[string]string{
+		"DB_RESOLVER_STRATEGY":       "random",
+		"DB_RESOLVER_READ_FALLBACK":  "false",
+		"DB_RESOLVER_MAX_FAILURES":   "7",
+		"DB_RESOLVER_TIMEOUT_SEC":    "45",
+		"DB_RESOLVER_PRIMARY_ROUTES": "/admin/*, /health ",
+		"DB_RESOLVER_REPLICAS":       `[{"host":"replica1:3307","user":"u1","password":"p1"}]`,
 	}
 
-	provider := NewDBResolverProvider(app, &cfg)
+	cfg, err := FromEnv(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	assert.Equal(t, StrategyRandom, cfg.Strategy)
+	assert.False(t, cfg.ReadFallback)
+	assert.Equal(t, uint32(7), cfg.MaxFailures)
+	assert.Equal(t, uint32(45), cfg.TimeoutSec)
+	assert.Equal(t, []string{"/admin/*", "/health"}, cfg.PrimaryRoutes)
+	require.Len(t, cfg.Replicas, 1)
+	assert.Equal(t, "replica1:3307", cfg.Replicas[0].Host)
 
-	require.NotNil(t, provider)
-	assert.Equal(t, app, provider.app)
-	assert.Equal(t, cfg, provider.cfg)
+	_, err = FromEnv(func(k string) string {
+		if k == "DB_RESOLVER_READ_FALLBACK" {
+			return "not-a-bool"
+		}
+		return ""
+	})
+	require.Error(t, err)
 }
 
-func TestResolverProvider_GetResolver(t *testing.T) {
+func TestOpenReplicasWith_ClosesOpenedReplicasOnValidationFailure(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	mockDB := NewMockDB(ctrl)
-	provider := &ResolverProvider{
-		resolver: mockDB,
+	mockReplica0 := NewMockDB(ctrl)
+	mockReplica0.EXPECT().Close().Return(nil).Times(1)
+
+	mockConfig := config.NewMockConfig(map[string]string{"DB_NAME": "testdb"})
+	cfg := &Config{
+		Replicas: []ReplicaCredential{
+			{Host: "replica1:3307", User: "u1", Password: "p1"},
+			{Host: "invalid-host-without-port", User: "u2", Password: "p2"},
+		},
 	}
 
-	resolver := provider.GetResolver()
+	replicas, err := openReplicasWith(context.Background(), cfg, mockConfig, nil, nil, func(_ context.Context, _ config.Config, _ Logger, _ Metrics) (DB, error) {
+		return mockReplica0, nil
+	})
+	require.ErrorIs(t, err, errInvalidReplicaHostFormat)
+	assert.Nil(t, replicas)
+}
 
-	assert.Equal(t, mockDB, resolver)
+func TestOpenReplicasContext_AllReplicasFail(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockConfig := config.NewMockConfig(map[string]string{
+		"DB_DIALECT": "mysql",
+		"DB_NAME":    "testdb",
+	})
+	cfg := &Config{
+		Replicas: []ReplicaCredential{
+			{Host: "127.0.0.1:1", User: "u1", Password: "p1"},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	replicas, err := OpenReplicasContext(ctx, cfg, mockConfig, nil, nil, noop.NewTracerProvider())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errAllReplicasFailed))
+	assert.Nil(t, replicas)
 }
 
 func TestCreateStrategy_RoundRobin(t *testing.T) {
@@ -104,9 +151,8 @@ func TestReplicaConfig_GetMaxIdleConnections(t *testing.T) {
 		base: mockConfig,
 	}
 
-	result := replicaCfg.Get("DB_MAX_IDLE_CONNECTIONS")
-
-	assert.Equal(t, "5", result)
+	assert.Equal(t, "5", replicaCfg.Get("DB_MAX_IDLE_CONNECTIONS"))
+	assert.Equal(t, "5", replicaCfg.Get("DB_MAX_IDLE_CONNECTION"))
 }
 
 func TestReplicaConfig_GetMaxOpenConnections(t *testing.T) {
@@ -118,9 +164,8 @@ func TestReplicaConfig_GetMaxOpenConnections(t *testing.T) {
 		base: mockConfig,
 	}
 
-	result := replicaCfg.Get("DB_MAX_OPEN_CONNECTIONS")
-
-	assert.Equal(t, "10", result)
+	assert.Equal(t, "10", replicaCfg.Get("DB_MAX_OPEN_CONNECTIONS"))
+	assert.Equal(t, "10", replicaCfg.Get("DB_MAX_OPEN_CONNECTION"))
 }
 
 func TestGetReplicaConfigInt_ValidValue(t *testing.T) {
@@ -226,95 +271,8 @@ func TestCreateReplicaConnection_NoDBName(t *testing.T) {
 	assert.ErrorIs(t, err, errDBNameRequired)
 }
 
-func TestResolverProvider_UseTracer(t *testing.T) {
-	provider := &ResolverProvider{}
-
-	tracer := noop.NewTracerProvider().Tracer("test")
-	provider.UseTracer(tracer)
-
-	assert.Equal(t, tracer, provider.tracer)
-}
-
-func TestResolverProvider_UseTracer_InvalidType(t *testing.T) {
-	provider := &ResolverProvider{}
-
-	provider.UseTracer("invalid")
-
-	assert.Nil(t, provider.tracer)
-}
-
-func TestResolverProvider_Connect_InvalidLogger(t *testing.T) {
-	mockConfig := config.NewMockConfig(map[string]string{})
-
-	app := pi.New()
-	app.Config = mockConfig
-
-	provider := &ResolverProvider{
-		app:    app,
-		logger: "invalid-logger", // Wrong type
-	}
-
-	provider.Connect()
-
-	assert.Nil(t, provider.resolver)
-}
-
-func TestResolverProvider_Connect_InvalidMetrics(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockLogger := NewMockLogger(ctrl)
-	mockConfig := config.NewMockConfig(map[string]string{})
-
-	app := pi.New()
-	app.Config = mockConfig
-
-	mockLogger.EXPECT().Errorf("Invalid logger or metrics type").Times(1)
-
-	provider := &ResolverProvider{
-		app:     app,
-		logger:  mockLogger,
-		metrics: "invalid-metrics", // Wrong type
-	}
-
-	provider.Connect()
-
-	assert.Nil(t, provider.resolver)
-}
-
-func TestResolverProvider_UseLogger(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockLogger := NewMockLogger(ctrl)
-	provider := &ResolverProvider{}
-
-	provider.UseLogger(mockLogger)
-
-	assert.Equal(t, mockLogger, provider.logger)
-}
-
-func TestResolverProvider_UseMetrics(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockMetrics := NewMockMetrics(ctrl)
-	provider := &ResolverProvider{}
-
-	provider.UseMetrics(mockMetrics)
-
-	assert.Equal(t, mockMetrics, provider.metrics)
-}
-
-func TestResolverProvider_GetResolver_Nil(t *testing.T) {
-	provider := &ResolverProvider{}
-
-	resolver := provider.GetResolver()
-
-	assert.Nil(t, resolver)
-}
 func TestCreateHTTPMiddleware(t *testing.T) {
-	middleware := createHTTPMiddleware()
+	middleware := HTTPMiddleware()
 
 	assert.NotNil(t, middleware)
 
@@ -837,4 +795,39 @@ func TestCreateReplicaConnection_MissingDBName(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, replica)
 	assert.ErrorIs(t, err, errDBNameRequired)
+}
+
+func TestCircuitBreaker_AllowRequest_TransitionsOpenToHalfOpen(t *testing.T) {
+	cb := newCircuitBreaker(2, 20*time.Millisecond)
+	cb.recordFailure()
+	cb.recordFailure()
+	assert.Equal(t, circuitStateOpen, *cb.state.Load())
+	assert.False(t, cb.allowRequest())
+
+	pastTime := time.Now().Add(-50 * time.Millisecond)
+	cb.lastFailure.Store(&pastTime)
+
+	// Without manual Store, allowRequest itself must CAS from OPEN to HALF_OPEN.
+	assert.True(t, cb.allowRequest())
+	assert.Equal(t, circuitStateHalfOpen, *cb.state.Load())
+}
+
+func TestFromEnv_AcceptsRoundRobinSnakeAndHyphen(t *testing.T) {
+	cfgSnake, err := FromEnv(func(k string) string {
+		if k == "DB_RESOLVER_STRATEGY" {
+			return "round_robin"
+		}
+		return ""
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StrategyRoundRobin, cfgSnake.Strategy)
+
+	cfgHyphen, err := FromEnv(func(k string) string {
+		if k == "DB_RESOLVER_STRATEGY" {
+			return "round-robin"
+		}
+		return ""
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StrategyRoundRobin, cfgHyphen.Strategy)
 }

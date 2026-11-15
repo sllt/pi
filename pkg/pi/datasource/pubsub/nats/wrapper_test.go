@@ -1,6 +1,7 @@
 package nats
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"testing"
@@ -8,6 +9,9 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/sllt/pi/pkg/pi/datasource"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNATSConnWrapper(t *testing.T) {
@@ -80,4 +84,40 @@ func TestNATSConnWrapper(t *testing.T) {
 			t.Errorf("Expected NATSConn to return the original connection")
 		}
 	})
+}
+
+func TestPubSubWrapper_ConnectContext_Shutdown_FromEnv(t *testing.T) {
+	opts := &server.Options{
+		Host:      "127.0.0.1",
+		Port:      -1,
+		JetStream: true,
+		StoreDir:  t.TempDir(),
+	}
+	ns, err := server.NewServer(opts)
+	require.NoError(t, err)
+	go ns.Start()
+	defer ns.Shutdown()
+	require.True(t, ns.ReadyForConnections(10*time.Second))
+
+	addr := ns.Addr().(*net.TCPAddr)
+	url := fmt.Sprintf("nats://%s:%d", addr.IP.String(), addr.Port)
+
+	env := map[string]string{
+		"NATS_SERVER":   url,
+		"NATS_STREAM":   "orders",
+		"NATS_SUBJECTS": "orders.created, orders.updated",
+		"NATS_CONSUMER": "worker",
+	}
+	w, err := FromEnv(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	assert.Equal(t, datasource.StatusDown, w.Health().Status)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, w.ConnectContext(ctx))
+	// Idempotent second ConnectContext.
+	require.NoError(t, w.ConnectContext(ctx))
+	assert.Equal(t, datasource.StatusUp, w.Health().Status)
+
+	require.NoError(t, w.Shutdown(ctx))
 }

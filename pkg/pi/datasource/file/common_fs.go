@@ -108,6 +108,42 @@ func (c *CommonFileSystem) UseMetrics(metrics any) {
 	}
 }
 
+// HealthCheck probes the underlying cloud/file storage provider with a default background context.
+func (c *CommonFileSystem) HealthCheck() *datasource.Health {
+	return c.HealthCheckContext(context.Background())
+}
+
+// HealthCheckContext probes the underlying cloud/file storage provider within ctx.
+func (c *CommonFileSystem) HealthCheckContext(ctx context.Context) *datasource.Health {
+	details := make(map[string]any)
+	if c != nil {
+		if c.ProviderName != "" {
+			details["provider"] = c.ProviderName
+		}
+		if c.Location != "" {
+			details["location"] = c.Location
+		}
+	}
+	if c == nil || c.Provider == nil {
+		details["error"] = errProviderNil.Error()
+		return &datasource.Health{Status: datasource.StatusDown, Details: details}
+	}
+	if !c.connected.Load() {
+		details["error"] = "storage not connected"
+		return &datasource.Health{Status: datasource.StatusDown, Details: details}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if hc, ok := c.Provider.(interface{ Health(context.Context) error }); ok {
+		if err := hc.Health(ctx); err != nil {
+			details["error"] = err.Error()
+			return &datasource.Health{Status: datasource.StatusDown, Details: details}
+		}
+	}
+	return &datasource.Health{Status: datasource.StatusUp, Details: details}
+}
+
 // Mkdir creates a directory in cloud storage by creating a zero-byte object with "/" suffix.
 // This follows cloud storage conventions where directories are represented as special markers.
 func (c *CommonFileSystem) Mkdir(name string, _ os.FileMode) error {

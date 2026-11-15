@@ -44,7 +44,9 @@ func (sm *SubscriptionManager) Subscribe(
 	cfg *Config,
 	logger pubsub.Logger,
 	metrics Metrics) (*pubsub.Message, error) {
-	metrics.IncrementCounter(ctx, "app_pubsub_subscribe_total_count", "topic", topic)
+	if metrics != nil {
+		metrics.IncrementCounter(ctx, "app_pubsub_subscribe_total_count", "topic", topic)
+	}
 
 	if err := sm.validateSubscribePrerequisites(js, cfg); err != nil {
 		return nil, err
@@ -78,7 +80,9 @@ func (sm *SubscriptionManager) Subscribe(
 
 	select {
 	case msg := <-buffer:
-		metrics.IncrementCounter(ctx, "app_pubsub_subscribe_success_count", "topic", topic)
+		if metrics != nil {
+			metrics.IncrementCounter(ctx, "app_pubsub_subscribe_success_count", "topic", topic)
+		}
 		return msg, nil
 	case <-subDone:
 		return nil, errClientNotConnected
@@ -141,7 +145,7 @@ func (sm *SubscriptionManager) consumeMessages(
 		case <-ctx.Done():
 			return
 		default:
-			if err := sm.fetchAndProcessMessages(ctx, cons, topic, buffer, cfg, logger); err != nil {
+			if err := sm.fetchAndProcessMessages(ctx, cons, topic, buffer, cfg, logger); err != nil && logger != nil {
 				logger.Errorf("Error fetching messages for topic %s: %v", topic, err)
 			}
 		}
@@ -155,7 +159,11 @@ func (sm *SubscriptionManager) fetchAndProcessMessages(
 	buffer chan *pubsub.Message,
 	cfg *Config,
 	logger pubsub.Logger) error {
-	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(cfg.MaxWait))
+	maxWait := cfg.MaxWait
+	if maxWait <= 0 {
+		maxWait = time.Second
+	}
+	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(maxWait))
 	if err != nil {
 		return sm.handleFetchError(ctx, err, topic, logger)
 	}
@@ -164,7 +172,7 @@ func (sm *SubscriptionManager) fetchAndProcessMessages(
 }
 
 func (*SubscriptionManager) handleFetchError(ctx context.Context, err error, topic string, logger pubsub.Logger) error {
-	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) && logger != nil {
 		logger.Errorf("Error fetching messages for topic %s: %v", topic, err)
 	}
 
@@ -187,7 +195,7 @@ func (sm *SubscriptionManager) processFetchedMessages(
 	for msg := range msgs.Messages() {
 		pubsubMsg := sm.createPubSubMessage(msg, topic)
 
-		if !sm.sendToBuffer(pubsubMsg, buffer) {
+		if !sm.sendToBuffer(pubsubMsg, buffer) && logger != nil {
 			logger.Logf("Message buffer is full for topic %s. Consider increasing buffer size or processing messages faster.", topic)
 		}
 	}
@@ -216,7 +224,9 @@ func (*SubscriptionManager) sendToBuffer(msg *pubsub.Message, buffer chan *pubsu
 
 func (*SubscriptionManager) checkBatchError(msgs jetstream.MessageBatch, topic string, logger pubsub.Logger) error {
 	if err := msgs.Error(); err != nil {
-		logger.Errorf("Error in message batch for topic %s: %v", topic, err)
+		if logger != nil {
+			logger.Errorf("Error in message batch for topic %s: %v", topic, err)
+		}
 
 		return err
 	}

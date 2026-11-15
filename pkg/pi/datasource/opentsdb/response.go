@@ -209,6 +209,12 @@ type genericResponse interface {
 // sendRequest dispatches an HTTP request to the OpenTSDB server, using the provided
 // method, URL, and body content. It returns the parsed response or an error, if any.
 func (c *Client) sendRequest(ctx context.Context, method, url, reqBodyCnt string, parsedResp response) error {
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Create the HTTP request, attaching the context if available.
 	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(reqBodyCnt))
 	if ctx != nil {
@@ -308,7 +314,9 @@ func customParserHelper(operation string, logger Logger, unmarshalFunc func([]by
 	return func(result []byte) error {
 		err := unmarshalFunc(result)
 		if err != nil {
-			logger.Errorf("unmarshal %s error: %s", operation, err)
+			if logger != nil {
+				logger.Errorf("unmarshal %s error: %s", operation, err)
+			}
 
 			return err
 		}
@@ -374,7 +382,9 @@ func (c *Client) operateAnnotation(ctx context.Context, queryAnnotation, resp an
 	status = statusSuccess
 	message = fmt.Sprintf("%s: %s annotation request to url %q processed successfully", operation, method, annoEndpoint)
 
-	c.logger.Log("%s request successful", operation)
+	if c.logger != nil {
+		c.logger.Log("%s request successful", operation)
+	}
 
 	return nil
 }

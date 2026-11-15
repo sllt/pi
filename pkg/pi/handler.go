@@ -19,7 +19,6 @@ import (
 
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/response"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/static"
 	piWS "github.com/sllt/pi/pkg/pi/websocket"
@@ -29,22 +28,9 @@ const colorCodeError = 202 // 202 is red color code
 
 type Handler func(c *Context) (any, error)
 
-/*
-Developer Note: There is an implementation where we do not need this internal handler struct
-and directly use Handler. However, in that case the container dependency is not injected and
-has to be created inside ServeHTTP method, which will result in multiple unnecessary calls.
-This is what we implemented first.
-
-There is another possibility where we write our own Router implementation and let httpServer
-use that router which will return a Handler and httpServer will then create the context with
-injecting container and call that Handler with the new context. A similar implementation is
-done in CMD. Since this will require us to write our own router - we are not taking that path
-for now. In the future, this can be considered as well if we are writing our own HTTP router.
-*/
-
 type handler struct {
 	function       Handler
-	container      *infra.Container
+	rt             *runtimeKernel
 	requestTimeout time.Duration
 }
 
@@ -70,7 +56,7 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-ID", traceID)
 	deadline := time.Now().Add(h.requestTimeout)
 	policy := piHTTP.LegacyStatus
-	if h.container.ExplicitHTTPStatus {
+	if h.rt != nil && h.rt.explicitHTTPStatus {
 		policy = piHTTP.ExplicitStatus
 	}
 	responder := piHTTP.NewResponderForRequest(w, r, policy)
@@ -94,7 +80,10 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if h.requestTimeout > 0 {
 				_ = controller.SetReadDeadline(deadline)
 			}
-			max := h.container.MaxBodyBytes
+			var max int64
+			if h.rt != nil {
+				max = h.rt.maxBodyBytes
+			}
 			if max <= 0 {
 				max = 32 << 20
 			}
@@ -132,22 +121,30 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		r = owned
 	}
-	c := newContext(responder, piHTTP.NewRequestWithSnapshot(r, h.container.Validate, snapshotBytes, hasSnapshot), h.container)
+	var validate func(any) error
+	if h.rt != nil {
+		validate = h.rt.validate
+	}
+	c := newContext(responder, piHTTP.NewRequestWithSnapshot(r, validate, snapshotBytes, hasSnapshot), h.rt)
 
 	if websocket.IsWebSocketUpgrade(r) {
 		// If the request is a WebSocket upgrade, do not apply the timeout
 		c.Context = r.Context()
+		c.ContextLogger.UpdateContext(c.Context)
 	} else if h.requestTimeout != 0 {
 		ctx, cancel := context.WithDeadline(r.Context(), deadline)
 		defer cancel()
 
 		c.Context = ctx
+		c.ContextLogger.UpdateContext(c.Context)
 	}
 
 	// The websocket middleware has already hijacked this connection. Execute
 	// directly so ServeHTTP stays bound to the WebSocket loop lifetime and
 	// WSHandlerUpgrade's deferred cleanup never fires while the loop is active.
 	if r.Context().Value(piWS.WSConnectionKey) != nil {
+		doneHandler := h.rt.BeginHandlerExecution()
+		defer doneHandler()
 		_ = h.execute(c, traceID)
 		return
 	}
@@ -159,7 +156,7 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	responseDone := make(chan struct{})
 	defer close(responseDone)
 
-	doneHandler := h.container.BeginHandlerExecution()
+	doneHandler := h.rt.BeginHandlerExecution()
 	go func() {
 		defer doneHandler()
 		defer func() {
@@ -225,8 +222,8 @@ func (h handler) execute(c *Context, traceID string) (result handlerResult) {
 	defer func() {
 		if re := recover(); re != nil {
 			result = handlerResult{err: piHTTP.ErrorPanicRecovery{}}
-			if h.container != nil && h.container.Logger != nil {
-				h.container.Logger.Error(panicLog{
+			if h.rt != nil {
+				h.rt.getLogger().Error(panicLog{
 					Error:      fmt.Sprint(re),
 					StackTrace: string(debug.Stack()),
 				})
@@ -268,25 +265,26 @@ func catchAllHandler(*Context) (any, error) {
 
 // Log the error(if any) with traceID and errorMessage.
 func (h handler) logError(traceID string, err error) {
-	if err != nil && h.container != nil && h.container.Logger != nil {
+	if err != nil && h.rt != nil {
+		l := h.rt.getLogger()
 		errorLog := &ErrorLogEntry{TraceID: traceID, Error: err.Error()}
 
 		// define the default log level for error
-		loggerHelper := h.container.Logger.Error
+		loggerHelper := l.Error
 
 		switch logging.GetLogLevelForError(err) {
 		case logging.ERROR:
 			// we use the default log level for error
 		case logging.INFO:
-			loggerHelper = h.container.Logger.Info
+			loggerHelper = l.Info
 		case logging.NOTICE:
-			loggerHelper = h.container.Logger.Notice
+			loggerHelper = l.Notice
 		case logging.DEBUG:
-			loggerHelper = h.container.Logger.Debug
+			loggerHelper = l.Debug
 		case logging.WARN:
-			loggerHelper = h.container.Logger.Warn
+			loggerHelper = l.Warn
 		case logging.FATAL:
-			loggerHelper = h.container.Logger.Fatal
+			loggerHelper = l.Fatal
 		}
 
 		loggerHelper(errorLog)

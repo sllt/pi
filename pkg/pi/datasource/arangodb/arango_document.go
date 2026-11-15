@@ -49,6 +49,10 @@ type Document struct {
 //
 // id, err := client.CreateDocument(ctx, "myDB", "edges", edgeDoc).
 func (d *Document) CreateDocument(ctx context.Context, dbName, collectionName string, document any) (string, error) {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return "", errClientNotConnected
+	}
+
 	collection, tracerCtx, err := executeCollectionOperation(ctx, *d, dbName, collectionName,
 		"createDocument", "")
 	if err != nil {
@@ -82,6 +86,10 @@ func (d *Document) CreateDocument(ctx context.Context, dbName, collectionName st
 
 // GetDocument retrieves a document by its ID from the specified collection.
 func (d *Document) GetDocument(ctx context.Context, dbName, collectionName, documentID string, result any) error {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return errClientNotConnected
+	}
+
 	collection, tracerCtx, err := executeCollectionOperation(ctx, *d, dbName, collectionName,
 		"getDocument", documentID)
 	if err != nil {
@@ -95,6 +103,10 @@ func (d *Document) GetDocument(ctx context.Context, dbName, collectionName, docu
 
 // UpdateDocument updates an existing document in the specified collection.
 func (d *Document) UpdateDocument(ctx context.Context, dbName, collectionName, documentID string, document any) error {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return errClientNotConnected
+	}
+
 	collection, tracerCtx, err := executeCollectionOperation(ctx, *d, dbName, collectionName,
 		"updateDocument", documentID)
 	if err != nil {
@@ -108,6 +120,10 @@ func (d *Document) UpdateDocument(ctx context.Context, dbName, collectionName, d
 
 // DeleteDocument deletes a document by its ID from the specified collection.
 func (d *Document) DeleteDocument(ctx context.Context, dbName, collectionName, documentID string) error {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return errClientNotConnected
+	}
+
 	collection, tracerCtx, err := executeCollectionOperation(ctx, *d, dbName, collectionName,
 		"deleteDocument", documentID)
 	if err != nil {
@@ -121,6 +137,10 @@ func (d *Document) DeleteDocument(ctx context.Context, dbName, collectionName, d
 
 // isEdgeCollection checks if the given collection is an edge collection.
 func (d *Document) isEdgeCollection(ctx context.Context, dbName, collectionName string) (bool, error) {
+	if d == nil || d.client == nil || d.client.client == nil {
+		return false, errClientNotConnected
+	}
+
 	collection, err := d.client.getCollection(ctx, dbName, collectionName)
 	if err != nil {
 		return false, err
@@ -137,6 +157,10 @@ func (d *Document) isEdgeCollection(ctx context.Context, dbName, collectionName 
 
 func executeCollectionOperation(ctx context.Context, d Document, dbName, collectionName,
 	operation string, documentID string) (arangodb.Collection, context.Context, error) {
+	if d.client == nil || d.client.client == nil {
+		return nil, nil, errClientNotConnected
+	}
+
 	tracerCtx, span := d.client.addTrace(ctx, operation, map[string]string{"collection": collectionName})
 	startTime := time.Now()
 

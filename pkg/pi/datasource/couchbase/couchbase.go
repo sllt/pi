@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -97,43 +98,185 @@ func (c *Client) sendOperationStats(ql *QueryLog, startTime time.Time, method st
 
 	ql.Duration = duration
 
-	c.logger.Debug(ql)
+	if c.logger != nil {
+		c.logger.Debug(ql)
+	}
 
-	c.metrics.RecordHistogram(context.Background(), "app_couchbase_stats", float64(duration), "hostname", c.config.Host,
-		"bucket", c.config.Bucket, "type", method)
+	if c.metrics != nil {
+		c.metrics.RecordHistogram(context.Background(), "app_couchbase_stats", float64(duration), "hostname", c.config.Host,
+			"bucket", c.config.Bucket, "type", method)
+	}
+}
+
+// FromEnv constructs an unstarted Couchbase client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errMissingField
+	}
+
+	firstNonEmpty := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(get(k)); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	cfg := &Config{
+		URI:      firstNonEmpty("COUCHBASE_URI"),
+		Host:     firstNonEmpty("COUCHBASE_HOST"),
+		User:     firstNonEmpty("COUCHBASE_USER", "COUCHBASE_USERNAME"),
+		Password: get("COUCHBASE_PASSWORD"),
+		Bucket:   firstNonEmpty("COUCHBASE_BUCKET"),
+	}
+
+	if rawTimeout := firstNonEmpty("COUCHBASE_CONNECTION_TIMEOUT"); rawTimeout != "" {
+		parsed, err := time.ParseDuration(rawTimeout)
+		if err != nil || parsed <= 0 {
+			return nil, fmt.Errorf("couchbase: invalid COUCHBASE_CONNECTION_TIMEOUT %q", rawTimeout)
+		}
+		cfg.ConnectionTimeout = parsed
+	}
+
+	if cfg.Bucket == "" {
+		return nil, fmt.Errorf("%w: bucket is empty", errMissingField)
+	}
+
+	client := New(cfg)
+	if _, err := client.generateCouchbaseURI(); err != nil {
+		return nil, err
+	}
+
+	return client, nil
+}
+
+// ConnectContext establishes a connection to Couchbase within ctx and returns any error without silent failure.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil || c.config == nil {
+		return errMissingField
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.cluster != nil && c.bucket != nil {
+		return nil
+	}
+	if strings.TrimSpace(c.config.Bucket) == "" {
+		return fmt.Errorf("%w: bucket is empty", errMissingField)
+	}
+
+	uri, err := c.generateCouchbaseURI()
+	if err != nil {
+		return err
+	}
+
+	if c.logger != nil {
+		c.logger.Debugf("connecting to Couchbase at %v to bucket %v", c.config.Host, c.config.Bucket)
+	}
+
+	if c.cluster == nil {
+		if err := c.establishConnection(uri); err != nil {
+			return err
+		}
+	}
+
+	boundedTimeout := func() (time.Duration, error) {
+		timeout := c.getTimeout()
+		if dl, ok := ctx.Deadline(); ok {
+			rem := time.Until(dl)
+			if rem <= 0 {
+				return 0, ctx.Err()
+			}
+			if rem < timeout {
+				timeout = rem
+			}
+		}
+		return timeout, nil
+	}
+
+	clusterWait, err := boundedTimeout()
+	if err != nil {
+		_ = c.Close(nil)
+		return err
+	}
+	if err := c.cluster.WaitUntilReady(clusterWait, &gocb.WaitUntilReadyOptions{Context: ctx}); err != nil {
+		_ = c.Close(nil)
+		return err
+	}
+
+	c.bucket = c.cluster.Bucket(c.config.Bucket)
+
+	bucketWait, err := boundedTimeout()
+	if err != nil {
+		_ = c.Close(nil)
+		return err
+	}
+	if err := c.bucket.WaitUntilReady(bucketWait, &gocb.WaitUntilReadyOptions{Context: ctx}); err != nil {
+		_ = c.Close(nil)
+		return err
+	}
+
+	if c.metrics != nil {
+		couchbaseBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_couchbase_stats", "Response time of Couchbase queries in milliseconds.", couchbaseBuckets...)
+	}
+
+	if c.logger != nil {
+		c.logger.Logf("connected to Couchbase at %v to bucket %v", c.config.Host, c.config.Bucket)
+	}
+
+	return nil
 }
 
 // Connect establishes a connection to the Couchbase cluster.
 func (c *Client) Connect() {
 	uri, err := c.generateCouchbaseURI()
 	if err != nil {
-		c.logger.Errorf("error generating Couchbase URI: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("error generating Couchbase URI: %v", err)
+		}
 		return
 	}
 
-	c.logger.Debugf("connecting to Couchbase at %v to bucket %v", c.config.Host, c.config.Bucket)
+	if c.logger != nil {
+		c.logger.Debugf("connecting to Couchbase at %v to bucket %v", c.config.Host, c.config.Bucket)
+	}
 
 	if err := c.establishConnection(uri); err != nil {
-		c.logger.Errorf("error while connecting to Couchbase, err:%v", err)
+		if c.logger != nil {
+			c.logger.Errorf("error while connecting to Couchbase, err:%v", err)
+		}
 		return
 	}
 
 	if err := c.waitForClusterReady(); err != nil {
-		c.logger.Errorf("could not connect to Couchbase at %v due to err: %v", c.config.Host, err)
+		if c.logger != nil {
+			c.logger.Errorf("could not connect to Couchbase at %v due to err: %v", c.config.Host, err)
+		}
 		return
 	}
 
 	c.bucket = c.cluster.Bucket(c.config.Bucket)
 
 	if err := c.waitForBucketReady(); err != nil {
-		c.logger.Errorf("could not connect to bucket %v at %v due to err: %v", c.config.Bucket, c.config.Host, err)
+		if c.logger != nil {
+			c.logger.Errorf("could not connect to bucket %v at %v due to err: %v", c.config.Bucket, c.config.Host, err)
+		}
 		return
 	}
 
-	couchbaseBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
-	c.metrics.NewHistogram("app_couchbase_stats", "Response time of Couchbase queries in milliseconds.", couchbaseBuckets...)
+	if c.metrics != nil {
+		couchbaseBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_couchbase_stats", "Response time of Couchbase queries in milliseconds.", couchbaseBuckets...)
+	}
 
-	c.logger.Logf("connected to Couchbase at %v to bucket %v", c.config.Host, c.config.Bucket)
+	if c.logger != nil {
+		c.logger.Logf("connected to Couchbase at %v to bucket %v", c.config.Host, c.config.Bucket)
+	}
 }
 
 // generateCouchbaseURI generates the Couchbase connection URI.
@@ -187,16 +330,46 @@ func (c *Client) getTimeout() time.Duration {
 	return c.config.ConnectionTimeout
 }
 
+func sanitizeCouchbaseHost(cfg *Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.URI != "" {
+		parsed, err := url.Parse(cfg.URI)
+		if err == nil && parsed.User != nil {
+			parsed.User = nil
+			return parsed.String()
+		}
+		return cfg.URI
+	}
+	return cfg.Host
+}
+
 // HealthCheck performs a health check on the Couchbase connection.
-func (c *Client) HealthCheck(_ context.Context) (any, error) {
+func (c *Client) HealthCheck(ctx context.Context) (any, error) {
 	h := Health{
 		Details: make(map[string]any),
 	}
+	if c == nil || c.config == nil {
+		h.Status = "DOWN"
+		h.Details["message"] = "couchbase not configured"
+		return &h, errStatusDown
+	}
 
-	h.Details["host"] = c.config.URI
+	h.Details["host"] = sanitizeCouchbaseHost(c.config)
 	h.Details["bucket"] = c.config.Bucket
 
-	_, err := c.cluster.Ping(nil)
+	if c.cluster == nil {
+		h.Status = "DOWN"
+		h.Details["message"] = "couchbase cluster not initialized"
+		return &h, errStatusDown
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	_, err := c.cluster.Ping(&gocb.PingOptions{Context: ctx})
 	if err != nil {
 		h.Status = "DOWN"
 		return &h, errStatusDown
@@ -209,8 +382,13 @@ func (c *Client) HealthCheck(_ context.Context) (any, error) {
 
 // defaultCollection returns a handle for the default collection.
 func (c *Client) defaultCollection() *Collection {
+	if c == nil {
+		return &Collection{}
+	}
 	if c.bucket == nil {
-		c.logger.Error("bucket not initialized")
+		if c.logger != nil {
+			c.logger.Error("bucket not initialized")
+		}
 
 		return &Collection{client: c}
 	}
@@ -223,8 +401,13 @@ func (c *Client) defaultCollection() *Collection {
 
 // scope returns a handle for a specific scope.
 func (c *Client) scope(name string) *Scope {
+	if c == nil {
+		return &Scope{}
+	}
 	if c.bucket == nil {
-		c.logger.Error("bucket not initialized")
+		if c.logger != nil {
+			c.logger.Error("bucket not initialized")
+		}
 
 		return &Scope{client: c}
 	}
@@ -239,7 +422,7 @@ func (c *Client) scope(name string) *Scope {
 func (c *Collection) mutationOperation(ctx context.Context, opName, key string, document, result any,
 	op func(tracerCtx context.Context) (*gocb.MutationResult, error),
 ) error {
-	if c.collection == nil {
+	if c == nil || c.collection == nil || c.client == nil {
 		return errBucketNotInitialized
 	}
 
@@ -286,7 +469,7 @@ func (c *Collection) Insert(ctx context.Context, key string, document, result an
 
 // Remove removes a document from the collection.
 func (c *Collection) Remove(ctx context.Context, key string) error {
-	if c.collection == nil {
+	if c == nil || c.collection == nil || c.client == nil {
 		return errBucketNotInitialized
 	}
 
@@ -317,7 +500,7 @@ func (c *Client) executeTracedQuery(
 	queryType string,
 	queryFn func(tracerCtx context.Context) (resultProvider, error),
 ) error {
-	if c.cluster == nil {
+	if c == nil || c.cluster == nil {
 		return errClustertNotInitialized
 	}
 
@@ -340,7 +523,7 @@ func (c *Client) executeTracedQuery(
 
 	defer c.sendOperationStats(&QueryLog{Query: operation, Statement: statement, Parameters: params}, startTime, operation)
 
-	if err != nil {
+	if err != nil && c.logger != nil {
 		c.logger.Errorf("%s query failed: %v", queryType, err)
 	}
 
@@ -417,7 +600,7 @@ func executeQuery(queryFn func() (resultProvider, error), queryType string, resu
 
 // RunTransaction executes a transaction.
 func (c *Client) RunTransaction(ctx context.Context, logic func(any) error) (any, error) {
-	if c.cluster == nil {
+	if c == nil || c.cluster == nil {
 		return nil, errClustertNotInitialized
 	}
 
@@ -437,7 +620,7 @@ func (c *Client) RunTransaction(ctx context.Context, logic func(any) error) (any
 
 	defer c.sendOperationStats(&QueryLog{Query: "RunTransaction"}, startTime, "RunTransaction")
 
-	if err != nil {
+	if err != nil && c.logger != nil {
 		c.logger.Errorf("Transaction failed: %v", err)
 	}
 
@@ -466,11 +649,29 @@ func (c *Client) Remove(ctx context.Context, key string) error {
 
 // Close closes the connection to the Couchbase cluster.
 func (c *Client) Close(opts any) error {
-	if c.cluster != nil {
-		return c.cluster.Close(opts.(*gocb.ClusterCloseOptions))
+	if c == nil || c.cluster == nil {
+		return nil
 	}
 
-	return nil
+	var closeOpts *gocb.ClusterCloseOptions
+	if opts != nil {
+		var ok bool
+		closeOpts, ok = opts.(*gocb.ClusterCloseOptions)
+		if !ok {
+			return fmt.Errorf("couchbase: invalid close options type %T", opts)
+		}
+	}
+
+	cluster := c.cluster
+	c.cluster = nil
+	c.bucket = nil
+
+	return cluster.Close(closeOpts)
+}
+
+// Shutdown closes the Couchbase cluster connection idempotently for managed lifecycle orchestration.
+func (c *Client) Shutdown(_ context.Context) error {
+	return c.Close(nil)
 }
 
 // addTrace adds a trace to the context.
@@ -518,7 +719,7 @@ func (*Client) finishSpan(span trace.Span, err error) {
 
 // Get performs a get operation on the collection.
 func (c *Collection) Get(ctx context.Context, key string, result any) error {
-	if c.collection == nil {
+	if c == nil || c.collection == nil || c.client == nil {
 		return errBucketNotInitialized
 	}
 
@@ -533,7 +734,9 @@ func (c *Collection) Get(ctx context.Context, key string, result any) error {
 	defer c.client.sendOperationStats(&QueryLog{Query: "Get", Key: key}, startTime, "Get")
 
 	if err != nil {
-		c.client.logger.Errorf("failed to get document with key %s: %v", key, err)
+		if c.client.logger != nil {
+			c.client.logger.Errorf("failed to get document with key %s: %v", key, err)
+		}
 		return fmt.Errorf("failed to get document with key %s: %w", key, err)
 	}
 

@@ -12,7 +12,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var errStatusDown = errors.New("status down")
+var (
+	errStatusDown         = errors.New("status down")
+	errInvalidConfig      = errors.New("badger: dir path is required")
+	errClientNotConnected = errors.New("badger: client not connected")
+)
 
 type Configs struct {
 	DirPath string
@@ -51,25 +55,107 @@ func (c *Client) UseTracer(tracer any) {
 	}
 }
 
-// Connect establishes a connection to BadgerDB and registers metrics using the provided configuration when the client was Created.
-func (c *Client) Connect() {
-	c.logger.Debugf("connecting to BadgerDB at %v", c.configs.DirPath)
+// FromEnv constructs an unstarted BadgerDB client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
 
-	badgerBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
-	c.metrics.NewHistogram("app_badger_stats", "Response time of Badger queries in milliseconds.", badgerBuckets...)
+	dirPath := strings.TrimSpace(get("BADGER_DIR_PATH"))
+	if dirPath == "" {
+		dirPath = strings.TrimSpace(get("BADGER_PATH"))
+	}
+	if dirPath == "" {
+		return nil, errInvalidConfig
+	}
+
+	return New(Configs{DirPath: dirPath}), nil
+}
+
+// ConnectContext opens the BadgerDB directory within ctx and returns any error.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil || c.configs == nil || strings.TrimSpace(c.configs.DirPath) == "" {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.db != nil && !c.db.IsClosed() {
+		return nil
+	}
+
+	if c.logger != nil {
+		c.logger.Debugf("connecting to BadgerDB at %v", c.configs.DirPath)
+	}
+
+	if c.metrics != nil {
+		badgerBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_badger_stats", "Response time of Badger queries in milliseconds.", badgerBuckets...)
+	}
 
 	db, err := badger.Open(badger.DefaultOptions(c.configs.DirPath))
 	if err != nil {
-		c.logger.Errorf("error while connecting to BadgerDB: %v", err)
+		return err
+	}
+
+	c.db = db
+
+	if c.logger != nil {
+		c.logger.Infof("connected to BadgerDB at %v", c.configs.DirPath)
+	}
+
+	return nil
+}
+
+// Close closes the underlying BadgerDB instance idempotently.
+func (c *Client) Close() error {
+	if c == nil || c.db == nil {
+		return nil
+	}
+
+	db := c.db
+	c.db = nil
+	if db.IsClosed() {
+		return nil
+	}
+
+	return db.Close()
+}
+
+// Connect establishes a connection to BadgerDB and registers metrics using the provided configuration when the client was Created.
+func (c *Client) Connect() {
+	if c.logger != nil {
+		c.logger.Debugf("connecting to BadgerDB at %v", c.configs.DirPath)
+	}
+
+	if c.metrics != nil {
+		badgerBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_badger_stats", "Response time of Badger queries in milliseconds.", badgerBuckets...)
+	}
+
+	db, err := badger.Open(badger.DefaultOptions(c.configs.DirPath))
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Errorf("error while connecting to BadgerDB: %v", err)
+		}
 		return
 	}
 
 	c.db = db
 
-	c.logger.Infof("connected to BadgerDB at %v", c.configs.DirPath)
+	if c.logger != nil {
+		c.logger.Infof("connected to BadgerDB at %v", c.configs.DirPath)
+	}
 }
 
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
+	if c == nil || c.db == nil || c.db.IsClosed() {
+		return "", errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "get", key)
 
 	defer c.sendOperationStats(time.Now(), "GET", "get", span, key)
@@ -82,21 +168,27 @@ func (c *Client) Get(ctx context.Context, key string) (string, error) {
 
 	item, err := txn.Get([]byte(key))
 	if err != nil {
-		c.logger.Debugf("error while fetching data for key: %v, error: %v", key, err)
+		if c.logger != nil {
+			c.logger.Debugf("error while fetching data for key: %v, error: %v", key, err)
+		}
 
 		return "", err
 	}
 
 	value, err = item.ValueCopy(nil)
 	if err != nil {
-		c.logger.Debugf("error while reading value for key: %v, error: %v", key, err)
+		if c.logger != nil {
+			c.logger.Debugf("error while reading value for key: %v, error: %v", key, err)
+		}
 
 		return "", err
 	}
 
 	err = txn.Commit()
 	if err != nil {
-		c.logger.Debugf("error while committing transaction: %v", err)
+		if c.logger != nil {
+			c.logger.Debugf("error while committing transaction: %v", err)
+		}
 
 		return "", err
 	}
@@ -105,6 +197,10 @@ func (c *Client) Get(ctx context.Context, key string) (string, error) {
 }
 
 func (c *Client) Set(ctx context.Context, key, value string) error {
+	if c == nil || c.db == nil || c.db.IsClosed() {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "set", key)
 
 	defer c.sendOperationStats(time.Now(), "SET", "set", span, key, value)
@@ -115,6 +211,10 @@ func (c *Client) Set(ctx context.Context, key, value string) error {
 }
 
 func (c *Client) Delete(ctx context.Context, key string) error {
+	if c == nil || c.db == nil || c.db.IsClosed() {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "delete", key)
 
 	defer c.sendOperationStats(time.Now(), "DELETE", "delete", span, key, "")
@@ -125,19 +225,27 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 }
 
 func (c *Client) useTransaction(f func(txn *badger.Txn) error) error {
+	if c == nil || c.db == nil || c.db.IsClosed() {
+		return errClientNotConnected
+	}
+
 	txn := c.db.NewTransaction(true)
 	defer txn.Discard()
 
 	err := f(txn)
 	if err != nil {
-		c.logger.Debugf("error while executing transaction: %v", err)
+		if c.logger != nil {
+			c.logger.Debugf("error while executing transaction: %v", err)
+		}
 
 		return err
 	}
 
 	err = txn.Commit()
 	if err != nil {
-		c.logger.Debugf("error while committing transaction: %v", err)
+		if c.logger != nil {
+			c.logger.Debugf("error while committing transaction: %v", err)
+		}
 
 		return err
 	}
@@ -149,11 +257,13 @@ func (c *Client) sendOperationStats(start time.Time, methodType string, method s
 	span trace.Span, kv ...string) {
 	duration := time.Since(start).Microseconds()
 
-	c.logger.Debug(&Log{
-		Type:     methodType,
-		Duration: duration,
-		Key:      strings.Join(kv, " "),
-	})
+	if c.logger != nil {
+		c.logger.Debug(&Log{
+			Type:     methodType,
+			Duration: duration,
+			Key:      strings.Join(kv, " "),
+		})
+	}
 
 	if span != nil {
 		defer span.End()
@@ -161,8 +271,10 @@ func (c *Client) sendOperationStats(start time.Time, methodType string, method s
 		span.SetAttributes(attribute.Int64(fmt.Sprintf("badger.%v.duration(μs)", method), time.Since(start).Microseconds()))
 	}
 
-	c.metrics.RecordHistogram(context.Background(), "app_badger_stats", float64(duration), "database", c.configs.DirPath,
-		"type", methodType)
+	if c.metrics != nil {
+		c.metrics.RecordHistogram(context.Background(), "app_badger_stats", float64(duration), "database", c.configs.DirPath,
+			"type", methodType)
+	}
 }
 
 type Health struct {
@@ -174,11 +286,15 @@ func (c *Client) HealthCheck(context.Context) (any, error) {
 	h := Health{
 		Details: make(map[string]any),
 	}
+	if c == nil || c.configs == nil {
+		h.Status = "DOWN"
+		h.Details["message"] = "badger not configured"
+		return &h, errStatusDown
+	}
 
 	h.Details["location"] = c.configs.DirPath
 
-	closed := c.db.IsClosed()
-	if closed {
+	if c.db == nil || c.db.IsClosed() {
 		h.Status = "DOWN"
 
 		return &h, errStatusDown

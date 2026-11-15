@@ -21,11 +21,17 @@ import (
 	"github.com/sllt/pi/pkg/pi/config"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/middleware"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/testutil"
 	"github.com/sllt/pi/pkg/pi/version"
 )
+
+func newTestKernel(logger logging.Logger) *runtimeKernel {
+	if logger == nil {
+		logger = logging.NewLogger(logging.FATAL)
+	}
+	return newLegacyKernel(nil, logger, false)
+}
 
 func Test_newContextSuccess(t *testing.T) {
 	httpRequest, err := http.NewRequestWithContext(t.Context(),
@@ -38,8 +44,8 @@ func Test_newContextSuccess(t *testing.T) {
 
 	req := piHTTP.NewRequest(httpRequest)
 
-	ctx := newContext(nil, req, infra.NewContainer(config.NewEnvFile("",
-		logging.NewMockLogger(logging.DEBUG))))
+	ctx := newContext(nil, req, newLegacyKernel(config.NewEnvFile("",
+		logging.NewMockLogger(logging.DEBUG)), nil, false))
 
 	body := map[string]string{}
 
@@ -274,13 +280,12 @@ func TestGetAuthInfo_BasicAuth(t *testing.T) {
 	ctx := context.WithValue(req.Context(), middleware.Username, "validUser")
 	*req = *req.Clone(ctx)
 
-	mockContainer, _ := infra.NewMockContainer(t)
 	piRq := piHTTP.NewRequest(req)
 
 	c := &Context{
-		Context:   ctx,
-		Request:   piRq,
-		Container: mockContainer,
+		Context: ctx,
+		Request: piRq,
+		rt:      newTestKernel(nil),
 	}
 
 	res := c.GetAuthInfo().GetUsername()
@@ -296,12 +301,10 @@ func TestGetAuthInfo_ApiKey(t *testing.T) {
 	*req = *req.Clone(ctx)
 	piRq := piHTTP.NewRequest(req)
 
-	mockContainer, _ := infra.NewMockContainer(t)
-
 	c := &Context{
-		Context:   ctx,
-		Request:   piRq,
-		Container: mockContainer,
+		Context: ctx,
+		Request: piRq,
+		rt:      newTestKernel(nil),
 	}
 
 	res := c.GetAuthInfo().GetAPIKey()
@@ -323,12 +326,10 @@ func TestGetAuthInfo_JWTClaims(t *testing.T) {
 	*req = *req.Clone(ctx)
 	piRq := piHTTP.NewRequest(req)
 
-	mockContainer, _ := infra.NewMockContainer(t)
-
 	c := &Context{
-		Context:   ctx,
-		Request:   piRq,
-		Container: mockContainer,
+		Context: ctx,
+		Request: piRq,
+		rt:      newTestKernel(nil),
 	}
 
 	res := c.GetAuthInfo().GetClaims()

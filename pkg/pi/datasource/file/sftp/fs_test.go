@@ -1,6 +1,7 @@
 package sftp
 
 import (
+	"context"
 	"errors"
 	"os"
 	"testing"
@@ -23,7 +24,7 @@ var (
 	errOpenFile   = errors.New("failed to open file")
 )
 
-func getMocks(t *testing.T) (FileSystem, mocks) {
+func getMocks(t *testing.T) (*FileSystem, mocks) {
 	t.Helper()
 
 	ctrl := gomock.NewController(t)
@@ -35,7 +36,7 @@ func getMocks(t *testing.T) (FileSystem, mocks) {
 
 	mockLogger.EXPECT().Debug(gomock.Any()).AnyTimes()
 
-	client := FileSystem{logger: mockLogger, metrics: mockMetrics, client: mockClient}
+	client := &FileSystem{logger: mockLogger, metrics: mockMetrics, client: mockClient}
 
 	return client, mocks{
 		client:  mockClient,
@@ -308,4 +309,44 @@ func TestFiles_Stat(t *testing.T) {
 		require.Equal(t, tc.expFile, createdFile, "Test[%d] Failed.\n DESC %v", i, tc.desc)
 		require.Equal(t, tc.expError, err, "Test[%d] Failed.\n DESC %v", i, tc.desc)
 	}
+}
+
+func TestFiles_ConnectContext_HealthCheck_Close_FromEnv(t *testing.T) {
+	_, err := FromEnv(func(string) string { return "" })
+	require.ErrorIs(t, err, errSFTPConfigInvalid)
+
+	fs, err := FromEnv(func(key string) string {
+		switch key {
+		case "SFTP_HOST":
+			return "127.0.0.1"
+		case "SFTP_PORT":
+			return "2222"
+		case "SFTP_USER":
+			return "tester"
+		case "SFTP_INSECURE_IGNORE_HOST_KEY":
+			return "true"
+		default:
+			return ""
+		}
+	})
+	require.NoError(t, err)
+	require.NotNil(t, fs)
+
+	_, err = fs.HealthCheck(context.Background())
+	require.ErrorIs(t, err, errSFTPNotConnected)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, fs.ConnectContext(ctx), context.Canceled)
+
+	client, mocks := getMocks(t)
+	mocks.client.EXPECT().Getwd().Return("/home/tester", nil)
+	details, err := client.HealthCheck(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, details)
+
+	require.NoError(t, client.Close())
+	require.NoError(t, client.Close())
+	_, err = client.HealthCheck(context.Background())
+	require.ErrorIs(t, err, errSFTPNotConnected)
 }

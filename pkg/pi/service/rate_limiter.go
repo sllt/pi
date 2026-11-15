@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -68,8 +70,8 @@ func (rl *rateLimiter) buildFullURL(path string) string {
 	}
 
 	// Get base URL from embedded HTTP service
-	httpSvcImpl, ok := rl.HTTP.(*httpService)
-	if !ok {
+	httpSvcImpl := extractHTTPService(rl.HTTP)
+	if httpSvcImpl == nil {
 		return path
 	}
 
@@ -228,4 +230,32 @@ func (rl *rateLimiter) DeleteWithHeaders(ctx context.Context, path string, body 
 	}
 
 	return rl.HTTP.DeleteWithHeaders(ctx, path, body, headers)
+}
+
+func (rl *rateLimiter) UseServiceName(name string) {
+	if rl == nil {
+		return
+	}
+	propagateServiceName(rl.HTTP, name)
+}
+
+func (rl *rateLimiter) UseLogger(logger any) {
+	if rl == nil {
+		return
+	}
+	propagateLogger(rl.HTTP, logger)
+}
+
+func (rl *rateLimiter) UseMetrics(metrics any) {
+	if rl == nil {
+		return
+	}
+	propagateMetrics(rl.HTTP, metrics)
+}
+
+func (rl *rateLimiter) UseTracerProvider(tp trace.TracerProvider) {
+	if rl == nil {
+		return
+	}
+	propagateTracerProvider(rl.HTTP, tp)
 }

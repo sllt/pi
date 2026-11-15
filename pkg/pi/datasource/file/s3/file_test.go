@@ -533,7 +533,7 @@ func TestS3File_WriteAt_Success(t *testing.T) {
 
 	m.EXPECT().GetObject(gomock.Any(), gomock.Any()).Return(getObjectOutput(initialContent), nil)
 
-	expectedPutBody := []byte("Hello, Pid!")
+	expectedPutBody := []byte("Hello, Pirld!")
 
 	m.EXPECT().PutObject(gomock.Any(), gomock.Any()).Do(func(_ context.Context, params *s3.PutObjectInput, _ ...func(*s3.Options)) {
 		actualPutBody := getBodyContent(t, params.Body)

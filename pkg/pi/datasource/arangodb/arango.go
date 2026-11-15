@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/arangodb/go-driver/v2/arangodb"
@@ -51,6 +53,7 @@ type Config struct {
 var (
 	errStatusDown             = errors.New("status down")
 	errMissingField           = errors.New("missing required field in config")
+	errClientNotConnected     = errors.New("arangodb: client not connected")
 	errInvalidResultType      = errors.New("result must be a pointer to a slice of maps")
 	errInvalidUserOptionsType = errors.New("userOptions must be a *UserOptions type")
 	ErrDatabaseExists         = errors.New("database already exists")
@@ -92,15 +95,118 @@ func (c *Client) UseTracer(tracer any) {
 	}
 }
 
+// FromEnv constructs an unstarted ArangoDB client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errMissingField
+	}
+
+	firstNonEmpty := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(get(k)); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	port := 8529
+	if rawPort := firstNonEmpty("ARANGODB_PORT"); rawPort != "" {
+		parsed, err := strconv.Atoi(rawPort)
+		if err != nil || parsed <= 0 || parsed > 65535 {
+			return nil, fmt.Errorf("arangodb: invalid ARANGODB_PORT %q", rawPort)
+		}
+		port = parsed
+	}
+
+	client := New(Config{
+		Host:     firstNonEmpty("ARANGODB_HOST"),
+		Port:     port,
+		User:     firstNonEmpty("ARANGODB_USER", "ARANGODB_USERNAME"),
+		Password: get("ARANGODB_PASSWORD"),
+	})
+	if err := client.validateConfig(); err != nil {
+		return nil, err
+	}
+
+	return client, nil
+}
+
+// ConnectContext establishes an ArangoDB client and verifies reachability within ctx.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil || c.config == nil {
+		return errMissingField
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.client != nil {
+		return nil
+	}
+	if err := c.validateConfig(); err != nil {
+		return err
+	}
+
+	c.endpoint = fmt.Sprintf("http://%s:%d", c.config.Host, c.config.Port)
+	if c.logger != nil {
+		c.logger.Debugf("connecting to ArangoDB at %s", c.endpoint)
+	}
+
+	endpoint := connection.NewRoundRobinEndpoints([]string{c.endpoint})
+	conn := connection.NewHttpConnection(connection.HttpConfiguration{Endpoint: endpoint})
+
+	auth := connection.NewBasicAuth(c.config.User, c.config.Password)
+	if err := conn.SetAuthentication(auth); err != nil {
+		return err
+	}
+
+	client := arangodb.NewClient(conn)
+	verCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+
+	if _, err := client.Version(verCtx); err != nil {
+		return err
+	}
+
+	c.client = client
+
+	if c.metrics != nil {
+		arangoBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_arango_stats", "Response time of ArangoDB operations in milliseconds.", arangoBuckets...)
+	}
+
+	if c.logger != nil {
+		c.logger.Logf("Connected to ArangoDB successfully at %s", c.endpoint)
+	}
+
+	return nil
+}
+
+// Close resets the ArangoDB client idempotently.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.client = nil
+	return nil
+}
+
 // Connect establishes a connection to the ArangoDB server.
 func (c *Client) Connect() {
 	if err := c.validateConfig(); err != nil {
-		c.logger.Errorf("config validation error: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("config validation error: %v", err)
+		}
 		return
 	}
 
 	c.endpoint = fmt.Sprintf("http://%s:%d", c.config.Host, c.config.Port)
-	c.logger.Debugf("connecting to ArangoDB at %s", c.endpoint)
+	if c.logger != nil {
+		c.logger.Debugf("connecting to ArangoDB at %s", c.endpoint)
+	}
 
 	// Use HTTP connection instead of HTTP2
 	endpoint := connection.NewRoundRobinEndpoints([]string{c.endpoint})
@@ -109,7 +215,9 @@ func (c *Client) Connect() {
 	// Set authentication
 	auth := connection.NewBasicAuth(c.config.User, c.config.Password)
 	if err := conn.SetAuthentication(auth); err != nil {
-		c.logger.Errorf("authentication setup failed: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("authentication setup failed: %v", err)
+		}
 		return
 	}
 
@@ -123,15 +231,21 @@ func (c *Client) Connect() {
 
 	_, err := c.client.Version(ctx)
 	if err != nil {
-		c.logger.Errorf("failed to verify connection: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("failed to verify connection: %v", err)
+		}
 		return
 	}
 
 	// Initialize metrics
-	arangoBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
-	c.metrics.NewHistogram("app_arango_stats", "Response time of ArangoDB operations in milliseconds.", arangoBuckets...)
+	if c.metrics != nil {
+		arangoBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_arango_stats", "Response time of ArangoDB operations in milliseconds.", arangoBuckets...)
+	}
 
-	c.logger.Logf("Connected to ArangoDB successfully at %s", c.endpoint)
+	if c.logger != nil {
+		c.logger.Logf("Connected to ArangoDB successfully at %s", c.endpoint)
+	}
 }
 
 func (c *Client) validateConfig() error {
@@ -233,6 +347,10 @@ func (c *Client) validateConfig() error {
 //	    fmt.Printf("User: %+v\n", doc)
 //	}
 func (c *Client) Query(ctx context.Context, dbName, query string, bindVars map[string]any, result any, options ...map[string]any) error {
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := c.addTrace(ctx, "query", map[string]string{"DB": dbName})
 	startTime := time.Now()
 
@@ -330,12 +448,16 @@ func (c *Client) sendOperationStats(ql *QueryLog, startTime time.Time, method st
 	duration := time.Since(startTime).Microseconds()
 	ql.Duration = duration
 
-	c.logger.Debug(ql)
+	if c.logger != nil {
+		c.logger.Debug(ql)
+	}
 
-	c.metrics.RecordHistogram(context.Background(), "app_arango_stats", float64(duration),
-		"endpoint", c.endpoint,
-		"type", ql.Query,
-	)
+	if c.metrics != nil {
+		c.metrics.RecordHistogram(context.Background(), "app_arango_stats", float64(duration),
+			"endpoint", c.endpoint,
+			"type", ql.Query,
+		)
+	}
 
 	if span != nil {
 		defer span.End()
@@ -352,10 +474,27 @@ type Health struct {
 
 // HealthCheck performs a health check.
 func (c *Client) HealthCheck(ctx context.Context) (any, error) {
+	if c == nil {
+		return &Health{
+			Status:  "DOWN",
+			Details: map[string]any{"message": "arangodb client is nil"},
+		}, errStatusDown
+	}
+
 	h := Health{
 		Details: map[string]any{
 			"endpoint": c.endpoint,
 		},
+	}
+
+	if c.client == nil {
+		h.Status = "DOWN"
+		h.Details["message"] = "arangodb not connected"
+		return &h, errStatusDown
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	version, err := c.client.Version(ctx)

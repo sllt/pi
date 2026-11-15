@@ -48,11 +48,11 @@ func main() {
 **2. Custom Validation Function**
 
 Use `EnableBasicAuthWithValidator(validationFunc)` to implement your own validation logic for credentials.
-The `validationFunc` takes the username and password as arguments and returns true if valid, false otherwise.
+The `validationFunc` receives `*pi.Context`, `username`, and `password`, and returns `true` if valid, `false` otherwise.
 
 ```go
-func validateUser(c *infra.Container, username, password string) bool {
-	// Implement your credential validation logic here
+func validateUser(ctx *pi.Context, username, password string) bool {
+	// Implement your credential validation logic here (e.g., via ctx.SQL() or ctx.Redis())
 	return username == "john" && password == "doe123"
 }
 
@@ -89,7 +89,7 @@ func main() {
 - Pi allows a custom validator function for validating APIKeys using **_EnableAPIKeyAuthWithValidator(validator)_**
 
 ```go
-func apiKeyValidator(c *infra.Container, apiKey string) bool {
+func apiKeyValidator(ctx *pi.Context, apiKey string) bool {
 	validKeys := []string{"f0e1dffd-0ff0-4ac8-92a3-22d44a1464e4"}
 
 	return slices.Contains(validKeys, apiKey)

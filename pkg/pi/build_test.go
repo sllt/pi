@@ -29,14 +29,14 @@ func TestBuildPureIsolationAndSQL(t *testing.T) {
 	_, err := os.Stat(path)
 	require.True(t, os.IsNotExist(err))
 	require.Equal(t, path, a.Config.Get("DB_NAME"))
-	db := a.Container().SQL
+	db := a.SQL()
 	require.NotNil(t, db)
 	_, err = db.ExecContext(t.Context(), "SELECT 1")
 	require.ErrorIs(t, err, piSQL.ErrNotStarted)
 	var n int
 	require.ErrorIs(t, db.QueryRowContext(t.Context(), "SELECT 1").Scan(&n), piSQL.ErrNotStarted)
 	require.NoError(t, a.Start(t.Context()))
-	require.Same(t, db, a.Container().SQL)
+	require.Same(t, db, a.SQL())
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT 1").Scan(&n))
 	require.Equal(t, 1, n)
 	b := testkit.New(t, pi.WithConfig(map[string]string{"VALIDATION_LOCALE": "zh"}))

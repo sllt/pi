@@ -692,7 +692,7 @@ func TestClient_HealthCheck(t *testing.T) {
 		{
 			name: "success: cluster is up",
 			setupMocks: func(mocks *testMocks) {
-				mocks.cluster.EXPECT().Ping(nil).Return(&gocb.PingResult{}, nil)
+				mocks.cluster.EXPECT().Ping(gomock.Any()).Return(&gocb.PingResult{}, nil)
 			},
 			wantStatus: "UP",
 			wantErr:    nil,
@@ -700,7 +700,7 @@ func TestClient_HealthCheck(t *testing.T) {
 		{
 			name: "error: cluster is down",
 			setupMocks: func(mocks *testMocks) {
-				mocks.cluster.EXPECT().Ping(nil).Return(nil, gocb.ErrUnambiguousTimeout)
+				mocks.cluster.EXPECT().Ping(gomock.Any()).Return(nil, gocb.ErrUnambiguousTimeout)
 			},
 			wantStatus: "DOWN",
 			wantErr:    errStatusDown,

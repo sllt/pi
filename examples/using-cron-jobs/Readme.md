@@ -20,7 +20,7 @@ In this example, we:
 1. **Clone the repository** and navigate to this example:
 
    ```bash
-   git clone https://github.com/kite-dev/pi.git
+   git clone https://github.com/sllt/pi.git
    cd pi/examples/using-cron-jobs
    ```
 

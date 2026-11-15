@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"net/http"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 const AuthHeader = "Authorization"
@@ -81,4 +83,32 @@ func (a *authProvider) DeleteWithHeaders(ctx context.Context, path string, body 
 	}
 
 	return a.HTTP.DeleteWithHeaders(ctx, path, body, headers)
+}
+
+func (a *authProvider) UseServiceName(name string) {
+	if a == nil {
+		return
+	}
+	propagateServiceName(a.HTTP, name)
+}
+
+func (a *authProvider) UseLogger(logger any) {
+	if a == nil {
+		return
+	}
+	propagateLogger(a.HTTP, logger)
+}
+
+func (a *authProvider) UseMetrics(metrics any) {
+	if a == nil {
+		return
+	}
+	propagateMetrics(a.HTTP, metrics)
+}
+
+func (a *authProvider) UseTracerProvider(tp trace.TracerProvider) {
+	if a == nil {
+		return
+	}
+	propagateTracerProvider(a.HTTP, tp)
 }

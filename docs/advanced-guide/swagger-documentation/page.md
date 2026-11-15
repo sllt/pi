@@ -1,30 +1,44 @@
 # Rendering OpenAPI Documentation in Pi
 
-Pi supports automatic rendering of OpenAPI (also known as Swagger) documentation. This feature allows you to
-easily provide interactive API documentation for your users.
+Pi includes an embedded, 100% offline **Scalar API Reference** UI (`@scalar/api-reference`) for rendering interactive OpenAPI documentation with zero external CDN, font, or telemetry network requests.
 
-## What is OpenAPI/Swagger Documentation?
+## What is OpenAPI Documentation?
 
-OpenAPI, also known as Swagger, is a specification for building APIs. An OpenAPI file allows you to describe your entire API, including:
+OpenAPI (formerly Swagger) is a standard specification for describing HTTP APIs, including:
 
-- Available endpoints (/users) and operations on each endpoint (GET /users, DELETE /users/{id})
-- Operation parameters, input, and output for each operation
-- Authentication methods
-- Contact information, license, terms of use, and other information.
+- Available endpoints (`/users`) and operations (`GET /users`, `DELETE /users/{id}`)
+- Path, query, header, and JSON body parameters and response schemas
+- Authentication methods and security schemes
+- API title, version, description, and server metadata
 
-API specifications can be written in YAML or JSON. The format is easy to learn and readable to both humans and machines. 
-The complete OpenAPI Specification can be found on the official [Swagger website](https://swagger.io/).
+The complete specification is available on the [OpenAPI Specification website](https://spec.openapis.org/oas/v3.0.3.html).
 
-## Enabling Pi to render your openapi.json file
+## Serving OpenAPI Spec and Scalar UI with Typed Handlers
 
-To allow Pi to render your OpenAPI documentation, simply place your `openapi.json` file inside the `static` directory of your project.
-Pi will automatically render the Swagger documentation at the `/.well-known/swagger` endpoint.
+For applications using typed handlers (`pi.Register` / `Bind`), configure `pi.WithOpenAPI` with `ServeSpec: true` and `ServeUI: true`:
 
-Here are the steps:
+```go
+app, err := pi.Build(
+	pi.WithOpenAPI(pi.OpenAPIConfig{
+		Title:     "My Service API",
+		Version:   "1.0.0",
+		ServeSpec: true,
+		ServeUI:   true,
+		// Optional overrides (defaults shown below):
+		// SpecPath: "/.well-known/openapi.json",
+		// UIPath:   "/.well-known/swagger",
+	}),
+)
+```
 
-- Create an `openapi.json` file that describes your API according to the OpenAPI specification.
-- Place the `openapi.json` file inside the `static` directory in your project.
+- `UIPath` defaults to `/.well-known/swagger` for backward compatibility, and `SpecPath` defaults to `/.well-known/openapi.json`.
+- Both `ServeSpec` and `ServeUI` default to `false` so documentation is not exposed unless explicitly enabled.
+- Pi embeds the pre-compressed `scalar.js` bundle (`scalar.js.gz`) inside the binary and negotiates `Accept-Encoding: gzip` automatically while keeping static UI assets restricted to an explicit allowlist.
+
+## Legacy Static `openapi.json` Fallback
+
+If an application uses only legacy untyped routes (neither `pi.WithOpenAPI` nor typed handlers are used), Pi preserves the legacy disk fallback:
+
+- Place your `openapi.json` file inside the `./static` directory of your project.
 - Start your Pi server.
-- Navigate to `/.well-known/swagger` on your server’s URL.
-
-You should now see a beautifully rendered, interactive documentation for your API that users can use to understand and interact with your API.
+- Navigate to `/.well-known/swagger` on your server’s URL to view the embedded offline Scalar API Reference UI.

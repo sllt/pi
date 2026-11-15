@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
-	"github.com/sllt/pi/pkg/pi/infra"
-	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/stretchr/testify/require"
+
+	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
+	"github.com/sllt/pi/pkg/pi/logging"
 )
 
 type testConfig map[string]string
@@ -26,13 +26,13 @@ func (c testConfig) GetOrDefault(k, v string) string {
 	return v
 }
 
-func openTestSQL(t *testing.T, cfg testConfig) (*infra.Container, *piSQL.DB) {
+func openTestSQL(t *testing.T, cfg testConfig) (*Deps, *piSQL.DB) {
 	t.Helper()
 	l := logging.NewWriterLogger(logging.ERROR, io.Discard, io.Discard)
 	db, err := piSQL.OpenContext(t.Context(), cfg, l, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	return &infra.Container{SQL: db, Logger: l}, db
+	return &Deps{SQL: db, Logger: l}, db
 }
 
 // External backends are opt-in and MUST point at an isolated, disposable database.
@@ -50,7 +50,7 @@ func TestMigrationSQLBackends(t *testing.T) {
 					cfg["DB_"+key] = os.Getenv(prefix + key)
 				}
 			}
-			c, db := openTestSQL(t, cfg)
+			deps, db := openTestSQL(t, cfg)
 			for _, table := range []string{"kite_migrations", "kite_migration_locks", "v030_effects"} {
 				_, err := db.Exec("DROP TABLE IF EXISTS " + table)
 				require.NoError(t, err)
@@ -64,22 +64,22 @@ func TestMigrationSQLBackends(t *testing.T) {
 					return e
 				}},
 			}
-			plan, err := Plan(t.Context(), defs, c)
+			plan, err := Plan(t.Context(), defs, *deps)
 			require.NoError(t, err)
 			require.Len(t, plan.Items, 2)
-			result, err := Run(t.Context(), defs, c, WithDryRun(), WithLock())
+			result, err := Run(t.Context(), defs, *deps, WithDryRun(), WithLock())
 			require.NoError(t, err)
 			require.Len(t, result.Skipped, 2)
-			result, err = Run(t.Context(), defs, c, WithTarget(1), WithLock())
+			result, err = Run(t.Context(), defs, *deps, WithTarget(1), WithLock())
 			require.NoError(t, err)
 			require.Equal(t, []int64{1}, result.AppliedVersions())
-			result, err = Run(t.Context(), defs, c, WithLock())
+			result, err = Run(t.Context(), defs, *deps, WithLock())
 			require.NoError(t, err)
 			require.Equal(t, []int64{2}, result.AppliedVersions())
-			result, err = Run(t.Context(), defs, c, WithLock())
+			result, err = Run(t.Context(), defs, *deps, WithLock())
 			require.NoError(t, err)
 			require.Len(t, result.Skipped, 2)
-			status, err := Status(t.Context(), defs, c)
+			status, err := Status(t.Context(), defs, *deps)
 			require.NoError(t, err)
 			require.True(t, status.StatePrecise)
 			require.Equal(t, StateSourceSQL, status.StateSource)
@@ -92,7 +92,7 @@ func TestMigrationSQLBackends(t *testing.T) {
 				}
 				panic(cause)
 			}}
-			result, err = Run(t.Context(), defs, c, WithLock())
+			result, err = Run(t.Context(), defs, *deps, WithLock())
 			require.ErrorIs(t, err, ErrMigrationPanic)
 			require.ErrorIs(t, err, cause)
 			require.ErrorIs(t, err, ErrMigrationFailed)
@@ -109,23 +109,23 @@ func TestMigrationSQLBackends(t *testing.T) {
 				cancel()
 				return e
 			}}
-			_, err = Run(ctx, defs, c, WithLock())
+			_, err = Run(ctx, defs, *deps, WithLock())
 			require.ErrorIs(t, err, context.Canceled)
 			require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM v030_effects WHERE id = 3").Scan(&count))
 			require.Zero(t, count)
 			defs[3] = Migrate{UP: func(d Datasource) error { _, e := d.SQL.Exec("INSERT INTO v030_effects (id) VALUES (3)"); return e }}
-			result, err = Run(t.Context(), defs, c, WithLock())
+			result, err = Run(t.Context(), defs, *deps, WithLock())
 			require.NoError(t, err)
 			require.Equal(t, []int64{3}, result.AppliedVersions())
 			_, err = db.Exec("DELETE FROM kite_migrations WHERE version = 2")
 			require.NoError(t, err)
-			_, err = Run(t.Context(), defs, c, WithLock())
+			_, err = Run(t.Context(), defs, *deps, WithLock())
 			require.ErrorIs(t, err, ErrMigrationGap)
-			status, err = Status(t.Context(), defs, c)
+			status, err = Status(t.Context(), defs, *deps)
 			require.NoError(t, err)
 			require.Equal(t, []int64{2}, status.Gaps)
 			// A late owner must not delete a lease that has already been replaced.
-			release, err := acquireSQLMigrationLock(t.Context(), c, time.Minute)
+			release, err := acquireSQLMigrationLock(t.Context(), deps, time.Minute)
 			require.NoError(t, err)
 			_, err = db.Exec("UPDATE kite_migration_locks SET owner = 'replacement'")
 			require.NoError(t, err)
@@ -134,14 +134,14 @@ func TestMigrationSQLBackends(t *testing.T) {
 			require.Equal(t, 1, count)
 			_, err = db.Exec("DELETE FROM kite_migration_locks")
 			require.NoError(t, err)
-			oldRelease, err := acquireSQLMigrationLock(t.Context(), c, time.Minute)
+			oldRelease, err := acquireSQLMigrationLock(t.Context(), deps, time.Minute)
 			require.NoError(t, err)
 			_, err = db.Exec("UPDATE kite_migration_locks SET expires_at = '2000-01-01 00:00:00'")
 			require.NoError(t, err)
-			newRelease, err := acquireSQLMigrationLock(t.Context(), c, time.Minute)
+			newRelease, err := acquireSQLMigrationLock(t.Context(), deps, time.Minute)
 			require.NoError(t, err)
 			require.NoError(t, oldRelease(t.Context()))
-			_, err = acquireSQLMigrationLock(t.Context(), c, time.Minute)
+			_, err = acquireSQLMigrationLock(t.Context(), deps, time.Minute)
 			require.ErrorIs(t, err, ErrMigrationLocked)
 			require.NoError(t, newRelease(t.Context()))
 		})
@@ -150,13 +150,13 @@ func TestMigrationSQLBackends(t *testing.T) {
 
 func TestMigrationLockProcesses(t *testing.T) {
 	if path := os.Getenv("PI_MIGRATION_LOCK_CHILD"); path != "" {
-		c, _ := openTestSQL(t, testConfig{"DB_DIALECT": "sqlite", "DB_NAME": path})
-		_, err := Run(t.Context(), map[int64]Migrate{1: {UP: func(Datasource) error { t.Fatal("contender executed migration"); return nil }}}, c, WithLock())
+		deps, _ := openTestSQL(t, testConfig{"DB_DIALECT": "sqlite", "DB_NAME": path})
+		_, err := Run(t.Context(), map[int64]Migrate{1: {UP: func(Datasource) error { t.Fatal("contender executed migration"); return nil }}}, *deps, WithLock())
 		require.ErrorIs(t, err, ErrMigrationLocked)
 		return
 	}
 	path := filepath.Join(t.TempDir(), "shared.db")
-	c, _ := openTestSQL(t, testConfig{"DB_DIALECT": "sqlite", "DB_NAME": path})
+	deps, _ := openTestSQL(t, testConfig{"DB_DIALECT": "sqlite", "DB_NAME": path})
 	_, err := Run(t.Context(), map[int64]Migrate{1: {UP: func(Datasource) error {
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
@@ -165,18 +165,18 @@ func TestMigrationLockProcesses(t *testing.T) {
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
 		return nil
-	}}}, c, WithLock())
+	}}}, *deps, WithLock())
 	require.NoError(t, err)
 }
 
 func TestMigrationBeginContextCancelsPoolWait(t *testing.T) {
-	c, db := openTestSQL(t, testConfig{"DB_DIALECT": "sqlite", "DB_NAME": filepath.Join(t.TempDir(), "db"), "DB_MAX_OPEN_CONNECTION": "1"})
+	deps, db := openTestSQL(t, testConfig{"DB_DIALECT": "sqlite", "DB_NAME": filepath.Join(t.TempDir(), "db"), "DB_MAX_OPEN_CONNECTION": "1"})
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
-	_, err = (sqlMigrator{migrator: &Datasource{}}).beginTransaction(ctx, c)
+	_, err = (sqlMigrator{migrator: &Datasource{}}).beginTransaction(ctx, deps)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 

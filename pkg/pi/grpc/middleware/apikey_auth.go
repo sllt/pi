@@ -10,15 +10,13 @@ import (
 	"google.golang.org/grpc/status"
 
 	auth "github.com/sllt/pi/pkg/pi/http/middleware"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 // APIKeyAuthProvider holds the configuration for API key authentication.
 type APIKeyAuthProvider struct {
-	APIKeys                     []string
-	ValidateFunc                func(apiKey string) bool
-	ValidateFuncWithDatasources func(c *infra.Container, apiKey string) bool
-	Container                   *infra.Container
+	APIKeys                 []string
+	ValidateFunc            func(apiKey string) bool
+	ValidateFuncWithContext func(ctx context.Context, apiKey string) bool
 }
 
 // APIKeyAuthUnaryInterceptor returns a gRPC unary server interceptor that validates the API key.
@@ -41,7 +39,6 @@ func validateAPIKey(ctx context.Context, provider APIKeyAuthProvider) (string, e
 		return "", status.Error(codes.Unauthenticated, "missing metadata")
 	}
 
-	// Check for x-api-key
 	values, ok := md["x-api-key"]
 	if !ok || len(values) == 0 {
 		return "", status.Error(codes.Unauthenticated, "missing x-api-key header")
@@ -49,16 +46,16 @@ func validateAPIKey(ctx context.Context, provider APIKeyAuthProvider) (string, e
 
 	apiKey := values[0]
 
-	if !provider.verifyAPIKey(apiKey) {
+	if !provider.verifyAPIKey(ctx, apiKey) {
 		return "", status.Error(codes.Unauthenticated, "invalid api key")
 	}
 
 	return apiKey, nil
 }
 
-func (a APIKeyAuthProvider) verifyAPIKey(apiKey string) bool {
-	if a.ValidateFuncWithDatasources != nil {
-		return a.ValidateFuncWithDatasources(a.Container, apiKey)
+func (a APIKeyAuthProvider) verifyAPIKey(ctx context.Context, apiKey string) bool {
+	if a.ValidateFuncWithContext != nil {
+		return a.ValidateFuncWithContext(ctx, apiKey)
 	}
 
 	if a.ValidateFunc != nil {
@@ -71,7 +68,6 @@ func (a APIKeyAuthProvider) verifyAPIKey(apiKey string) bool {
 		}
 	}
 
-	// Constant time compare with dummy key to mitigate timing attacks
 	subtle.ConstantTimeCompare([]byte(apiKey), []byte("dummy"))
 
 	return false

@@ -15,6 +15,7 @@ var (
 	errNonPointerObject  = errors.New("passed object is not pointer")
 	errFieldCannotBeNull = errors.New("field cannot be null")
 	errInvalidSQLTag     = errors.New("invalid sql tag")
+	errSQLNotInitialized = errors.New("sql datasource is not initialized")
 )
 
 type Create interface {
@@ -149,6 +150,14 @@ func (a *App) registerCRUDHandlers(e *entity, object any) {
 }
 
 func (e *entity) Create(c *Context) (any, error) {
+	if c == nil {
+		return nil, errSQLNotInitialized
+	}
+	db := c.SQL()
+	if db == nil {
+		return nil, errSQLNotInitialized
+	}
+
 	newEntity, err := e.bindAndValidateEntity(c)
 	if err != nil {
 		return nil, err
@@ -156,12 +165,12 @@ func (e *entity) Create(c *Context) (any, error) {
 
 	fieldNames, fieldValues := e.extractFields(newEntity)
 
-	stmt, err := sql.InsertQuery(c.SQL.Dialect(), e.tableName, fieldNames, fieldValues, e.constraints)
+	stmt, err := sql.InsertQuery(db.Dialect(), e.tableName, fieldNames, fieldValues, e.constraints)
 	if err != nil {
 		return nil, err
 	}
 
-	result, err := c.SQL.ExecContext(c, stmt, fieldValues...)
+	result, err := db.ExecContext(c, stmt, fieldValues...)
 	if err != nil {
 		return nil, err
 	}
@@ -220,14 +229,26 @@ func (e *entity) extractFields(newEntity any) (fieldNames []string, fieldValues 
 }
 
 func (e *entity) GetAll(c *Context) (any, error) {
-	query := sql.SelectQuery(c.SQL.Dialect(), e.tableName)
+	if c == nil {
+		return nil, errSQLNotInitialized
+	}
+	db := c.SQL()
+	if db == nil {
+		return nil, errSQLNotInitialized
+	}
 
-	rows, err := c.SQL.QueryContext(c, query)
-	if err != nil || rows.Err() != nil {
+	query := sql.SelectQuery(db.Dialect(), e.tableName)
+
+	rows, err := db.QueryContext(c, query)
+	if err != nil {
 		return nil, err
 	}
 
 	defer rows.Close()
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	dest := make([]any, e.entityType.NumField())
 	val := reflect.New(e.entityType).Elem()
@@ -255,16 +276,28 @@ func (e *entity) GetAll(c *Context) (any, error) {
 		entities = append(entities, newEntity)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	return entities, nil
 }
 
 func (e *entity) Get(c *Context) (any, error) {
+	if c == nil {
+		return nil, errSQLNotInitialized
+	}
+	db := c.SQL()
+	if db == nil {
+		return nil, errSQLNotInitialized
+	}
+
 	newEntity := reflect.New(e.entityType).Interface()
-	id := c.Request.PathParam(e.primaryKey)
+	id := c.PathParam(e.primaryKey)
 
-	query := sql.SelectByQuery(c.SQL.Dialect(), e.tableName, e.primaryKey)
+	query := sql.SelectByQuery(db.Dialect(), e.tableName, e.primaryKey)
 
-	row := c.SQL.QueryRowContext(c, query, id)
+	row := db.QueryRowContext(c, query, id)
 
 	dest := make([]any, e.entityType.NumField())
 	val := reflect.ValueOf(newEntity).Elem()
@@ -282,6 +315,14 @@ func (e *entity) Get(c *Context) (any, error) {
 }
 
 func (e *entity) Update(c *Context) (any, error) {
+	if c == nil {
+		return nil, errSQLNotInitialized
+	}
+	db := c.SQL()
+	if db == nil {
+		return nil, errSQLNotInitialized
+	}
+
 	newEntity := reflect.New(e.entityType).Interface()
 	id := c.PathParam(e.primaryKey)
 
@@ -300,9 +341,9 @@ func (e *entity) Update(c *Context) (any, error) {
 		fieldValues = append(fieldValues, reflect.ValueOf(newEntity).Elem().Field(i).Interface())
 	}
 
-	stmt := sql.UpdateByQuery(c.SQL.Dialect(), e.tableName, fieldNames[1:], e.primaryKey)
+	stmt := sql.UpdateByQuery(db.Dialect(), e.tableName, fieldNames[1:], e.primaryKey)
 
-	_, err = c.SQL.ExecContext(c, stmt, append(fieldValues[1:], id)...)
+	_, err = db.ExecContext(c, stmt, append(fieldValues[1:], id)...)
 	if err != nil {
 		return nil, err
 	}
@@ -311,11 +352,19 @@ func (e *entity) Update(c *Context) (any, error) {
 }
 
 func (e *entity) Delete(c *Context) (any, error) {
+	if c == nil {
+		return nil, errSQLNotInitialized
+	}
+	db := c.SQL()
+	if db == nil {
+		return nil, errSQLNotInitialized
+	}
+
 	id := c.PathParam(e.primaryKey)
 
-	query := sql.DeleteByQuery(c.SQL.Dialect(), e.tableName, e.primaryKey)
+	query := sql.DeleteByQuery(db.Dialect(), e.tableName, e.primaryKey)
 
-	result, err := c.SQL.ExecContext(c, query, id)
+	result, err := db.ExecContext(c, query, id)
 	if err != nil {
 		return nil, err
 	}

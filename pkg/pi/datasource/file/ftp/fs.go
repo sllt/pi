@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,18 +32,19 @@ type fileSystem struct {
 // New creates and validates a new FTP file system.
 // Returns error if connection fails or configuration is invalid.
 func New(config *Config) file.FileSystemProvider {
-	if config == nil {
-		config = &Config{}
+	var cfgCopy Config
+	if config != nil {
+		cfgCopy = *config
 	}
 
 	// Set default dial timeout if not specified
-	if config.DialTimeout == 0 {
-		config.DialTimeout = 5 * time.Second
+	if cfgCopy.DialTimeout == 0 {
+		cfgCopy.DialTimeout = 5 * time.Second
 	}
 
-	adapter := &storageAdapter{cfg: config}
+	adapter := &storageAdapter{cfg: &cfgCopy}
 
-	location := buildLocation(config)
+	location := buildLocation(&cfgCopy)
 
 	fs := &fileSystem{
 		CommonFileSystem: &file.CommonFileSystem{
@@ -53,6 +56,65 @@ func New(config *Config) file.FileSystemProvider {
 	}
 
 	return fs
+}
+
+// FromEnv constructs an unstarted FTP FileSystemProvider from an environment lookup function.
+func FromEnv(get func(string) string) (file.FileSystemProvider, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
+
+	host := strings.TrimSpace(get("FTP_HOST"))
+	if host == "" {
+		return nil, errInvalidConfig
+	}
+
+	port := 21
+	if rawPort := strings.TrimSpace(get("FTP_PORT")); rawPort != "" {
+		parsed, err := strconv.Atoi(rawPort)
+		if err != nil || parsed <= 0 || parsed > 65535 {
+			return nil, fmt.Errorf("ftp: invalid FTP_PORT %q", rawPort)
+		}
+		port = parsed
+	}
+
+	var dialTimeout time.Duration
+	if rawTimeout := strings.TrimSpace(get("FTP_DIAL_TIMEOUT")); rawTimeout != "" {
+		parsed, err := time.ParseDuration(rawTimeout)
+		if err != nil || parsed <= 0 {
+			return nil, fmt.Errorf("ftp: invalid FTP_DIAL_TIMEOUT %q", rawTimeout)
+		}
+		dialTimeout = parsed
+	}
+
+	return New(&Config{
+		Host:        host,
+		Port:        port,
+		User:        strings.TrimSpace(get("FTP_USER")),
+		Password:    get("FTP_PASSWORD"),
+		RemoteDir:   strings.TrimSpace(get("FTP_REMOTE_DIR")),
+		DialTimeout: dialTimeout,
+	}), nil
+}
+
+// ConnectContext establishes the FTP connection within ctx and fails fast without background retries.
+func (f *fileSystem) ConnectContext(ctx context.Context) error {
+	if f == nil || f.CommonFileSystem == nil {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if f.CommonFileSystem.IsConnected() {
+		return nil
+	}
+	if err := f.validateConfig(); err != nil {
+		return err
+	}
+	return f.CommonFileSystem.Connect(ctx)
 }
 
 // buildLocation creates the location string for metrics/logging.
@@ -159,10 +221,6 @@ func (f *fileSystem) Close() error {
 		return nil
 	}
 
-	if f.CommonFileSystem != nil {
-		f.CommonFileSystem.SetDisableRetry(true)
-	}
-
 	f.retryMu.Lock()
 	if !f.closed {
 		f.closed = true
@@ -176,6 +234,11 @@ func (f *fileSystem) Close() error {
 
 	if done != nil {
 		<-done
+	}
+
+	if f.CommonFileSystem != nil {
+		f.CommonFileSystem.SetDisableRetry(true)
+		f.CommonFileSystem.SetConnected(false)
 	}
 
 	if f.CommonFileSystem != nil && f.CommonFileSystem.Provider != nil {
@@ -254,7 +317,7 @@ func (f *fileSystem) validateConfig() error {
 	}
 
 	cfg := adapter.cfg
-	if cfg == nil || cfg.Host == "" || cfg.Port <= 0 {
+	if cfg == nil || cfg.Host == "" || cfg.Port <= 0 || cfg.Port > 65535 || cfg.DialTimeout < 0 {
 		return errInvalidConfig
 	}
 

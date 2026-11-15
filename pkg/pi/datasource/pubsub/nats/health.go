@@ -16,16 +16,27 @@ const (
 
 // Health checks the health of the NATS connection.
 func (c *Client) Health() datasource.Health {
-	if c.connManager == nil {
+	if c == nil {
+		return datasource.Health{Status: datasource.StatusDown}
+	}
+
+	c.connMu.RLock()
+	connMgr := c.connManager
+	c.connMu.RUnlock()
+
+	if connMgr == nil {
 		return datasource.Health{
 			Status: datasource.StatusDown,
 		}
 	}
 
-	health := c.connManager.Health()
+	health := connMgr.Health()
+	if health.Details == nil {
+		health.Details = make(map[string]any)
+	}
 	health.Details["backend"] = natsBackend
 
-	js, err := c.connManager.jetStream()
+	js, err := connMgr.jetStream()
 	if err != nil {
 		health.Details["jetstream_enabled"] = false
 		health.Details["jetstream_status"] = jetStreamStatusError + ": " + err.Error()

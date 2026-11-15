@@ -122,9 +122,9 @@ func (a *App) deepHealthHandler(c *Context) (any, error) {
 	}
 
 	res := c.Health(probeCtx)
-	if healthMap, ok := res.(map[string]any); ok && a != nil && a.needsActorRuntime() && !a.isReady() {
-		healthMap["status"] = "DEGRADED"
-		healthMap["runtime"] = map[string]any{
+	if res != nil && a != nil && a.needsActorRuntime() && !a.isReady() {
+		res["status"] = "DEGRADED"
+		res["runtime"] = map[string]any{
 			"status":  "DOWN",
 			"ready":   false,
 			"startup": a.isStartupComplete(),

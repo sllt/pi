@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -29,7 +31,6 @@ type Config struct {
 type cassandra struct {
 	clusterConfig clusterConfig
 	session       session
-	query         query
 	batches       map[string]batch
 }
 
@@ -43,7 +44,11 @@ type Client struct {
 	tracer  trace.Tracer
 }
 
-var errStatusDown = errors.New("status down")
+var (
+	errStatusDown         = errors.New("status down")
+	errInvalidConfig      = errors.New("cassandra: hosts and keyspace are required")
+	errClientNotConnected = errors.New("cassandra: client not connected")
+)
 
 // New initializes Cassandra driver with the provided configuration.
 // The Connect method must be called to establish a connection to Cassandra.
@@ -59,21 +64,132 @@ func New(conf Config) *Client {
 	return &Client{config: &conf, cassandra: cass}
 }
 
-// Connect establishes a connection to Cassandra and registers metrics using the provided configuration when the client was Created.
-func (c *Client) Connect() {
-	c.logger.Debugf("connecting to Cassandra at %v on port %v to keyspace %v", c.config.Hosts, c.config.Port, c.config.Keyspace)
+// FromEnv constructs an unstarted Cassandra client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
+
+	firstNonEmpty := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(get(k)); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	hosts := firstNonEmpty("CASSANDRA_HOSTS", "CASSANDRA_HOST")
+	keyspace := firstNonEmpty("CASSANDRA_KEYSPACE")
+	if hosts == "" || keyspace == "" {
+		return nil, errInvalidConfig
+	}
+
+	port := 9042
+	if rawPort := firstNonEmpty("CASSANDRA_PORT"); rawPort != "" {
+		parsed, err := strconv.Atoi(rawPort)
+		if err != nil || parsed <= 0 || parsed > 65535 {
+			return nil, fmt.Errorf("cassandra: invalid CASSANDRA_PORT %q", rawPort)
+		}
+		port = parsed
+	}
+
+	return New(Config{
+		Hosts:    hosts,
+		Keyspace: keyspace,
+		Port:     port,
+		Username: firstNonEmpty("CASSANDRA_USERNAME", "CASSANDRA_USER"),
+		Password: get("CASSANDRA_PASSWORD"),
+	}), nil
+}
+
+// ConnectContext establishes a Cassandra session within ctx and returns any error.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil || c.config == nil || c.cassandra == nil {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.cassandra.session != nil {
+		return nil
+	}
+	if strings.TrimSpace(c.config.Hosts) == "" || strings.TrimSpace(c.config.Keyspace) == "" {
+		return errInvalidConfig
+	}
+
+	if c.logger != nil {
+		c.logger.Debugf("connecting to Cassandra at %v on port %v to keyspace %v", c.config.Hosts, c.config.Port, c.config.Keyspace)
+	}
 
 	sess, err := c.cassandra.clusterConfig.createSession()
 	if err != nil {
-		c.logger.Error("error connecting to Cassandra: ", err)
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		if closer, ok := sess.(interface{ Close() }); ok {
+			closer.Close()
+		}
+		return err
+	}
+
+	if c.metrics != nil {
+		cassandraBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_cassandra_stats", "Response time of CASSANDRA queries in microseconds.", cassandraBuckets...)
+	}
+
+	if c.logger != nil {
+		c.logger.Logf("connected to '%s' keyspace at host '%s' and port '%d'", c.config.Keyspace, c.config.Hosts, c.config.Port)
+	}
+
+	c.cassandra.session = sess
+
+	return nil
+}
+
+// Close closes the underlying Cassandra session idempotently.
+func (c *Client) Close() error {
+	if c == nil || c.cassandra == nil || c.cassandra.session == nil {
+		return nil
+	}
+
+	sess := c.cassandra.session
+	c.cassandra.session = nil
+	c.cassandra.batches = nil
+
+	if closer, ok := sess.(interface{ Close() }); ok {
+		closer.Close()
+	}
+
+	return nil
+}
+
+// Connect establishes a connection to Cassandra and registers metrics using the provided configuration when the client was Created.
+func (c *Client) Connect() {
+	if c.logger != nil {
+		c.logger.Debugf("connecting to Cassandra at %v on port %v to keyspace %v", c.config.Hosts, c.config.Port, c.config.Keyspace)
+	}
+
+	sess, err := c.cassandra.clusterConfig.createSession()
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Error("error connecting to Cassandra: ", err)
+		}
 
 		return
 	}
 
-	cassandraBucktes := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
-	c.metrics.NewHistogram("app_cassandra_stats", "Response time of CASSANDRA queries in microseconds.", cassandraBucktes...)
+	if c.metrics != nil {
+		cassandraBucktes := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_cassandra_stats", "Response time of CASSANDRA queries in microseconds.", cassandraBucktes...)
+	}
 
-	c.logger.Logf("connected to '%s' keyspace at host '%s' and port '%d'", c.config.Keyspace, c.config.Hosts, c.config.Port)
+	if c.logger != nil {
+		c.logger.Logf("connected to '%s' keyspace at host '%s' and port '%d'", c.config.Keyspace, c.config.Hosts, c.config.Port)
+	}
 
 	c.cassandra.session = sess
 }
@@ -121,15 +237,25 @@ func (c *Client) NewBatch(name string, batchType int) error {
 //
 //nolint:exhaustive // We just want to take care of slice and struct in this case.
 func (c *Client) QueryWithCtx(ctx context.Context, dest any, stmt string, values ...any) error {
+	if c == nil || c.config == nil || c.cassandra == nil {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "query", stmt)
 
 	defer c.sendOperationStats(&QueryLog{Operation: "QueryWithCtx", Query: stmt, Keyspace: c.config.Keyspace}, time.Now(), "query", span)
 
 	rvo := reflect.ValueOf(dest)
 	if rvo.Kind() != reflect.Ptr {
-		c.logger.Error("we did not get a pointer. data is not settable.")
+		if c.logger != nil {
+			c.logger.Error("we did not get a pointer. data is not settable.")
+		}
 
 		return errDestinationIsNotPointer
+	}
+
+	if c.cassandra.session == nil {
+		return errClientNotConnected
 	}
 
 	rv := rvo.Elem()
@@ -161,7 +287,9 @@ func (c *Client) QueryWithCtx(ctx context.Context, dest any, stmt string, values
 		c.rowsToStruct(iter, rv)
 
 	default:
-		c.logger.Debugf("a pointer to %v was not expected.", rv.Kind().String())
+		if c.logger != nil {
+			c.logger.Debugf("a pointer to %v was not expected.", rv.Kind().String())
+		}
 
 		return errUnexpectedPointer{target: rv.Kind().String()}
 	}
@@ -170,9 +298,17 @@ func (c *Client) QueryWithCtx(ctx context.Context, dest any, stmt string, values
 }
 
 func (c *Client) ExecWithCtx(ctx context.Context, stmt string, values ...any) error {
+	if c == nil || c.config == nil || c.cassandra == nil {
+		return errClientNotConnected
+	}
+
 	span := c.addTrace(ctx, "exec", stmt)
 
 	defer c.sendOperationStats(&QueryLog{Operation: "ExecWithCtx", Query: stmt, Keyspace: c.config.Keyspace}, time.Now(), "exec", span)
+
+	if c.cassandra.session == nil {
+		return errClientNotConnected
+	}
 
 	return c.cassandra.session.query(stmt, values...).exec()
 }
@@ -181,6 +317,10 @@ func (c *Client) ExecWithCtx(ctx context.Context, stmt string, values ...any) er
 //
 //nolint:exhaustive // We just want to take care of slice and struct in this case.
 func (c *Client) ExecCASWithCtx(ctx context.Context, dest any, stmt string, values ...any) (bool, error) {
+	if c == nil || c.config == nil || c.cassandra == nil {
+		return false, errClientNotConnected
+	}
+
 	var (
 		applied bool
 		err     error
@@ -192,9 +332,15 @@ func (c *Client) ExecCASWithCtx(ctx context.Context, dest any, stmt string, valu
 
 	rvo := reflect.ValueOf(dest)
 	if rvo.Kind() != reflect.Ptr {
-		c.logger.Debugf("we did not get a pointer. data is not settable.")
+		if c.logger != nil {
+			c.logger.Debugf("we did not get a pointer. data is not settable.")
+		}
 
 		return false, errDestinationIsNotPointer
+	}
+
+	if c.cassandra.session == nil {
+		return false, errClientNotConnected
 	}
 
 	rv := rvo.Elem()
@@ -205,12 +351,16 @@ func (c *Client) ExecCASWithCtx(ctx context.Context, dest any, stmt string, valu
 		applied, err = c.rowsToStructCAS(q, rv)
 
 	case reflect.Slice:
-		c.logger.Debugf("a slice of %v was not expected.", reflect.SliceOf(reflect.TypeOf(dest)).String())
+		if c.logger != nil {
+			c.logger.Debugf("a slice of %v was not expected.", reflect.SliceOf(reflect.TypeOf(dest)).String())
+		}
 
 		return false, errUnexpectedSlice{target: reflect.SliceOf(reflect.TypeOf(dest)).String()}
 
 	case reflect.Map:
-		c.logger.Debugf("a map was not expected.")
+		if c.logger != nil {
+			c.logger.Debugf("a map was not expected.")
+		}
 
 		return false, errUnexpectedMap
 
@@ -222,8 +372,16 @@ func (c *Client) ExecCASWithCtx(ctx context.Context, dest any, stmt string, valu
 }
 
 func (c *Client) NewBatchWithCtx(_ context.Context, name string, batchType int) error {
+	if c == nil || c.cassandra == nil {
+		return errClientNotConnected
+	}
+
 	switch batchType {
 	case LoggedBatch, UnloggedBatch, CounterBatch:
+		if c.cassandra.session == nil {
+			return errClientNotConnected
+		}
+
 		if len(c.cassandra.batches) == 0 {
 			c.cassandra.batches = make(map[string]batch)
 		}
@@ -336,7 +494,9 @@ func (c *Client) sendOperationStats(ql *QueryLog, startTime time.Time, method st
 
 	ql.Duration = duration
 
-	c.logger.Debug(ql)
+	if c.logger != nil {
+		c.logger.Debug(ql)
+	}
 
 	if span != nil {
 		defer span.End()
@@ -344,10 +504,10 @@ func (c *Client) sendOperationStats(ql *QueryLog, startTime time.Time, method st
 		span.SetAttributes(attribute.Int64(fmt.Sprintf("cassandra.%v.duration", method), duration))
 	}
 
-	c.metrics.RecordHistogram(context.Background(), "app_cassandra_stats", float64(duration), "hostname", c.config.Hosts,
-		"keyspace", c.config.Keyspace)
-
-	c.cassandra.query = nil
+	if c.metrics != nil {
+		c.metrics.RecordHistogram(context.Background(), "app_cassandra_stats", float64(duration), "hostname", c.config.Hosts,
+			"keyspace", c.config.Keyspace)
+	}
 }
 
 type Health struct {
@@ -364,6 +524,11 @@ func (c *Client) HealthCheck(context.Context) (any, error) {
 
 	h := Health{
 		Details: make(map[string]any),
+	}
+	if c == nil || c.config == nil || c.cassandra == nil {
+		h.Status = statusDown
+		h.Details["message"] = "cassandra not configured"
+		return &h, errStatusDown
 	}
 
 	h.Details["host"] = c.config.Hosts

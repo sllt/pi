@@ -176,7 +176,7 @@ type Tx struct {
 }
 
 // Owns reports transaction identity, not merely matching database configuration.
-func (d *DB) Owns(tx *Tx) bool { return tx != nil && tx.owner == d }
+func (d *DB) Owns(tx *Tx) bool { return d != nil && tx != nil && tx.owner == d }
 
 func (t *Tx) sendOperationStats(start time.Time, queryType, query string, args ...any) {
 	sendStats(t.logger, t.metrics, t.config, start, queryType, query, args...)

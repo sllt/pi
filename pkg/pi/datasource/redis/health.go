@@ -26,7 +26,15 @@ func (r *Redis) HealthCheckContext(ctx context.Context) datasource.Health {
 		Details: make(map[string]any),
 	}
 
-	h.Details["host"] = r.config.HostName + ":" + strconv.Itoa(r.config.Port)
+	if r == nil {
+		h.Status = datasource.StatusDown
+		h.Details["error"] = "redis not connected"
+		return h
+	}
+
+	if r.config != nil {
+		h.Details["host"] = r.config.HostName + ":" + strconv.Itoa(r.config.Port)
+	}
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -72,15 +80,24 @@ func (ps *PubSub) HealthContext(ctx context.Context) datasource.Health {
 		},
 	}
 
-	addr := fmt.Sprintf("%s:%d", ps.config.HostName, ps.config.Port)
-	res.Details["host"] = addr
-
-	mode := ps.config.PubSubMode
-	if mode == "" {
-		mode = modeStreams
+	if ps == nil {
+		res.Details["error"] = "redis pubsub not connected"
+		return res
 	}
 
-	res.Details["mode"] = mode
+	if ps.config != nil {
+		addr := fmt.Sprintf("%s:%d", ps.config.HostName, ps.config.Port)
+		res.Details["host"] = addr
+
+		mode := ps.config.PubSubMode
+		if mode == "" {
+			mode = modeStreams
+		}
+
+		res.Details["mode"] = mode
+	} else {
+		res.Details["mode"] = modeStreams
+	}
 
 	if ps.client == nil {
 		res.Details["error"] = "redis pubsub not connected"
@@ -97,7 +114,9 @@ func (ps *PubSub) HealthContext(ctx context.Context) datasource.Health {
 	}
 
 	if err := ps.client.Ping(ctx).Err(); err != nil {
-		ps.logger.Errorf("PubSub health check failed: %v", err)
+		if ps.logger != nil {
+			ps.logger.Errorf("PubSub health check failed: %v", err)
+		}
 		res.Details["error"] = err.Error()
 		return res
 	}

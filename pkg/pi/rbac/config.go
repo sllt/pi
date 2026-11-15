@@ -1,6 +1,7 @@
 package rbac
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,8 +14,12 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sllt/pi/pkg/pi/datasource"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
+
+// Metrics defines the minimal counter interface required by RBAC middleware.
+type Metrics interface {
+	IncrementCounter(ctx context.Context, name string, labels ...string)
+}
 
 var (
 	// errUnsupportedFormat is returned when the config file format is not supported.
@@ -111,7 +116,7 @@ type Config struct {
 
 	// Metrics is the metrics instance for RBAC metrics
 	// Set automatically by EnableRBAC
-	Metrics infra.Metrics `json:"-" yaml:"-"`
+	Metrics Metrics `json:"-" yaml:"-"`
 
 	// Tracer is the tracer instance for RBAC tracing
 	// Set automatically by EnableRBAC
@@ -129,7 +134,7 @@ type Config struct {
 // The file format is automatically detected based on the file extension.
 // Supported formats: .json, .yaml, .yml.
 // Dependencies (logger, metrics, tracer) are optional and can be set after loading.
-func LoadPermissions(path string, logger datasource.Logger, metrics infra.Metrics, tracer trace.Tracer) (*Config, error) {
+func LoadPermissions(path string, logger datasource.Logger, metrics Metrics, tracer trace.Tracer) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read RBAC config file %s: %w", path, err)

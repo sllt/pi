@@ -64,8 +64,11 @@ func parseLimitArg(arg any, limit int) int {
 }
 
 // readMessages reads messages from Event Hub partitions.
-func (c *Client) readMessages(ctx context.Context, startPosition azeventhubs.StartPosition, limit int) ([]byte, error) {
-	partitions, err := c.consumer.GetEventHubProperties(ctx, nil)
+func (c *Client) readMessages(ctx context.Context, consumer *azeventhubs.ConsumerClient, startPosition azeventhubs.StartPosition, limit int) ([]byte, error) {
+	if consumer == nil {
+		return nil, errClientNotConnected
+	}
+	partitions, err := consumer.GetEventHubProperties(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +84,7 @@ func (c *Client) readMessages(ctx context.Context, startPosition azeventhubs.Sta
 		}
 
 		remaining := limit - messagesRead
-		messages := c.readFromPartition(ctx, partitionID, startPosition, remaining)
+		messages := c.readFromPartition(ctx, consumer, partitionID, startPosition, remaining)
 
 		for _, msg := range messages {
 			if len(result) > 0 {
@@ -101,9 +104,9 @@ func (c *Client) readMessages(ctx context.Context, startPosition azeventhubs.Sta
 	return result, nil
 }
 
-func (c *Client) readFromPartition(ctx context.Context, partitionID string,
+func (c *Client) readFromPartition(ctx context.Context, consumer *azeventhubs.ConsumerClient, partitionID string,
 	startPosition azeventhubs.StartPosition, maxMessages int) [][]byte {
-	pc, err := c.createPartitionClient(partitionID, startPosition)
+	pc, err := c.createPartitionClient(consumer, partitionID, startPosition)
 	if err != nil {
 		return nil
 	}
@@ -112,9 +115,9 @@ func (c *Client) readFromPartition(ctx context.Context, partitionID string,
 	return receiveMessages(ctx, pc, maxMessages)
 }
 
-func (c *Client) createPartitionClient(partitionID string,
+func (c *Client) createPartitionClient(consumer *azeventhubs.ConsumerClient, partitionID string,
 	startPosition azeventhubs.StartPosition) (*azeventhubs.PartitionClient, error) {
-	return c.consumer.NewPartitionClient(partitionID, &azeventhubs.PartitionClientOptions{
+	return consumer.NewPartitionClient(partitionID, &azeventhubs.PartitionClientOptions{
 		StartPosition: startPosition,
 	})
 }

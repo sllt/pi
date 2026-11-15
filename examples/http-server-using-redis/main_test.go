@@ -17,8 +17,8 @@ import (
 	"github.com/sllt/pi/pkg/pi/config"
 	"github.com/sllt/pi/pkg/pi/datasource/redis"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/testkit"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
@@ -57,7 +57,6 @@ func TestHTTPServerUsingRedis(t *testing.T) {
 		resp, err := c.Do(req)
 
 		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
-
 		assert.Equal(t, tc.statusCode, resp.StatusCode, "TEST[%d], Failed.\n%s", i, tc.desc)
 	}
 }
@@ -65,11 +64,10 @@ func TestHTTPServerUsingRedis(t *testing.T) {
 func TestRedisSetHandler(t *testing.T) {
 	configs := testutil.NewServerConfigs(t)
 
-	a := pi.New()
 	logger := logging.NewLogger(logging.DEBUG)
 	redisClient, mock := redismock.NewClientMock()
 
-	rc := redis.NewClient(config.NewMockConfig(map[string]string{"REDIS_HOST": "localhost", "REDIS_PORT": "2001"}), logger, a.Metrics())
+	rc := redis.NewClient(config.NewMockConfig(map[string]string{"REDIS_HOST": "localhost", "REDIS_PORT": "2001"}), logger, nil)
 	rc.Client = redisClient
 
 	mock.ExpectSet("key", "value", 5*time.Minute).SetErr(testutil.CustomError{ErrorMessage: "redis get error"})
@@ -78,8 +76,13 @@ func TestRedisSetHandler(t *testing.T) {
 	req.Header.Set("content-type", "application/json")
 	piReq := piHTTP.NewRequest(req)
 
-	ctx := &pi.Context{Context: context.Background(),
-		Request: piReq, Container: &infra.Container{Logger: logger, Redis: rc}}
+	app := testkit.New(t,
+		pi.WithConfig(map[string]string{"HTTP_ENABLED": "false", "GRPC_ENABLED": "false"}),
+		pi.WithLogger(logger),
+		pi.WithRedis(rc, pi.Borrowed),
+	)
+	ctx := app.NewContext(context.Background())
+	ctx.Request = piReq
 
 	resp, err := RedisSetHandler(ctx)
 
@@ -90,11 +93,10 @@ func TestRedisSetHandler(t *testing.T) {
 func TestRedisPipelineHandler(t *testing.T) {
 	configs := testutil.NewServerConfigs(t)
 
-	a := pi.New()
 	logger := logging.NewLogger(logging.DEBUG)
 	redisClient, mock := redismock.NewClientMock()
 
-	rc := redis.NewClient(config.NewMockConfig(map[string]string{"REDIS_HOST": "localhost", "REDIS_PORT": "2001"}), logger, a.Metrics())
+	rc := redis.NewClient(config.NewMockConfig(map[string]string{"REDIS_HOST": "localhost", "REDIS_PORT": "2001"}), logger, nil)
 	rc.Client = redisClient
 
 	mock.ExpectSet("testKey1", "testValue1", time.Minute*5).SetErr(testutil.CustomError{ErrorMessage: "redis get error"})
@@ -102,11 +104,15 @@ func TestRedisPipelineHandler(t *testing.T) {
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprint("http://localhost:", configs.HTTPHost, "/handle"), bytes.NewBuffer([]byte(`{"key":"value"}`)))
 	req.Header.Set("content-type", "application/json")
-
 	piReq := piHTTP.NewRequest(req)
 
-	ctx := &pi.Context{Context: context.Background(),
-		Request: piReq, Container: &infra.Container{Logger: logger, Redis: rc}}
+	app := testkit.New(t,
+		pi.WithConfig(map[string]string{"HTTP_ENABLED": "false", "GRPC_ENABLED": "false"}),
+		pi.WithLogger(logger),
+		pi.WithRedis(rc, pi.Borrowed),
+	)
+	ctx := app.NewContext(context.Background())
+	ctx.Request = piReq
 
 	resp, err := RedisPipelineHandler(ctx)
 

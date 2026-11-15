@@ -25,6 +25,12 @@ type Manager interface {
 	SetGauge(name string, value float64, labels ...string)
 }
 
+// StrictMock may be implemented by strict expectation-based test mocks (such as gomock)
+// so framework supervision/internal metric registration does not trigger unexpected mock calls.
+type StrictMock interface {
+	IsStrictMock() bool
+}
+
 // Logger defines a simple interface for logging messages at different log levels.
 type Logger interface {
 	Error(args ...any)

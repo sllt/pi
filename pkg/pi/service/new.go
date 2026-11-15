@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
@@ -28,9 +29,11 @@ func resolveHTTPTextMapPropagator() propagation.TextMapPropagator {
 }
 
 type httpService struct {
+	mu sync.RWMutex
 	*http.Client
 	trace.Tracer
 	tracerProvider trace.TracerProvider
+	explicitTracer bool
 	url            string
 	name           string
 	Logger
@@ -48,7 +51,6 @@ type HTTP interface {
 
 	// HealthCheck to get the service health and report it to the current application
 	HealthCheck(ctx context.Context) *Health
-	getHealthResponseForEndpoint(ctx context.Context, endpoint string, timeout int) *Health
 }
 
 type httpClient interface {
@@ -85,7 +87,7 @@ type httpClient interface {
 // NewHTTPService function creates a new instance of the httpService struct, which implements the HTTP interface.
 // It initializes the http.Client, url, Tracer, and Logger fields of the httpService struct with the provided values.
 func NewHTTPService(serviceAddress string, logger Logger, metrics Metrics, options ...Options) HTTP {
-	return NewHTTPServiceWithTracer(serviceAddress, logger, metrics, otel.Tracer("pi-http-client"), options...)
+	return newHTTPService(serviceAddress, logger, metrics, nil, nil, false, options...)
 }
 
 // NewHTTPServiceWithTracer creates an HTTP service bound to an explicit trace.Tracer.
@@ -96,7 +98,7 @@ func NewHTTPServiceWithTracer(
 	tracer trace.Tracer,
 	options ...Options,
 ) HTTP {
-	return newHTTPService(serviceAddress, logger, metrics, tracer, nil, options...)
+	return newHTTPService(serviceAddress, logger, metrics, tracer, nil, tracer != nil, options...)
 }
 
 // NewHTTPServiceWithTracerProvider creates an HTTP service bound to an explicit trace.TracerProvider.
@@ -111,7 +113,7 @@ func NewHTTPServiceWithTracerProvider(
 	if tracerProvider != nil {
 		tracer = tracerProvider.Tracer("pi-http-client")
 	}
-	return newHTTPService(serviceAddress, logger, metrics, tracer, tracerProvider, options...)
+	return newHTTPService(serviceAddress, logger, metrics, tracer, tracerProvider, tracerProvider != nil, options...)
 }
 
 func newHTTPService(
@@ -120,6 +122,7 @@ func newHTTPService(
 	metrics Metrics,
 	tracer trace.Tracer,
 	tracerProvider trace.TracerProvider,
+	explicitTracer bool,
 	options ...Options,
 ) HTTP {
 	if tracer == nil {
@@ -135,6 +138,7 @@ func newHTTPService(
 		url:            serviceAddress,
 		Tracer:         tracer,
 		tracerProvider: tracerProvider,
+		explicitTracer: explicitTracer,
 		Logger:         logger,
 		Metrics:        metrics,
 	}
@@ -145,7 +149,9 @@ func newHTTPService(
 
 	// if options are given, then add them to the httpService struct
 	for _, o := range options {
-		svc = o.AddOption(svc)
+		if o != nil {
+			svc = o.AddOption(svc)
+		}
 	}
 
 	return svc
@@ -199,16 +205,31 @@ func (h *httpService) DeleteWithHeaders(ctx context.Context, path string, body [
 
 func (h *httpService) createAndSendRequest(ctx context.Context, method string, path string,
 	queryParams map[string]any, body []byte, headers map[string]string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	h.mu.RLock()
+	tracer := h.Tracer
+	tracerProvider := h.tracerProvider
+	logger := h.Logger
+	metrics := h.Metrics
+	svcName := h.name
+	h.mu.RUnlock()
+
 	uri := h.url + "/" + path
 	uri = strings.TrimRight(uri, "/")
 
-	ctx, span := h.Tracer.Start(ctx, uri)
-	defer span.End()
+	if tracer != nil {
+		var span trace.Span
+		ctx, span = tracer.Start(ctx, uri)
+		defer span.End()
+	}
 
 	// Attach client-side trace handling for HTTP request.
 	var traceOpts []otelhttptrace.ClientTraceOption
-	if h.tracerProvider != nil {
-		traceOpts = append(traceOpts, otelhttptrace.WithTracerProvider(h.tracerProvider))
+	if tracerProvider != nil {
+		traceOpts = append(traceOpts, otelhttptrace.WithTracerProvider(tracerProvider))
 	}
 	clientTraceCtx := httptrace.WithClientTrace(ctx, otelhttptrace.NewClientTrace(ctx, traceOpts...))
 
@@ -255,31 +276,96 @@ func (h *httpService) createAndSendRequest(ctx context.Context, method string, p
 
 	if err != nil {
 		log.ResponseCode = http.StatusServiceUnavailable
-		h.Log(&ErrorLog{Log: log, ErrorMessage: err.Error()})
+		if !isNilServiceAny(logger) {
+			logger.Log(&ErrorLog{Log: log, ErrorMessage: err.Error()})
+		}
 
-		h.updateMetrics(clientTraceCtx, method, respTime.Seconds(), http.StatusServiceUnavailable)
+		h.recordMetrics(clientTraceCtx, metrics, svcName, method, respTime.Seconds(), http.StatusServiceUnavailable)
 
 		return resp, err
 	}
 
-	h.updateMetrics(clientTraceCtx, method, respTime.Seconds(), resp.StatusCode)
+	h.recordMetrics(clientTraceCtx, metrics, svcName, method, respTime.Seconds(), resp.StatusCode)
 	log.ResponseCode = resp.StatusCode
 
-	h.Log(log)
+	if !isNilServiceAny(logger) {
+		logger.Log(log)
+	}
 
 	return resp, nil
 }
 
 func (h *httpService) updateMetrics(ctx context.Context, method string, timeTaken float64, statusCode int) {
-	if h.Metrics != nil {
+	h.mu.RLock()
+	metrics := h.Metrics
+	svcName := h.name
+	h.mu.RUnlock()
+	h.recordMetrics(ctx, metrics, svcName, method, timeTaken, statusCode)
+}
+
+func (h *httpService) recordMetrics(ctx context.Context, metrics Metrics, svcName, method string, timeTaken float64, statusCode int) {
+	if !isNilServiceAny(metrics) {
 		labels := []string{"path", h.url, "method", method, "status", fmt.Sprintf("%v", statusCode)}
 
-		if h.name != "" {
-			labels = append(labels, "service", h.name)
+		if svcName != "" {
+			labels = append(labels, "service", svcName)
 		}
 
-		h.RecordHistogram(ctx, "app_http_service_response", timeTaken, labels...)
+		metrics.RecordHistogram(ctx, "app_http_service_response", timeTaken, labels...)
 	}
+}
+
+func (h *httpService) UseServiceName(name string) {
+	if h == nil || name == "" {
+		return
+	}
+	h.mu.Lock()
+	if h.name == "" {
+		h.name = name
+	}
+	h.mu.Unlock()
+}
+
+func (h *httpService) UseLogger(logger any) {
+	if h == nil {
+		return
+	}
+	l, ok := logger.(Logger)
+	if !ok || isNilServiceAny(l) {
+		return
+	}
+	h.mu.Lock()
+	if isNilServiceAny(h.Logger) {
+		h.Logger = l
+	}
+	h.mu.Unlock()
+}
+
+func (h *httpService) UseMetrics(metrics any) {
+	if h == nil {
+		return
+	}
+	m, ok := metrics.(Metrics)
+	if !ok || isNilServiceAny(m) {
+		return
+	}
+	h.mu.Lock()
+	if isNilServiceAny(h.Metrics) {
+		h.Metrics = m
+	}
+	h.mu.Unlock()
+}
+
+func (h *httpService) UseTracerProvider(tp trace.TracerProvider) {
+	if h == nil || isNilServiceAny(tp) {
+		return
+	}
+	h.mu.Lock()
+	if !h.explicitTracer {
+		h.tracerProvider = tp
+		h.Tracer = tp.Tracer("pi-http-client")
+	}
+	h.mu.Unlock()
 }
 
 func encodeQueryParameters(req *http.Request, queryParams map[string]any) {
@@ -304,7 +390,9 @@ type attributesOption map[string]string
 func (a attributesOption) AddOption(h HTTP) HTTP {
 	if svc := extractHTTPService(h); svc != nil {
 		if name, ok := a["name"]; ok {
+			svc.mu.Lock()
 			svc.name = name
+			svc.mu.Unlock()
 		}
 	}
 

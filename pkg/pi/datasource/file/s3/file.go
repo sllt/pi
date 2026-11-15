@@ -100,7 +100,9 @@ func (f *S3File) Read(p []byte) (n int, err error) {
 
 	n, err = f.body.Read(buffer)
 	if err != nil && !errors.Is(err, io.EOF) {
-		f.logger.Errorf("Error reading file %q: %v", fileName, err)
+		if f.logger != nil {
+			f.logger.Errorf("Error reading file %q: %v", fileName, err)
+		}
 		return n, err
 	}
 
@@ -112,7 +114,9 @@ func (f *S3File) Read(p []byte) (n int, err error) {
 	st = statusSuccess
 	msg = fmt.Sprintf("Read %v bytes from file at path %q in bucket %q", n, fileName, bucketName)
 
-	f.logger.Logf("%v bytes read successfully)", len(p))
+	if f.logger != nil {
+		f.logger.Logf("%v bytes read successfully)", len(p))
+	}
 
 	return len(p), err
 }
@@ -176,7 +180,9 @@ func (f *S3File) ReadAt(p []byte, offset int64) (n int, err error) {
 	st = statusSuccess
 	msg = fmt.Sprintf("Read %v bytes at an offset of %v from file at path %q in bucket %q", n, offset, fileName, bucketName)
 
-	f.logger.Logf("%v bytes read successfully.")
+	if f.logger != nil {
+		f.logger.Logf("%v bytes read successfully.")
+	}
 
 	return len(p), nil
 }
@@ -260,7 +266,9 @@ func (f *S3File) Write(p []byte) (n int, err error) {
 	st = statusSuccess
 	msg = fmt.Sprintf("Wrote %v bytes to file at path %q in bucket %q", n, fileName, bucketName)
 
-	f.logger.Logf("%v bytes written successfully", len(p))
+	if f.logger != nil {
+		f.logger.Logf("%v bytes written successfully", len(p))
+	}
 
 	return len(p), nil
 }
@@ -379,14 +387,18 @@ func (f *S3File) Seek(offset int64, whence int) (int64, error) {
 
 	res, err := f.check(whence, offset, n, &msg)
 	if err != nil {
-		f.logger.Errorf("Seek failed. Error: %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("Seek failed. Error: %v", err)
+		}
 		return 0, err
 	}
 
 	status = statusSuccess
 	msg = fmt.Sprintf("Offset set to %v for file with path %q", res, f.name)
 
-	f.logger.Logf("Set file offset at %v", f.offset)
+	if f.logger != nil {
+		f.logger.Logf("Set file offset at %v", f.offset)
+	}
 
 	return res, nil
 }
@@ -397,5 +409,7 @@ func (f *S3File) sendOperationStats(fl *FileLog, startTime time.Time) {
 
 	fl.Duration = duration
 
-	f.logger.Debug(fl)
+	if f != nil && f.logger != nil {
+		f.logger.Debug(fl)
+	}
 }

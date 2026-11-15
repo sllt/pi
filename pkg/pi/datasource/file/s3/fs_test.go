@@ -625,3 +625,55 @@ func Test_Stat_ListObjectsV2Fails_Error(t *testing.T) {
 	require.Error(t, err, "Expected error when ListObjectsV2 fails")
 	require.Contains(t, err.Error(), "mocked error", "Expected error to contain mocked error")
 }
+
+func Test_ConnectContext_HealthCheck_Close_FromEnv(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// Validation errors
+	_, err := FromEnv(func(string) string { return "" })
+	require.ErrorIs(t, err, errS3BucketRequired)
+
+	fs, err := FromEnv(func(key string) string {
+		switch key {
+		case "S3_BUCKET":
+			return "env-bucket"
+		case "S3_REGION":
+			return "us-east-1"
+		case "S3_ENDPOINT":
+			return "http://127.0.0.1:1"
+		case "S3_ACCESS_KEY_ID":
+			return "ak"
+		case "S3_SECRET_ACCESS_KEY":
+			return "sk"
+		default:
+			return ""
+		}
+	})
+	require.NoError(t, err)
+	require.NotNil(t, fs)
+
+	// Unconnected HealthCheck returns error without panicking even with nil logger
+	_, err = fs.HealthCheck(context.Background())
+	require.ErrorIs(t, err, errS3NotConnected)
+
+	// Cancelled context returns immediately
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, fs.ConnectContext(ctx), context.Canceled)
+
+	// Connected mock HealthCheck + idempotent Close
+	mocks := setupTestMocks(ctrl)
+	mocks.mockS3.EXPECT().ListObjectsV2(gomock.Any(), gomock.Any()).Return(&s3.ListObjectsV2Output{}, nil)
+	fs.conn = mocks.mockS3
+	require.NoError(t, fs.ConnectContext(context.Background()))
+
+	details, err := fs.HealthCheck(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, details)
+
+	require.NoError(t, fs.Close())
+	require.NoError(t, fs.Close())
+	_, err = fs.HealthCheck(context.Background())
+	require.ErrorIs(t, err, errS3NotConnected)
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -18,7 +19,6 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
@@ -195,12 +195,96 @@ func TestWrappedServerStream_Context(t *testing.T) {
 	assert.Equal(t, "value", wrapped.Context().Value(contextKey("key")))
 }
 
+type testMockLogger struct {
+	ctrl     *gomock.Controller
+	recorder *testMockLoggerRecorder
+}
+
+type testMockLoggerRecorder struct {
+	mock *testMockLogger
+}
+
+func newTestMockLogger(ctrl *gomock.Controller) *testMockLogger {
+	m := &testMockLogger{ctrl: ctrl}
+	m.recorder = &testMockLoggerRecorder{mock: m}
+	return m
+}
+
+func (m *testMockLogger) EXPECT() *testMockLoggerRecorder { return m.recorder }
+func (m *testMockLogger) Info(args ...any) {
+	m.ctrl.T.Helper()
+	var varargs []any
+	varargs = append(varargs, args...)
+	m.ctrl.Call(m, "Info", varargs...)
+}
+func (mr *testMockLoggerRecorder) Info(args ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Info", reflect.TypeOf((*testMockLogger)(nil).Info), args...)
+}
+func (m *testMockLogger) Debug(args ...any) {
+	m.ctrl.T.Helper()
+	var varargs []any
+	varargs = append(varargs, args...)
+	m.ctrl.Call(m, "Debug", varargs...)
+}
+func (mr *testMockLoggerRecorder) Debug(args ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Debug", reflect.TypeOf((*testMockLogger)(nil).Debug), args...)
+}
+func (m *testMockLogger) Errorf(format string, args ...any) {
+	m.ctrl.T.Helper()
+	varargs := []any{format}
+	varargs = append(varargs, args...)
+	m.ctrl.Call(m, "Errorf", varargs...)
+}
+func (mr *testMockLoggerRecorder) Errorf(format any, args ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{format}, args...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Errorf", reflect.TypeOf((*testMockLogger)(nil).Errorf), varargs...)
+}
+func (m *testMockLogger) Fatalf(format string, args ...any) {
+	m.ctrl.T.Helper()
+	varargs := []any{format}
+	varargs = append(varargs, args...)
+	m.ctrl.Call(m, "Fatalf", varargs...)
+}
+
+type testMockMetrics struct {
+	ctrl     *gomock.Controller
+	recorder *testMockMetricsRecorder
+}
+
+type testMockMetricsRecorder struct {
+	mock *testMockMetrics
+}
+
+func newTestMockMetrics(ctrl *gomock.Controller) *testMockMetrics {
+	m := &testMockMetrics{ctrl: ctrl}
+	m.recorder = &testMockMetricsRecorder{mock: m}
+	return m
+}
+
+func (m *testMockMetrics) EXPECT() *testMockMetricsRecorder { return m.recorder }
+func (m *testMockMetrics) RecordHistogram(ctx context.Context, name string, value float64, labels ...string) {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, name, value}
+	for _, l := range labels {
+		varargs = append(varargs, l)
+	}
+	m.ctrl.Call(m, "RecordHistogram", varargs...)
+}
+func (mr *testMockMetricsRecorder) RecordHistogram(ctx, name, value any, labels ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, name, value}, labels...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RecordHistogram", reflect.TypeOf((*testMockMetrics)(nil).RecordHistogram), varargs...)
+}
+
 // Helper function to create mock logger and metrics for testing.
-func createMocks(t *testing.T) (*infra.MockLogger, *infra.MockMetrics, *gomock.Controller) {
+func createMocks(t *testing.T) (*testMockLogger, *testMockMetrics, *gomock.Controller) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
-	mockLogger := infra.NewMockLogger(ctrl)
-	mockMetrics := infra.NewMockMetrics(ctrl)
+	mockLogger := newTestMockLogger(ctrl)
+	mockMetrics := newTestMockMetrics(ctrl)
 
 	return mockLogger, mockMetrics, ctrl
 }

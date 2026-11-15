@@ -30,7 +30,6 @@ import (
 	{{- end }}
 
 	"github.com/sllt/pi/pkg/pi"
-	"github.com/sllt/pi/pkg/pi/infra"
 	piGRPC "github.com/sllt/pi/pkg/pi/grpc"
 	"google.golang.org/grpc"
 
@@ -64,9 +63,8 @@ type {{ .Service }}ServerWithPi interface {
 type {{ .Service }}ServerWrapper struct {
 	{{ .Service }}Server
 	*healthServer
-	Container *infra.Container
-	app *pi.App
-	server    {{ .Service }}ServerWithPi
+	app    *pi.App
+	server {{ .Service }}ServerWithPi
 }
 
 {{- if $hasStream }}
@@ -78,18 +76,30 @@ type instrumentedStream{{ $.Service }} struct {
 }
 
 func (s *instrumentedStream{{ $.Service }}) Context() context.Context {
+	if s.ServerStream != nil && s.ServerStream.Context() != nil {
+		return s.ServerStream.Context()
+	}
 	return s.ctx
+}
+
+func (s *instrumentedStream{{ $.Service }}) traceStep(step string) (context.Context, func()) {
+	baseCtx := s.Context()
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	stepCtx, span := s.ctx.TracerProvider().Tracer("pi-context").Start(baseCtx, s.method+step)
+	return stepCtx, func() { span.End() }
 }
 
 func (s *instrumentedStream{{ $.Service }}) SendMsg(m interface{}) error {
 	start := time.Now()
-	span := s.ctx.Trace(s.method + "/SendMsg")
-	defer span.End()
+	stepCtx, endSpan := s.traceStep("/SendMsg")
+	defer endSpan()
 
 	err := s.ServerStream.SendMsg(m)
 
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(s.ctx, s.ctx.Logger, s.ctx.Metrics(), start, err,
+	logger.DocumentRPCLog(stepCtx, s.ctx.Logger(), s.ctx.Metrics(), start, err,
 		s.method+"/SendMsg", "app_gRPC-Stream_stats")
 
 	return err
@@ -97,13 +107,13 @@ func (s *instrumentedStream{{ $.Service }}) SendMsg(m interface{}) error {
 
 func (s *instrumentedStream{{ $.Service }}) RecvMsg(m interface{}) error {
 	start := time.Now()
-	span := s.ctx.Trace(s.method + "/RecvMsg")
-	defer span.End()
+	stepCtx, endSpan := s.traceStep("/RecvMsg")
+	defer endSpan()
 
 	err := s.ServerStream.RecvMsg(m)
 
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(s.ctx, s.ctx.Logger, s.ctx.Metrics(), start, err,
+	logger.DocumentRPCLog(stepCtx, s.ctx.Logger(), s.ctx.Metrics(), start, err,
 		s.method+"/RecvMsg", "app_gRPC-Stream_stats")
 
 	return err
@@ -111,7 +121,7 @@ func (s *instrumentedStream{{ $.Service }}) RecvMsg(m interface{}) error {
 {{- end }}
 
 {{ range .Methods }}
-{{- if .StreamsRequest }}
+{{- if and .StreamsRequest (not .StreamsResponse) }}
 // Client-side streaming specific wrapper
 type clientStreamWrapper{{ $.Service }}{{ .Name }} struct {
 	*instrumentedStream{{ $.Service }}
@@ -119,13 +129,13 @@ type clientStreamWrapper{{ $.Service }}{{ .Name }} struct {
 
 func (w *clientStreamWrapper{{ $.Service }}{{ .Name }}) SendAndClose(m *{{ .Response }}) error {
 	start := time.Now()
-	span := w.ctx.Trace(w.method + "/SendAndClose")
-	defer span.End()
+	stepCtx, endSpan := w.traceStep("/SendAndClose")
+	defer endSpan()
 
 	err := w.ServerStream.SendMsg(m)
 
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	logger.DocumentRPCLog(stepCtx, w.ctx.Logger(), w.ctx.Metrics(), start, err,
 	w.method+"/SendAndClose", "app_gRPC-Stream_stats")
 
 	return err
@@ -133,14 +143,14 @@ func (w *clientStreamWrapper{{ $.Service }}{{ .Name }}) SendAndClose(m *{{ .Resp
 
 func (w *clientStreamWrapper{{ $.Service }}{{ .Name }}) Recv() (*{{ .Request }}, error) {
 	start := time.Now()
-	span := w.ctx.Trace(w.method + "/Recv")
-	defer span.End()
+	stepCtx, endSpan := w.traceStep("/Recv")
+	defer endSpan()
 
 	var req {{ .Request }}
 	err := w.ServerStream.RecvMsg(&req)
 
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	logger.DocumentRPCLog(stepCtx, w.ctx.Logger(), w.ctx.Metrics(), start, err,
 	w.method+"/Recv", "app_gRPC-Stream_stats")
 
 	return &req, err
@@ -156,13 +166,13 @@ type serverStreamWrapper{{ $.Service }}{{ .Name }} struct {
 
 func (w *serverStreamWrapper{{ $.Service }}{{ .Name }}) Send(m *{{ .Response }}) error {
 	start := time.Now()
-	span := w.ctx.Trace(w.method + "/Send")
-	defer span.End()
+	stepCtx, endSpan := w.traceStep("/Send")
+	defer endSpan()
 
 	err := w.ServerStream.SendMsg(m)
 
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	logger.DocumentRPCLog(stepCtx, w.ctx.Logger(), w.ctx.Metrics(), start, err,
 	w.method+"/Send", "app_gRPC-Stream_stats")
 
 	return err
@@ -175,13 +185,13 @@ type bidiStreamWrapper{{ $.Service }}{{ .Name }} struct {
 
 func (w *bidiStreamWrapper{{ $.Service }}{{ .Name }}) Send(m *{{ .Response }}) error {
 	start := time.Now()
-	span := w.ctx.Trace(w.method + "/Send")
-	defer span.End()
+	stepCtx, endSpan := w.traceStep("/Send")
+	defer endSpan()
 
 	err := w.ServerStream.SendMsg(m)
 
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	logger.DocumentRPCLog(stepCtx, w.ctx.Logger(), w.ctx.Metrics(), start, err,
 	w.method+"/Send", "app_gRPC-Stream_stats")
 
 	return err
@@ -189,31 +199,17 @@ func (w *bidiStreamWrapper{{ $.Service }}{{ .Name }}) Send(m *{{ .Response }}) e
 
 func (w *bidiStreamWrapper{{ $.Service }}{{ .Name }}) Recv() (*{{ .Request }}, error) {
 	start := time.Now()
-	span := w.ctx.Trace(w.method + "/Recv")
-	defer span.End()
+	stepCtx, endSpan := w.traceStep("/Recv")
+	defer endSpan()
 
 	var req {{ .Request }}
 	err := w.ServerStream.RecvMsg(&req)
 
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	logger.DocumentRPCLog(stepCtx, w.ctx.Logger(), w.ctx.Metrics(), start, err,
 	w.method+"/Recv", "app_gRPC-Stream_stats")
 
 	return &req, err
-}
-
-func (w *bidiStreamWrapper{{ $.Service }}{{ .Name }}) CloseSend() error {
-	start := time.Now()
-	span := w.ctx.Trace(w.method + "/CloseSend")
-	defer span.End()
-
-	err := w.ServerStream.(grpc.ClientStream).CloseSend()
-
-	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
-		w.method+"/CloseSend", "app_gRPC-Stream_stats")
-
-	return err
 }
 {{- end }}
 {{- end }}
@@ -308,7 +304,9 @@ func Register{{ .Service }}ServerWithPi(app *pi.App, srv {{ .Service }}ServerWit
 // getPiContext creates Pi context
 func (h *{{ .Service }}ServerWrapper) getPiContext(ctx context.Context, req pi.Request) *pi.Context {
 	c := h.app.NewContext(ctx)
-	c.Request = req
+	if req != nil {
+		c.Request = req
+	}
 	return c
 }
 `
@@ -407,6 +405,10 @@ func (s *{{ $.Service }}PiServer) {{ .Name }}(ctx *pi.Context) (any, error) {
 package {{ .Package }}
 
 import (
+{{- if .Methods }}
+	"context"
+{{- end }}
+
 	"github.com/sllt/pi/pkg/pi"
 	"github.com/sllt/pi/pkg/pi/metrics"
 	"google.golang.org/grpc"
@@ -435,15 +437,10 @@ type {{ .Service }}ClientWrapper struct {
 func New{{ .Service }}PiClient(host string, metrics metrics.Manager, dialOptions ...grpc.DialOption) ({{ .Service }}PiClient, error) {
 	conn, err := createGRPCConn(host, "{{ .Service }}", dialOptions...)
 	if err != nil {
-		return &{{ .Service }}ClientWrapper{
-			client:       nil,
-			HealthClient: &HealthClientWrapper{client: nil},
-		}, err
+		return nil, err
 	}
 
-	metricsOnce.Do(func() {
-		metrics.NewHistogram("app_gRPC-Client_stats", "Response time of gRPC client in milliseconds.", gRPCBuckets...)
-	})
+	registerClientMetrics(metrics)
 
 	res := New{{ .Service }}Client(conn)
 	healthClient := NewHealthClient(conn)
@@ -458,8 +455,8 @@ func New{{ .Service }}PiClient(host string, metrics metrics.Manager, dialOptions
 {{- if and .StreamsResponse (not .StreamsRequest) }}
 func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *pi.Context, req *{{ .Request }},
 	opts ...grpc.CallOption) (grpc.ServerStreamingClient[{{ .Response }}], error) {
-	result, err := invokeRPC(ctx, "/{{ $.FullService }}/{{ .Name }}", func() (interface{}, error) {
-		return h.client.{{ .Name }}(ctx.Context, req, opts...)
+	result, err := invokeRPC(ctx, "/{{ $.FullService }}/{{ .Name }}", func(rpcCtx context.Context) (interface{}, error) {
+		return h.client.{{ .Name }}(rpcCtx, req, opts...)
 	}, "app_gRPC-Stream_stats")
 
 	if err != nil {
@@ -470,8 +467,8 @@ func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *pi.Context, req *{{ .Req
 {{- else if and .StreamsRequest (not .StreamsResponse) }}
 func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *pi.Context,
 	opts ...grpc.CallOption) (grpc.ClientStreamingClient[{{ .Request }}, {{ .Response }}], error) {
-	result, err := invokeRPC(ctx, "/{{ $.FullService }}/{{ .Name }}", func() (interface{}, error) {
-		return h.client.{{ .Name }}(ctx.Context, opts...)
+	result, err := invokeRPC(ctx, "/{{ $.FullService }}/{{ .Name }}", func(rpcCtx context.Context) (interface{}, error) {
+		return h.client.{{ .Name }}(rpcCtx, opts...)
 	}, "app_gRPC-Stream_stats")
 
 	if err != nil {
@@ -482,8 +479,8 @@ func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *pi.Context,
 {{- else if and .StreamsRequest .StreamsResponse }}
 func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *pi.Context,
 	opts ...grpc.CallOption) (grpc.BidiStreamingClient[{{ .Request }}, {{ .Response }}], error) {
-	result, err := invokeRPC(ctx, "/{{ $.FullService }}/{{ .Name }}", func() (interface{}, error) {
-		return h.client.{{ .Name }}(ctx.Context, opts...)
+	result, err := invokeRPC(ctx, "/{{ $.FullService }}/{{ .Name }}", func(rpcCtx context.Context) (interface{}, error) {
+		return h.client.{{ .Name }}(rpcCtx, opts...)
 	}, "app_gRPC-Stream_stats")
 
 	if err != nil {
@@ -494,8 +491,8 @@ func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *pi.Context,
 {{- else }}
 func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *pi.Context, req *{{ .Request }},
 	opts ...grpc.CallOption) (*{{ .Response }}, error) {
-	result, err := invokeRPC(ctx, "/{{ $.FullService }}/{{ .Name }}", func() (interface{}, error) {
-		return h.client.{{ .Name }}(ctx.Context, req, opts...)
+	result, err := invokeRPC(ctx, "/{{ $.FullService }}/{{ .Name }}", func(rpcCtx context.Context) (interface{}, error) {
+		return h.client.{{ .Name }}(rpcCtx, req, opts...)
 	}, "app_gRPC-Client_stats")
 
 	if err != nil {
@@ -516,6 +513,7 @@ func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *pi.Context, req *{{ .Req
 package {{ .Package }}
 
 import (
+	"context"
 	"fmt"
 	"google.golang.org/grpc"
 	"time"
@@ -539,56 +537,72 @@ func registerServerWithPi(app *pi.App, srv any, registerFunc func(grpc.ServiceRe
     registerFunc(app, srv)
 }
 
+func traceHealthRPC(ctx *pi.Context, name string) (context.Context, func()) {
+	baseCtx := context.Background()
+	if ctx != nil && ctx.Context != nil {
+		baseCtx = ctx.Context
+	}
+	rpcCtx, span := ctx.TracerProvider().Tracer("pi-context").Start(baseCtx, name)
+	return rpcCtx, func() { span.End() }
+}
+
+func healthServiceName(req *healthpb.HealthCheckRequest) string {
+	if req == nil {
+		return ""
+	}
+	return req.Service
+}
+
 func (h *healthServer) Check(ctx *pi.Context, req *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {
 	start := time.Now()
-	span := ctx.Trace("/grpc.health.v1.Health/Check")
-	res, err := h.Server.Check(ctx.Context, req)
+	rpcCtx, endSpan := traceHealthRPC(ctx, "/grpc.health.v1.Health/Check")
+	res, err := h.Server.Check(rpcCtx, req)
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(ctx.Context, ctx.Logger, ctx.Metrics(), start, err,
-	fmt.Sprintf("/grpc.health.v1.Health/Check	Service: %q", req.Service), "app_gRPC-Server_stats")
-	span.End()
+	logger.DocumentRPCLog(rpcCtx, ctx.Logger(), ctx.Metrics(), start, err,
+	fmt.Sprintf("/grpc.health.v1.Health/Check	Service: %q", healthServiceName(req)), "app_gRPC-Server_stats")
+	endSpan()
 	return res, err
 }
 
 func (h *healthServer) Watch(ctx *pi.Context, in *healthpb.HealthCheckRequest, stream healthpb.Health_WatchServer) error {
 	start := time.Now()
-	span := ctx.Trace("/grpc.health.v1.Health/Watch")
+	rpcCtx, endSpan := traceHealthRPC(ctx, "/grpc.health.v1.Health/Watch")
 	err := h.Server.Watch(in, stream)
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(ctx.Context, ctx.Logger, ctx.Metrics(), start, err,
-	fmt.Sprintf("/grpc.health.v1.Health/Watch	Service: %q", in.Service), "app_gRPC-Server_stats")
-	span.End()
+	logger.DocumentRPCLog(rpcCtx, ctx.Logger(), ctx.Metrics(), start, err,
+	fmt.Sprintf("/grpc.health.v1.Health/Watch	Service: %q", healthServiceName(in)), "app_gRPC-Server_stats")
+	endSpan()
 	return err
 }
 
 func (h *healthServer) SetServingStatus(ctx *pi.Context, service string, servingStatus healthpb.HealthCheckResponse_ServingStatus) {
 	start := time.Now()
-	span := ctx.Trace("/grpc.health.v1.Health/SetServingStatus")
+	rpcCtx, endSpan := traceHealthRPC(ctx, "/grpc.health.v1.Health/SetServingStatus")
 	h.Server.SetServingStatus(service, servingStatus)
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(ctx.Context, ctx.Logger, ctx.Metrics(), start, nil,
+	logger.DocumentRPCLog(rpcCtx, ctx.Logger(), ctx.Metrics(), start, nil,
 	fmt.Sprintf("/grpc.health.v1.Health/SetServingStatus	Service: %q", service), "app_gRPC-Server_stats")
-	span.End()
+	endSpan()
 }
 
 func (h *healthServer) Shutdown(ctx *pi.Context) {
 	start := time.Now()
-	span := ctx.Trace("/grpc.health.v1.Health/Shutdown")
+	rpcCtx, endSpan := traceHealthRPC(ctx, "/grpc.health.v1.Health/Shutdown")
 	h.Server.Shutdown()
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(ctx.Context, ctx.Logger, ctx.Metrics(), start, nil,
+	logger.DocumentRPCLog(rpcCtx, ctx.Logger(), ctx.Metrics(), start, nil,
 	"/grpc.health.v1.Health/Shutdown", "app_gRPC-Server_stats")
-	span.End()
+	endSpan()
 }
 
 func (h *healthServer) Resume(ctx *pi.Context) {
 	start := time.Now()
-	span := ctx.Trace("/grpc.health.v1.Health/Resume")
+	rpcCtx, endSpan := traceHealthRPC(ctx, "/grpc.health.v1.Health/Resume")
 	h.Server.Resume()
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(ctx.Context, ctx.Logger, ctx.Metrics(), start, nil,
+	logger.DocumentRPCLog(rpcCtx, ctx.Logger(), ctx.Metrics(), start, nil,
 	"/grpc.health.v1.Health/Resume", "app_gRPC-Server_stats")
-	span.End()
+	endSpan()
 }
 `
 )
@@ -604,11 +618,14 @@ var clientHealthTemplate = `// Code generated by pi-cli. DO NOT EDIT.
 package {{ .Package }}
 
 import (
+	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
 	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -618,9 +635,31 @@ import (
 )
 
 var (
-	metricsOnce sync.Once
-	gRPCBuckets = []float64{0.005, 0.01, .05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+	registeredMetrics sync.Map
+	gRPCBuckets       = []float64{0.005, 0.01, .05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
 )
+
+func registerClientMetrics(m metrics.Manager) {
+	if m == nil {
+		return
+	}
+	if rt := reflect.TypeOf(m); rt == nil || (rt.Kind() == reflect.Ptr && reflect.ValueOf(m).IsNil()) {
+		return
+	} else if rt.Comparable() {
+		if _, loaded := registeredMetrics.LoadOrStore(m, struct{}{}); loaded {
+			return
+		}
+	}
+	m.NewHistogram("app_gRPC-Client_stats", "Response time of gRPC client in milliseconds.", gRPCBuckets...)
+	m.NewHistogram("app_gRPC-Stream_stats", "Response time of gRPC client stream in milliseconds.", gRPCBuckets...)
+}
+
+func healthServiceName(req *grpc_health_v1.HealthCheckRequest) string {
+	if req == nil {
+		return ""
+	}
+	return req.Service
+}
 
 type HealthClient interface {
 	Check(ctx *pi.Context, in *grpc_health_v1.HealthCheckRequest, opts ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error)
@@ -656,28 +695,38 @@ func createGRPCConn(host string, serviceName string, dialOptions ...grpc.DialOpt
 	return conn, nil
 }
 
-func invokeRPC(ctx *pi.Context, rpcName string, rpcFunc func() (interface{}, error), metricName string) (interface{}, error) {
-	span := ctx.Trace("gRPC-srv-call: " + rpcName)
+func invokeRPC(ctx *pi.Context, rpcName string, rpcFunc func(context.Context) (interface{}, error), metricName string) (interface{}, error) {
+	baseCtx := context.Background()
+	if ctx != nil && ctx.Context != nil {
+		baseCtx = ctx.Context
+	}
+	rpcCtx, span := ctx.TracerProvider().Tracer("pi-context").Start(baseCtx, "gRPC-srv-call: "+rpcName)
 	defer span.End()
 
 	traceID := span.SpanContext().TraceID().String()
 	spanID := span.SpanContext().SpanID().String()
-	md := metadata.Pairs("x-kite-traceid", traceID, "x-kite-spanid", spanID)
-
-	ctx.Context = metadata.NewOutgoingContext(ctx.Context, md)
+	md := metadata.Pairs("x-pi-traceid", traceID, "x-pi-spanid", spanID, "x-kite-traceid", traceID, "x-kite-spanid", spanID)
+	if existing, ok := metadata.FromOutgoingContext(rpcCtx); ok {
+		merged := existing.Copy()
+		for k, v := range md {
+			merged[k] = v
+		}
+		md = merged
+	}
+	rpcCtx = metadata.NewOutgoingContext(rpcCtx, md)
 	transactionStartTime := time.Now()
 
-	res, err := rpcFunc()
+	res, err := rpcFunc(rpcCtx)
 	logger := piGRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(ctx.Context, ctx.Logger, ctx.Metrics(), transactionStartTime, err, rpcName, metricName)
+	logger.DocumentRPCLog(rpcCtx, ctx.Logger(), ctx.Metrics(), transactionStartTime, err, rpcName, metricName)
 
 	return res, err
 }
 
 func (h *HealthClientWrapper) Check(ctx *pi.Context, in *grpc_health_v1.HealthCheckRequest,
 	opts ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-	result, err := invokeRPC(ctx, fmt.Sprintf("/grpc.health.v1.Health/Check	Service: %q", in.Service), func() (interface{}, error) {
-		return h.client.Check(ctx, in, opts...)
+	result, err := invokeRPC(ctx, fmt.Sprintf("/grpc.health.v1.Health/Check	Service: %q", healthServiceName(in)), func(rpcCtx context.Context) (interface{}, error) {
+		return h.client.Check(rpcCtx, in, opts...)
 	}, "app_gRPC-Client_stats")
 
 	if err != nil {
@@ -688,8 +737,8 @@ func (h *HealthClientWrapper) Check(ctx *pi.Context, in *grpc_health_v1.HealthCh
 
 func (h *HealthClientWrapper) Watch(ctx *pi.Context, in *grpc_health_v1.HealthCheckRequest,
 	opts ...grpc.CallOption) (grpc.ServerStreamingClient[grpc_health_v1.HealthCheckResponse], error) {
-	result, err := invokeRPC(ctx, fmt.Sprintf("/grpc.health.v1.Health/Watch	Service: %q", in.Service), func() (interface{}, error) {
-		return h.client.Watch(ctx, in, opts...)
+	result, err := invokeRPC(ctx, fmt.Sprintf("/grpc.health.v1.Health/Watch	Service: %q", healthServiceName(in)), func(rpcCtx context.Context) (interface{}, error) {
+		return h.client.Watch(rpcCtx, in, opts...)
 	}, "app_gRPC-Stream_stats")
 
 	if err != nil {

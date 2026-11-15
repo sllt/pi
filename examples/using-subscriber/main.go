@@ -25,12 +25,12 @@ func productHandler(c *pi.Context) error {
 
 	err := c.Bind(&productInfo)
 	if err != nil {
-		c.Logger.Error(err)
+		c.Error(err)
 
 		return nil
 	}
 
-	c.Logger.Info("Received product", productInfo)
+	c.Info("Received product", productInfo)
 
 	return nil
 }
@@ -43,12 +43,12 @@ func orderHandler(c *pi.Context) error {
 
 	err := c.Bind(&orderStatus)
 	if err != nil {
-		c.Logger.Error(err)
+		c.Error(err)
 
 		return nil
 	}
 
-	c.Logger.Info("Received order", orderStatus)
+	c.Info("Received order", orderStatus)
 
 	return nil
 }

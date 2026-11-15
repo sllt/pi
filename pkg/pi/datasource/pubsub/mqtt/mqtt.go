@@ -3,12 +3,15 @@ package mqtt
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/sllt/pi/pkg/pi/datasource"
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
@@ -146,6 +149,89 @@ func New(config *Config, logger Logger, metrics Metrics) *MQTT {
 	}
 }
 
+// ValidateConfig validates MQTT configuration strictly (forbidding implicit fallback to public brokers).
+func ValidateConfig(cfg *Config) error {
+	if cfg == nil || strings.TrimSpace(cfg.Hostname) == "" {
+		return errors.New("mqtt: MQTT_HOST is required")
+	}
+	if cfg.Port <= 0 || cfg.Port > 65535 {
+		return fmt.Errorf("mqtt: invalid MQTT_PORT %d: must be 1..65535", cfg.Port)
+	}
+	if cfg.QoS > 2 {
+		return fmt.Errorf("mqtt: invalid MQTT_QOS %d: must be 0, 1, or 2", cfg.QoS)
+	}
+	return nil
+}
+
+// OpenContext opens and verifies an MQTT client bounded by ctx without public-broker fallback or retryConnect goroutines.
+func OpenContext(ctx context.Context, cfg *Config, logger Logger, metrics Metrics, tp trace.TracerProvider) (pubsub.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := ValidateConfig(cfg); err != nil {
+		return nil, err
+	}
+	if logger == nil {
+		logger = nopMQTTLogger{}
+	}
+	if metrics == nil {
+		metrics = nopMQTTMetrics{}
+	}
+	var tracer trace.Tracer
+	if tp != nil {
+		tracer = tp.Tracer("pi")
+	} else {
+		tracer = noop.NewTracerProvider().Tracer("pi")
+	}
+
+	cfgCopy := *cfg
+	options := getMQTTClientOptions(&cfgCopy)
+	subs := make(map[string]subscription)
+	mu := new(sync.RWMutex)
+	options.SetOnConnectHandler(createReconnectHandler(mu, &cfgCopy, subs, logger))
+	options.SetConnectionLostHandler(createConnectionLostHandler(logger))
+	options.SetReconnectingHandler(createReconnectingHandler(logger, &cfgCopy))
+
+	client := mqtt.NewClient(options)
+	token := client.Connect()
+	select {
+	case <-token.Done():
+		if err := token.Error(); err != nil {
+			client.Disconnect(0)
+			return nil, fmt.Errorf("mqtt: connect %s:%d: %w", cfgCopy.Hostname, cfgCopy.Port, err)
+		}
+	case <-ctx.Done():
+		client.Disconnect(0)
+		return nil, fmt.Errorf("mqtt: connect %s:%d: %w", cfgCopy.Hostname, cfgCopy.Port, ctx.Err())
+	}
+
+	return &MQTT{
+		Client:        client,
+		config:        &cfgCopy,
+		logger:        logger,
+		subscriptions: subs,
+		mu:            mu,
+		metrics:       metrics,
+		stopCh:        make(chan struct{}),
+		tracer:        tracer,
+	}, nil
+}
+
+type nopMQTTLogger struct{}
+
+func (nopMQTTLogger) Infof(string, ...any)  {}
+func (nopMQTTLogger) Debug(...any)          {}
+func (nopMQTTLogger) Debugf(string, ...any) {}
+func (nopMQTTLogger) Warnf(string, ...any)  {}
+func (nopMQTTLogger) Errorf(string, ...any) {}
+
+type nopMQTTMetrics struct{}
+
+func (nopMQTTMetrics) IncrementCounter(context.Context, string, ...string) {}
+
 func (m *MQTT) Subscribe(ctx context.Context, topic string) (*pubsub.Message, error) {
 	if !m.Client.IsConnected() {
 		timer := time.NewTimer(defaultRetryTimeout)
@@ -271,19 +357,29 @@ func (m *MQTT) Health() datasource.Health {
 		Status: "DOWN",
 		Details: map[string]any{
 			"backend": "MQTT",
-			"host":    m.config.Hostname,
 		},
 	}
 
+	if m == nil {
+		return res
+	}
+	if m.config != nil {
+		res.Details["host"] = m.config.Hostname
+	}
+
 	if m.Client == nil {
-		m.logger.Errorf("%v", "datasource not initialized")
+		if m.logger != nil {
+			m.logger.Errorf("%v", "datasource not initialized")
+		}
 
 		return res
 	}
 
 	err := m.Ping()
 	if err != nil {
-		m.logger.Errorf("%v", "health check failed")
+		if m.logger != nil {
+			m.logger.Errorf("%v", "health check failed")
+		}
 
 		return res
 	}

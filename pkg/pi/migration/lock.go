@@ -10,8 +10,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"modernc.org/sqlite"
-
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 const (
@@ -44,7 +42,7 @@ return 0
 
 type releaseFunc func(context.Context) error
 
-func acquireMigrationLock(ctx context.Context, c *infra.Container, options Options) (releaseFunc, error) {
+func acquireMigrationLock(ctx context.Context, deps *Deps, options Options) (releaseFunc, error) {
 	if options.Lock != LockEnabled {
 		return nil, nil
 	}
@@ -52,39 +50,39 @@ func acquireMigrationLock(ctx context.Context, c *infra.Container, options Optio
 		return nil, fmt.Errorf("%w: lock TTL must be greater than zero", ErrInvalidOption)
 	}
 
-	if c == nil {
+	if deps == nil {
 		return nil, fmt.Errorf("%w: no datasource available for migration lock", ErrMigrationLockUnavailable)
 	}
 
-	if !isNil(c.SQL) {
-		return acquireSQLMigrationLock(ctx, c, options.LockTTL)
+	if !isNil(deps.SQL) {
+		return acquireSQLMigrationLock(ctx, deps, options.LockTTL)
 	}
 
-	if !isNil(c.Redis) {
-		return acquireRedisMigrationLock(ctx, c, options.LockTTL)
+	if !isNil(deps.Redis) {
+		return acquireRedisMigrationLock(ctx, deps, options.LockTTL)
 	}
 
 	return nil, fmt.Errorf("%w: no supported datasource available for migration lock", ErrMigrationLockUnavailable)
 }
 
-func acquireSQLMigrationLock(ctx context.Context, c *infra.Container, ttl time.Duration) (releaseFunc, error) {
-	insertQuery, updateQuery, deleteQuery, err := sqlMigrationLockQueries(c.SQL.Dialect())
+func acquireSQLMigrationLock(ctx context.Context, deps *Deps, ttl time.Duration) (releaseFunc, error) {
+	insertQuery, updateQuery, deleteQuery, err := sqlMigrationLockQueries(deps.SQL.Dialect())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrMigrationLockUnavailable, err)
 	}
 
-	if _, err := c.SQL.ExecContext(ctx, createSQLMigrationLocksTable); err != nil {
+	if _, err := deps.SQL.ExecContext(ctx, createSQLMigrationLocksTable); err != nil {
 		return nil, fmt.Errorf("%w: create SQL migration lock table: %w", ErrMigrationLockUnavailable, err)
 	}
 
 	now := time.Now().UTC()
 	owner := newMigrationLockOwner(now)
 	expiresAt := now.Add(ttl)
-	if _, err := c.SQL.ExecContext(ctx, insertQuery, migrationLockName, owner, expiresAt, now, now); err != nil {
+	if _, err := deps.SQL.ExecContext(ctx, insertQuery, migrationLockName, owner, expiresAt, now, now); err != nil {
 		if !isDuplicateLock(err) {
 			return nil, fmt.Errorf("%w: insert SQL migration lock: %w", ErrMigrationLockUnavailable, err)
 		}
-		result, updateErr := c.SQL.ExecContext(ctx, updateQuery, owner, expiresAt, now, migrationLockName, now)
+		result, updateErr := deps.SQL.ExecContext(ctx, updateQuery, owner, expiresAt, now, migrationLockName, now)
 		if updateErr != nil {
 			return nil, fmt.Errorf(
 				"%w: acquire SQL migration lock: %v; update expired lock: %w",
@@ -108,7 +106,7 @@ func acquireSQLMigrationLock(ctx context.Context, c *infra.Container, ttl time.D
 			releaseCtx = context.Background()
 		}
 
-		_, err := c.SQL.ExecContext(releaseCtx, deleteQuery, migrationLockName, owner)
+		_, err := deps.SQL.ExecContext(releaseCtx, deleteQuery, migrationLockName, owner)
 		if err != nil {
 			return fmt.Errorf("release SQL migration lock: %w", err)
 		}
@@ -129,11 +127,11 @@ func sqlMigrationLockQueries(dialect string) (insertQuery, updateQuery, deleteQu
 	return insertSQLMigrationLockMySQL, updateSQLMigrationLockMySQL, deleteSQLMigrationLockMySQL, nil
 }
 
-func acquireRedisMigrationLock(ctx context.Context, c *infra.Container, ttl time.Duration) (releaseFunc, error) {
+func acquireRedisMigrationLock(ctx context.Context, deps *Deps, ttl time.Duration) (releaseFunc, error) {
 	now := time.Now().UTC()
 	owner := newMigrationLockOwner(now)
 
-	acquired, err := c.Redis.SetNX(ctx, migrationRedisKey, owner, ttl).Result()
+	acquired, err := deps.Redis.SetNX(ctx, migrationRedisKey, owner, ttl).Result()
 	if err != nil {
 		return nil, fmt.Errorf("%w: acquire Redis migration lock: %w", ErrMigrationLockUnavailable, err)
 	}
@@ -146,7 +144,7 @@ func acquireRedisMigrationLock(ctx context.Context, c *infra.Container, ttl time
 			releaseCtx = context.Background()
 		}
 
-		if err := c.Redis.Eval(releaseCtx, releaseRedisMigrationLockScript, []string{migrationRedisKey}, owner).Err(); err != nil {
+		if err := deps.Redis.Eval(releaseCtx, releaseRedisMigrationLockScript, []string{migrationRedisKey}, owner).Err(); err != nil {
 			return fmt.Errorf("release Redis migration lock: %w", err)
 		}
 

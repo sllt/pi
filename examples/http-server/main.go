@@ -47,7 +47,7 @@ func ErrorHandler(c *pi.Context) (any, error) {
 }
 
 func RedisHandler(c *pi.Context) (any, error) {
-	val, err := c.Redis.Get(c, "test").Result()
+	val, err := c.Redis().Get(c, "test").Result()
 	if err != nil && err != redis.Nil { // If key is not found, we are not considering this an error and returning "".
 		return nil, datasource.ErrorDB{Err: err, Message: "error from redis db"}
 	}
@@ -69,7 +69,7 @@ func TraceHandler(c *pi.Context) (any, error) {
 
 	for i := 0; i < count; i++ {
 		go func() {
-			c.Redis.Ping(c)
+			c.Redis().Ping(c)
 			wg.Done()
 		}()
 	}
@@ -101,7 +101,7 @@ func TraceHandler(c *pi.Context) (any, error) {
 
 func MysqlHandler(c *pi.Context) (any, error) {
 	var value int
-	err := c.SQL.QueryRowContext(c, "select 2+2").Scan(&value)
+	err := c.SQL().QueryRowContext(c, "select 2+2").Scan(&value)
 	if err != nil {
 		return nil, datasource.ErrorDB{Err: err, Message: "error from sql db"}
 	}

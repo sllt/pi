@@ -9,8 +9,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 const (
@@ -43,28 +41,20 @@ func Test_NewAPIKeyAuthProvider(t *testing.T) {
 }
 
 func Test_NewAPIKeyAuthProviderWithValidateFunc(t *testing.T) {
-	validateFunc := func(_ *infra.Container, _ string) bool {
+	validateFunc := func(_ *http.Request, _ string) bool {
 		return true
 	}
-	c := infra.Container{}
-	provider := APIKeyAuthProvider{
-		ValidateFuncWithDatasources: validateFunc,
-		Container:                   &c,
-	}
 	testCases := []struct {
-		validateFunc func(*infra.Container, string) bool
-		container    *infra.Container
-		provider     AuthProvider
+		validateFunc func(*http.Request, string) bool
 		err          error
 	}{
-		{err: errContainerNil},
-		{validateFunc: validateFunc, err: errContainerNil},
-		{validateFunc: validateFunc, container: &c, provider: &provider},
+		{err: errValidateFuncEmpty},
+		{validateFunc: validateFunc},
 	}
 
 	for i, tc := range testCases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			authProvider, err := NewAPIKeyAuthProviderWithValidateFunc(tc.container, tc.validateFunc)
+			authProvider, err := NewAPIKeyAuthProviderWithValidateFunc(tc.validateFunc)
 			assert.Equal(t, tc.err, err)
 
 			if err != nil {
@@ -73,10 +63,7 @@ func Test_NewAPIKeyAuthProviderWithValidateFunc(t *testing.T) {
 
 			apiAuthProvider, ok := authProvider.(*APIKeyAuthProvider)
 			require.True(t, ok)
-			expected, ok := tc.provider.(*APIKeyAuthProvider)
-			require.True(t, ok)
-			assert.Equal(t, expected.Container, apiAuthProvider.Container)
-			assert.NotNil(t, apiAuthProvider.ValidateFuncWithDatasources)
+			assert.NotNil(t, apiAuthProvider.ValidateFuncWithRequest)
 			assert.Nil(t, apiAuthProvider.ValidateFunc)
 			assert.Empty(t, apiAuthProvider.APIKeys)
 		})
@@ -119,35 +106,38 @@ func Test_validateAPIKey(t *testing.T) {
 		return false
 	}
 
-	validateFuncDataSourcesPass := func(_ *infra.Container, _ string) bool {
-		return true
+	validateFuncReqPass := func(r *http.Request, _ string) bool {
+		return r != nil && r.Header.Get("X-Tenant") == "acme"
 	}
-	validateFuncDataSourcesFail := func(_ *infra.Container, _ string) bool {
+	validateFuncReqFail := func(_ *http.Request, _ string) bool {
 		return false
 	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.Header.Set("X-Tenant", "acme")
 
 	apiKeys := []string{validKey1, validKey2}
 
 	testCases := []struct {
-		validateFuncDS func(*infra.Container, string) bool // 3 possible values
-		validateFunc   func(string) bool                   // 3 possible values
-		apiKeys        []string                            // 2 possible values
-		apiKey         string                              // 2 possible values
-		result         bool
+		validateFuncReq func(*http.Request, string) bool
+		validateFunc    func(string) bool
+		apiKeys         []string
+		apiKey          string
+		result          bool
 	}{
-		{validateFuncDS: validateFuncDataSourcesPass, validateFunc: validateFuncFail, apiKeys: apiKeys, apiKey: validKey1, result: true},
-		{validateFuncDS: validateFuncDataSourcesPass, validateFunc: validateFuncFail, apiKey: validKey1, result: true},
-		{validateFuncDS: validateFuncDataSourcesPass, validateFunc: validateFuncSuccess, apiKeys: apiKeys, apiKey: validKey1, result: true},
-		{validateFuncDS: validateFuncDataSourcesPass, validateFunc: validateFuncSuccess, apiKey: validKey1, result: true},
-		{validateFuncDS: validateFuncDataSourcesPass, apiKeys: apiKeys, apiKey: validKey1, result: true},
-		{validateFuncDS: validateFuncDataSourcesPass, apiKey: validKey1, result: true},
+		{validateFuncReq: validateFuncReqPass, validateFunc: validateFuncFail, apiKeys: apiKeys, apiKey: validKey1, result: true},
+		{validateFuncReq: validateFuncReqPass, validateFunc: validateFuncFail, apiKey: validKey1, result: true},
+		{validateFuncReq: validateFuncReqPass, validateFunc: validateFuncSuccess, apiKeys: apiKeys, apiKey: validKey1, result: true},
+		{validateFuncReq: validateFuncReqPass, validateFunc: validateFuncSuccess, apiKey: validKey1, result: true},
+		{validateFuncReq: validateFuncReqPass, apiKeys: apiKeys, apiKey: validKey1, result: true},
+		{validateFuncReq: validateFuncReqPass, apiKey: validKey1, result: true},
 
-		{validateFuncDS: validateFuncDataSourcesFail, validateFunc: validateFuncFail, apiKeys: apiKeys, apiKey: validKey1, result: false},
-		{validateFuncDS: validateFuncDataSourcesFail, validateFunc: validateFuncFail, apiKey: validKey1, result: false},
-		{validateFuncDS: validateFuncDataSourcesFail, validateFunc: validateFuncSuccess, apiKeys: apiKeys, apiKey: validKey1, result: false},
-		{validateFuncDS: validateFuncDataSourcesFail, validateFunc: validateFuncSuccess, apiKey: validKey1, result: false},
-		{validateFuncDS: validateFuncDataSourcesFail, apiKeys: apiKeys, apiKey: validKey1, result: false},
-		{validateFuncDS: validateFuncDataSourcesFail, apiKey: validKey1, result: false},
+		{validateFuncReq: validateFuncReqFail, validateFunc: validateFuncFail, apiKeys: apiKeys, apiKey: validKey1, result: false},
+		{validateFuncReq: validateFuncReqFail, validateFunc: validateFuncFail, apiKey: validKey1, result: false},
+		{validateFuncReq: validateFuncReqFail, validateFunc: validateFuncSuccess, apiKeys: apiKeys, apiKey: validKey1, result: false},
+		{validateFuncReq: validateFuncReqFail, validateFunc: validateFuncSuccess, apiKey: validKey1, result: false},
+		{validateFuncReq: validateFuncReqFail, apiKeys: apiKeys, apiKey: validKey1, result: false},
+		{validateFuncReq: validateFuncReqFail, apiKey: validKey1, result: false},
 
 		{validateFunc: validateFuncSuccess, apiKeys: apiKeys, apiKey: validKey1, result: true},
 		{validateFunc: validateFuncFail, apiKeys: apiKeys, apiKey: validKey1, result: false},
@@ -162,11 +152,11 @@ func Test_validateAPIKey(t *testing.T) {
 	for i, tc := range testCases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			authProvider := APIKeyAuthProvider{
-				ValidateFunc:                tc.validateFunc,
-				ValidateFuncWithDatasources: tc.validateFuncDS,
-				APIKeys:                     tc.apiKeys,
+				ValidateFunc:            tc.validateFunc,
+				ValidateFuncWithRequest: tc.validateFuncReq,
+				APIKeys:                 tc.apiKeys,
 			}
-			result := authProvider.validateAPIKey(tc.apiKey)
+			result := authProvider.validateAPIKey(req, tc.apiKey)
 			assert.Equal(t, tc.result, result)
 		})
 	}

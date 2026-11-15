@@ -41,6 +41,9 @@ func OpenContextWithTracerProvider(
 	if configs == nil || logger == nil {
 		return nil, fmt.Errorf("sql: config and logger are required")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

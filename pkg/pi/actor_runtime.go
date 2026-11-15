@@ -1016,13 +1016,10 @@ func (a *App) startActorRuntime(startupCtx context.Context) error {
 	}
 
 	rawAppName := "app"
-	var logger logging.Logger
-	if a.container != nil {
-		if name := a.container.GetAppName(); name != "" {
-			rawAppName = name
-		}
-		logger = a.container.Logger
+	if name := a.AppName(); name != "" {
+		rawAppName = name
 	}
+	logger := a.safeLogger()
 	nodeName := sanitizeActorSegment("pi-app", actorNodeSeq.Add(1), rawAppName)
 
 	node, err := actor.NewNode(actor.NodeOptions{

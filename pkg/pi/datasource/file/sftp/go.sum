@@ -24,8 +24,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH
 github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
 github.com/rogpeppe/go-internal v1.13.1 h1:KvO1DLK/DRN07sQ1LQKScxyZJuNnedQ5/wKSR38lUII=
 github.com/rogpeppe/go-internal v1.13.1/go.mod h1:uMEvuHeurkdAXX61udpOXGD/AzZDWNMNyH2VO9fmH0o=
-github.com/sllt/pi v0.3.1 h1:Ds5d3vSGEfItOMmfyGd+Had3kCfr2UEiZZGbZrP9uyA=
-github.com/sllt/pi v0.3.1/go.mod h1:XVyCvOkNWxN3e64ZvABuB6oBT6lcguILgRlta0I0kQE=
+github.com/sllt/pi v0.5.0 h1:HOvffmthDnfHO7O+bsx9xEP+3dQ/7IRDmhAlLb2nX48=
+github.com/sllt/pi v0.5.0/go.mod h1:WJ27DwbKDkCfzs8qKhEDTeAmVSvZG9hJYJJr5Puyp/M=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 go.opentelemetry.io/otel v1.39.0 h1:8yPrr/S0ND9QEfTfdP9V+SiwT4E0G7Y5MO7p85nis48=

@@ -10,13 +10,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/sllt/pi/pkg/pi/config"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
@@ -36,29 +34,17 @@ func (n *nonExitingMockLogger) Fatalf(format string, args ...any) {
 	n.MockLogger.Errorf(format, args...)
 }
 
-// setupGRPCMetricExpectations sets up mock expectations for gRPC metrics.
-func setupGRPCMetricExpectations(mockMetrics *infra.MockMetrics) {
-	mockMetrics.EXPECT().NewGauge("grpc_server_status", "gRPC server status (1=running, 0=stopped)").AnyTimes()
-	mockMetrics.EXPECT().NewCounter("grpc_server_errors_total", "Total gRPC server errors").AnyTimes()
-	mockMetrics.EXPECT().NewCounter("grpc_services_registered_total", "Total gRPC services registered").AnyTimes()
-	mockMetrics.EXPECT().SetGauge("grpc_server_status", gomock.Any()).AnyTimes()
-	mockMetrics.EXPECT().IncrementCounter(gomock.Any(), "grpc_server_errors_total").AnyTimes()
-	mockMetrics.EXPECT().IncrementCounter(gomock.Any(), "grpc_services_registered_total").AnyTimes()
-	mockMetrics.EXPECT().RecordHistogram(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-}
-
-// setupTestGRPCServer creates a mock container and gRPC server for testing.
-func setupTestGRPCServer(t *testing.T, port int, enableReflection bool) (*infra.Container, *infra.Mocks, *grpcServer) {
+// setupTestGRPCServer creates a test runtime kernel and gRPC server for testing.
+func setupTestGRPCServer(t *testing.T, port int, enableReflection bool) (*runtimeKernel, *grpcServer) {
 	t.Helper()
 
-	c, mocks := infra.NewMockContainer(t)
-	setupGRPCMetricExpectations(mocks.Metrics)
+	c := newTestKernel(logging.NewLogger(logging.DEBUG))
 
 	cfg := createMockGRPCConfig(t, port, enableReflection)
 	g, err := newGRPCServer(c, port, cfg)
 	require.NoError(t, err)
 
-	return c, mocks, g
+	return c, g
 }
 
 // createTestInterceptors creates sample interceptors for testing.
@@ -96,15 +82,14 @@ func createMockGRPCConfig(t *testing.T, port int, enableReflection bool) config.
 }
 
 func TestNewGRPCServer(t *testing.T) {
-	c, mocks, g := setupTestGRPCServer(t, 9999, false)
+	c, g := setupTestGRPCServer(t, 9999, false)
 
 	assert.NotNil(t, g, "TEST Failed.\n")
-	assert.NotNil(t, c, "Container should not be nil")
-	assert.NotNil(t, mocks, "Mocks should not be nil")
+	assert.NotNil(t, c, "Kernel should not be nil")
 }
 
 func TestGRPCServer_AddServerOptions(t *testing.T) {
-	_, _, g := setupTestGRPCServer(t, 9999, false)
+	_, g := setupTestGRPCServer(t, 9999, false)
 
 	option1 := grpc.ConnectionTimeout(5 * time.Second)
 	option2 := grpc.MaxRecvMsgSize(1024 * 1024)
@@ -115,7 +100,7 @@ func TestGRPCServer_AddServerOptions(t *testing.T) {
 }
 
 func TestGRPCServer_AddUnaryInterceptors(t *testing.T) {
-	_, _, g := setupTestGRPCServer(t, 9999, false)
+	_, g := setupTestGRPCServer(t, 9999, false)
 
 	interceptors := createTestInterceptors()
 	g.addUnaryInterceptors(interceptors...)
@@ -125,7 +110,7 @@ func TestGRPCServer_AddUnaryInterceptors(t *testing.T) {
 }
 
 func TestGRPCServer_CreateServer(t *testing.T) {
-	_, _, g := setupTestGRPCServer(t, 9999, false)
+	_, g := setupTestGRPCServer(t, 9999, false)
 
 	assert.False(t, g.serverCreated, "server should not be created initially")
 
@@ -140,12 +125,11 @@ func TestGRPCServer_CreateServer(t *testing.T) {
 }
 
 func TestGRPCServer_RegisterService(t *testing.T) {
-	c, mocks, g := setupTestGRPCServer(t, 9999, false)
+	c, g := setupTestGRPCServer(t, 9999, false)
 	g.address = "127.0.0.1:0"
-	setupGRPCMetricExpectations(mocks.Metrics)
 
 	app := New()
-	app.container = c
+	app.kernel = c
 	app.grpcServer = g
 
 	healthServer := health.NewServer()
@@ -178,12 +162,7 @@ func TestGRPC_ServerRun(t *testing.T) {
 	// Test invalid port case
 	t.Run("net.Listen() error", func(t *testing.T) {
 		out := testutil.StderrOutputForFunc(func() {
-			c, mocks := infra.NewMockContainer(t)
-			setupGRPCMetricExpectations(mocks.Metrics)
-
-			// Add expectations for error scenarios
-			mocks.Metrics.EXPECT().IncrementCounter(gomock.Any(), "grpc_server_errors_total").AnyTimes()
-			mocks.Metrics.EXPECT().SetGauge("grpc_server_status", gomock.Any()).AnyTimes()
+			c := newTestKernel(logging.NewLogger(logging.DEBUG))
 
 			cfg := createMockGRPCConfig(t, 99999, false) // Invalid port
 			g := &grpcServer{
@@ -208,7 +187,7 @@ func TestGRPC_ServerRun(t *testing.T) {
 					done <- true
 				}()
 
-				g.Run(c)
+				_ = g.Run(c)
 			}
 
 			go serverRoutine()
@@ -237,16 +216,9 @@ func TestGRPC_ServerRun(t *testing.T) {
 		defer listener.Close()
 
 		out := testutil.StderrOutputForFunc(func() {
-			c, mocks := infra.NewMockContainer(t)
-			setupGRPCMetricExpectations(mocks.Metrics)
-
-			// Add expectations for error scenarios
-			mocks.Metrics.EXPECT().IncrementCounter(gomock.Any(), "grpc_server_errors_total").AnyTimes()
-			mocks.Metrics.EXPECT().SetGauge("grpc_server_status", gomock.Any()).AnyTimes()
-
 			// Replace the logger with our custom logger that doesn't exit on Fatal
 			mockLogger := &nonExitingMockLogger{MockLogger: logging.NewMockLogger(logging.DEBUG).(*logging.MockLogger)}
-			c.Logger = mockLogger
+			c := newTestKernel(mockLogger)
 
 			cfg := createMockGRPCConfig(t, occupiedPort, false) // Use the occupied port
 			g := &grpcServer{
@@ -269,7 +241,7 @@ func TestGRPC_ServerRun(t *testing.T) {
 }
 
 func TestGRPC_ServerShutdown(t *testing.T) {
-	c, _, g := setupTestGRPCServer(t, testutil.GetFreePort(t), false)
+	c, g := setupTestGRPCServer(t, testutil.GetFreePort(t), false)
 
 	require.NoError(t, g.Run(c))
 
@@ -282,7 +254,7 @@ func TestGRPC_ServerShutdown(t *testing.T) {
 }
 
 func TestGRPC_ServerShutdown_ContextCanceled(t *testing.T) {
-	c, _, g := setupTestGRPCServer(t, testutil.GetFreePort(t), false)
+	c, g := setupTestGRPCServer(t, testutil.GetFreePort(t), false)
 
 	require.NoError(t, g.Run(c))
 
@@ -297,70 +269,8 @@ func TestGRPC_ServerShutdown_ContextCanceled(t *testing.T) {
 	require.ErrorContains(t, err, "context canceled", "Expected error due to context cancellation")
 }
 
-func Test_injectContainer_Fails(t *testing.T) {
-	// Case: container is an unaddressable or unexported field
-	type fail struct {
-		c1 *infra.Container
-	}
-
-	c, _ := infra.NewMockContainer(t)
-	srv1 := &fail{}
-	err := injectContainer(srv1, c)
-
-	require.ErrorIs(t, err, errNonAddressable)
-	require.Nil(t, srv1.c1)
-
-	// Case: server is passed as unadressable(non-pointer)
-	srv3 := fail{}
-	out := testutil.StdoutOutputForFunc(func() {
-		cont, _ := infra.NewMockContainer(t)
-		err = injectContainer(srv3, cont)
-
-		assert.NoError(t, err)
-	})
-
-	assert.Contains(t, out, "cannot inject container into non-addressable implementation of `fail`, consider using pointer")
-}
-
-func Test_injectContainer(t *testing.T) {
-	c, _ := infra.NewMockContainer(t)
-
-	// embedded container
-	type success1 struct {
-		*infra.Container
-	}
-
-	srv1 := &success1{}
-	err := injectContainer(srv1, c)
-
-	require.NoError(t, err)
-	require.NotNil(t, srv1.Container)
-
-	// pointer type container
-	type success2 struct {
-		C *infra.Container
-	}
-
-	srv2 := &success2{}
-	err = injectContainer(srv2, c)
-
-	require.NoError(t, err)
-	require.NotNil(t, srv2.C)
-
-	// non pointer type container
-	type success3 struct {
-		C infra.Container
-	}
-
-	srv3 := &success3{}
-	err = injectContainer(srv3, c)
-
-	require.NoError(t, err)
-	require.NotNil(t, srv3.C)
-}
-
 func TestGRPC_Shutdown_BeforeStart(t *testing.T) {
-	_, _, g := setupTestGRPCServer(t, 9999, false)
+	_, g := setupTestGRPCServer(t, 9999, false)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
@@ -371,7 +281,7 @@ func TestGRPC_Shutdown_BeforeStart(t *testing.T) {
 
 func TestGRPC_ServerRun_WithInterceptorAndOptions(t *testing.T) {
 	freePort := testutil.GetFreePort(t)
-	c, _, g := setupTestGRPCServer(t, freePort, false)
+	c, g := setupTestGRPCServer(t, freePort, false)
 
 	var interceptorExecutions []string
 
@@ -387,7 +297,7 @@ func TestGRPC_ServerRun_WithInterceptorAndOptions(t *testing.T) {
 	}
 
 	app := New()
-	app.container = c
+	app.kernel = c
 	app.grpcServer = g
 
 	// Add the server options and interceptors to the app
@@ -419,10 +329,10 @@ func TestGRPC_ServerRun_WithInterceptorAndOptions(t *testing.T) {
 }
 
 func TestApp_WithReflection(t *testing.T) {
-	c, _, g := setupTestGRPCServer(t, 9999, true) // Enable reflection
+	c, g := setupTestGRPCServer(t, 9999, true) // Enable reflection
 
 	app := New()
-	app.container = c
+	app.kernel = c
 	app.grpcServer = g
 
 	err := app.grpcServer.createServer()
@@ -435,11 +345,10 @@ func TestApp_WithReflection(t *testing.T) {
 
 func TestApp_InterceptorOrderingWithServiceRegistration(t *testing.T) {
 	freePort := testutil.GetFreePort(t)
-	c, mocks, g := setupTestGRPCServer(t, freePort, false)
-	setupGRPCMetricExpectations(mocks.Metrics)
+	c, g := setupTestGRPCServer(t, freePort, false)
 
 	app := New()
-	app.container = c
+	app.kernel = c
 	app.grpcServer = g
 
 	// Add interceptors BEFORE RegisterService
@@ -470,10 +379,10 @@ func TestApp_InterceptorOrderingWithServiceRegistration(t *testing.T) {
 }
 
 func TestApp_InterceptorAfterServerCreation(t *testing.T) {
-	c, _, g := setupTestGRPCServer(t, 9999, false)
+	c, g := setupTestGRPCServer(t, 9999, false)
 
 	app := New()
-	app.container = c
+	app.kernel = c
 	app.grpcServer = g
 
 	// Create server first
@@ -494,10 +403,10 @@ func TestApp_InterceptorAfterServerCreation(t *testing.T) {
 }
 
 func TestApp_StreamInterceptorAfterServerCreation(t *testing.T) {
-	c, _, g := setupTestGRPCServer(t, 9999, false)
+	c, g := setupTestGRPCServer(t, 9999, false)
 
 	app := New()
-	app.container = c
+	app.kernel = c
 	app.grpcServer = g
 
 	// Create server first
@@ -519,10 +428,10 @@ func TestApp_StreamInterceptorAfterServerCreation(t *testing.T) {
 }
 
 func TestApp_ServerOptionsAfterServerCreation(t *testing.T) {
-	c, _, g := setupTestGRPCServer(t, 9999, false)
+	c, g := setupTestGRPCServer(t, 9999, false)
 
 	app := New()
-	app.container = c
+	app.kernel = c
 	app.grpcServer = g
 
 	// Create server first
@@ -540,10 +449,10 @@ func TestApp_ServerOptionsAfterServerCreation(t *testing.T) {
 }
 
 func TestApp_AuthAfterServerCreation(t *testing.T) {
-	c, _, g := setupTestGRPCServer(t, 9999, false)
+	c, g := setupTestGRPCServer(t, 9999, false)
 
 	app := New()
-	app.container = c
+	app.kernel = c
 	app.grpcServer = g
 
 	// Create server first

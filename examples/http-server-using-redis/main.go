@@ -20,20 +20,20 @@ func main() {
 	// Register an OnStart hook to warm up a cache.
 	// This runs before route registration as intended.
 	app.OnStart(func(ctx *pi.Context) error {
-		ctx.Logger.Info("Warming up the cache...")
+		ctx.Info("Warming up the cache...")
 
 		// Example: Fetch some data and store it in Redis.
 		// In a real app, this might come from a database or another service.
 		cacheKey := "initial-data"
 		cacheValue := "This is some data cached at startup."
 
-		err := ctx.Redis.Set(ctx, cacheKey, cacheValue, 0).Err()
+		err := ctx.Redis().Set(ctx, cacheKey, cacheValue, 0).Err()
 		if err != nil {
-			ctx.Logger.Errorf("Failed to warm up cache: %v", err)
+			ctx.Errorf("Failed to warm up cache: %v", err)
 			return err // Return the error to halt startup if caching fails.
 		}
 
-		ctx.Logger.Info("Cache warmed up successfully!")
+		ctx.Info("Cache warmed up successfully!")
 
 		return nil
 	})
@@ -51,7 +51,7 @@ func RedisSetHandler(c *pi.Context) (any, error) {
 	}
 
 	for key, value := range input {
-		err := c.Redis.Set(c, key, value, redisExpiryTime*time.Minute).Err()
+		err := c.Redis().Set(c, key, value, redisExpiryTime*time.Minute).Err()
 		if err != nil {
 			return nil, err
 		}
@@ -64,7 +64,7 @@ func RedisSetHandler(c *pi.Context) (any, error) {
 func RedisGetHandler(c *pi.Context) (any, error) {
 	key := c.PathParam("key")
 
-	value, err := c.Redis.Get(c, key).Result()
+	value, err := c.Redis().Get(c, key).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +77,7 @@ func RedisGetHandler(c *pi.Context) (any, error) {
 
 // RedisPipelineHandler demonstrates using multiple Redis commands efficiently within a pipeline.
 func RedisPipelineHandler(c *pi.Context) (any, error) {
-	pipe := c.Redis.Pipeline()
+	pipe := c.Redis().Pipeline()
 
 	// Add multiple commands to the pipeline
 	pipe.Set(c, "testKey1", "testValue1", redisExpiryTime*time.Minute)

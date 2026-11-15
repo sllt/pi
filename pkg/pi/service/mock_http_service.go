@@ -204,20 +204,6 @@ func (mr *MockHTTPMockRecorder) PutWithHeaders(ctx, api, queryParams, body, head
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PutWithHeaders", reflect.TypeOf((*MockHTTP)(nil).PutWithHeaders), ctx, api, queryParams, body, headers)
 }
 
-// getHealthResponseForEndpoint mocks base method.
-func (m *MockHTTP) getHealthResponseForEndpoint(ctx context.Context, endpoint string, timeout int) *Health {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "getHealthResponseForEndpoint", ctx, endpoint, timeout)
-	ret0, _ := ret[0].(*Health)
-	return ret0
-}
-
-// getHealthResponseForEndpoint indicates an expected call of getHealthResponseForEndpoint.
-func (mr *MockHTTPMockRecorder) getHealthResponseForEndpoint(ctx, endpoint, timeout any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "getHealthResponseForEndpoint", reflect.TypeOf((*MockHTTP)(nil).getHealthResponseForEndpoint), ctx, endpoint, timeout)
-}
-
 // MockhttpClient is a mock of httpClient interface.
 type MockhttpClient struct {
 	ctrl     *gomock.Controller

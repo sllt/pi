@@ -166,7 +166,9 @@ func (c *Client) getResponse(ctx context.Context, putEndpoint string, datapoints
 	marshaled, err := json.Marshal(datapoints)
 	if err != nil {
 		*message = fmt.Sprintf("getPutBodyContents error: %s", err)
-		c.logger.Errorf(*message)
+		if c.logger != nil {
+			c.logger.Errorf(*message)
+		}
 	}
 
 	reqBodyCnt := string(marshaled)
@@ -367,7 +369,10 @@ func (c *Client) initializeClient() {
 
 	c.config.Host = strings.TrimSpace(c.config.Host)
 	if c.config.Host == "" {
-		c.logger.Fatal("the OpenTSDB Endpoint in the given configuration cannot be empty.")
+		if c.logger != nil {
+			c.logger.Fatal("the OpenTSDB Endpoint in the given configuration cannot be empty.")
+		}
+		return
 	}
 
 	// Use custom transport settings if provided, otherwise, use the default transport.

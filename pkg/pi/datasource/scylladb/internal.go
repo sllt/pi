@@ -95,6 +95,13 @@ type scyllaSession struct {
 	session *gocql.Session
 }
 
+func (s *scyllaSession) Close() {
+	if s != nil && s.session != nil {
+		s.session.Close()
+		s.session = nil
+	}
+}
+
 // Query creates a ScyllaDB query.
 func (s *scyllaSession) Query(stmt string, values ...any) query {
 	return &scylladbQuery{query: s.session.Query(stmt, values...)}
@@ -224,7 +231,9 @@ func (c *Client) sendOperationStats(ql *QueryLog, startTime time.Time, method st
 
 	ql.Duration = duration
 
-	c.logger.Debug(ql)
+	if c.logger != nil {
+		c.logger.Debug(ql)
+	}
 
 	if span != nil {
 		defer span.End()
@@ -232,10 +241,10 @@ func (c *Client) sendOperationStats(ql *QueryLog, startTime time.Time, method st
 		span.SetAttributes(attribute.Int64(fmt.Sprintf("scylla.%v.duration", method), duration))
 	}
 
-	c.metrics.RecordHistogram(context.Background(), "app_scylla_stats", float64(duration), "hostname",
-		c.config.Host, "keyspace", c.config.Keyspace)
-
-	c.scylla.query = nil
+	if c.metrics != nil {
+		c.metrics.RecordHistogram(context.Background(), "app_scylla_stats", float64(duration), "hostname",
+			c.config.Host, "keyspace", c.config.Keyspace)
+	}
 }
 
 // rowsToStructCAS Scans a CAS query result into a struct, setting fields based on column names and types,

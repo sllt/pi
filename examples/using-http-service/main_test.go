@@ -17,9 +17,9 @@ import (
 
 	"github.com/sllt/pi/pkg/pi"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/service"
+	"github.com/sllt/pi/pkg/pi/testkit"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
@@ -67,11 +67,9 @@ func Test_main(t *testing.T) {
 		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
 
 		bodyBytes, err := io.ReadAll(resp.Body)
-
 		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
 
 		assert.Equal(t, tc.expectedRes, string(bodyBytes), "TEST[%d], Failed.\n%s", i, tc.desc)
-
 		assert.Equal(t, tc.statusCode, resp.StatusCode, "TEST[%d], Failed.\n%s", i, tc.desc)
 
 		resp.Body.Close()
@@ -79,18 +77,27 @@ func Test_main(t *testing.T) {
 }
 
 func TestHTTPHandlerURLError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet,
 		fmt.Sprint("http://localhost:", port, "/handle"), bytes.NewBuffer([]byte(`{"key":"value"}`)))
 	piReq := piHTTP.NewRequest(req)
 
-	mockContainer, mocks := infra.NewMockContainer(t)
-
-	ctx := &pi.Context{Context: context.Background(), Request: piReq, Container: mockContainer}
-
-	ctx.Container.Services = map[string]service.HTTP{"cat-facts": service.NewHTTPService("http://invalid", ctx.Logger, mockContainer.Metrics())}
-
-	mocks.Metrics.EXPECT().RecordHistogram(gomock.Any(), "app_http_service_response", gomock.Any(), gomock.Any(),
+	logger := logging.NewLogger(logging.DEBUG)
+	mockMetrics := service.NewMockMetrics(ctrl)
+	mockMetrics.EXPECT().RecordHistogram(gomock.Any(), "app_http_service_response", gomock.Any(), gomock.Any(),
 		"http://invalid", "method", "GET", "status", gomock.Any())
+
+	svc := service.NewHTTPService("http://invalid", logger, mockMetrics)
+	app := testkit.New(t,
+		pi.WithConfig(map[string]string{"HTTP_ENABLED": "false", "GRPC_ENABLED": "false"}),
+		pi.WithLogger(logger),
+		pi.WithHTTPService("cat-facts", svc, pi.Borrowed),
+	)
+
+	ctx := app.NewContext(context.Background())
+	ctx.Request = piReq
 
 	resp, err := Handler(ctx)
 
@@ -99,24 +106,25 @@ func TestHTTPHandlerURLError(t *testing.T) {
 }
 
 func TestHTTPHandlerResponseUnmarshalError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// read request body
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{invalid body}`))
+		_, _ = w.Write([]byte(`{invalid body}`))
 	}))
-
 	defer server.Close()
 
 	logger := logging.NewLogger(logging.DEBUG)
-
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprint("http://localhost:", port, "/handle"), bytes.NewBuffer([]byte(`{"key":"value"}`)))
-
 	piReq := piHTTP.NewRequest(req)
 
-	ctx := &pi.Context{Context: context.Background(),
-		Request: piReq, Container: &infra.Container{Logger: logger}}
+	svc := service.NewHTTPService(server.URL, logger, nil)
+	app := testkit.New(t,
+		pi.WithConfig(map[string]string{"HTTP_ENABLED": "false", "GRPC_ENABLED": "false"}),
+		pi.WithLogger(logger),
+		pi.WithHTTPService("cat-facts", svc, pi.Borrowed),
+	)
 
-	ctx.Container.Services = map[string]service.HTTP{"cat-facts": service.NewHTTPService(server.URL, ctx.Logger, nil)}
+	ctx := app.NewContext(context.Background())
+	ctx.Request = piReq
 
 	resp, err := Handler(ctx)
 

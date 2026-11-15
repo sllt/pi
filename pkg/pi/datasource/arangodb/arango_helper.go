@@ -9,15 +9,25 @@ import (
 )
 
 func (c *Client) user(ctx context.Context, username string) (arangodb.User, error) {
+	if c == nil || c.client == nil {
+		return nil, errClientNotConnected
+	}
 	return c.client.User(ctx, username)
 }
 
 func (c *Client) database(ctx context.Context, name string) (arangodb.Database, error) {
+	if c == nil || c.client == nil {
+		return nil, errClientNotConnected
+	}
 	return c.client.GetDatabase(ctx, name, nil)
 }
 
 // createUser creates a new user in ArangoDB.
 func (c *Client) createUser(ctx context.Context, username string, options any) error {
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := c.addTrace(ctx, "createUser", map[string]string{"user": username})
 	startTime := time.Now()
 
@@ -39,6 +49,10 @@ func (c *Client) createUser(ctx context.Context, username string, options any) e
 
 // dropUser deletes a user from ArangoDB.
 func (c *Client) dropUser(ctx context.Context, username string) error {
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := c.addTrace(ctx, "dropUser", map[string]string{"user": username})
 	startTime := time.Now()
 
@@ -55,6 +69,10 @@ func (c *Client) dropUser(ctx context.Context, username string) error {
 
 // grantDB grants permissions for a database to a user.
 func (c *Client) grantDB(ctx context.Context, database, username, permission string) error {
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := c.addTrace(ctx, "grantDB", map[string]string{"DB": database})
 	startTime := time.Now()
 
@@ -73,6 +91,10 @@ func (c *Client) grantDB(ctx context.Context, database, username, permission str
 
 // grantCollection grants permissions for a collection to a user.
 func (c *Client) grantCollection(ctx context.Context, database, collection, username, permission string) error {
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
+
 	tracerCtx, span := c.addTrace(ctx, "GrantCollection", map[string]string{"collection": collection})
 	startTime := time.Now()
 

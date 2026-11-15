@@ -9,6 +9,7 @@ import (
 	"mime"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azfile/directory"
@@ -46,14 +47,34 @@ const (
 
 // storageAdapter adapts Azure File Storage client to implement file.StorageProvider.
 type storageAdapter struct {
+	mu          sync.RWMutex
 	cfg         *Config
 	shareClient *share.Client
 }
 
+func (s *storageAdapter) getShareClient() (*share.Client, error) {
+	if s == nil {
+		return nil, errAzureClientNotInitialized
+	}
+	s.mu.RLock()
+	sc := s.shareClient
+	s.mu.RUnlock()
+	if sc == nil {
+		return nil, errAzureClientNotInitialized
+	}
+	return sc, nil
+}
+
 // Connect initializes the Azure File Storage client and validates share access.
 func (s *storageAdapter) Connect(ctx context.Context) error {
+	if s == nil {
+		return errAzureConfigNil
+	}
 	// fast-path
-	if s.shareClient != nil {
+	s.mu.RLock()
+	ready := s.shareClient != nil
+	s.mu.RUnlock()
+	if ready {
 		return nil
 	}
 
@@ -99,18 +120,23 @@ func (s *storageAdapter) Connect(ctx context.Context) error {
 		return fmt.Errorf("share validation failed: %w", err)
 	}
 
-	s.shareClient = shareClient
+	s.mu.Lock()
+	if s.shareClient == nil {
+		s.shareClient = shareClient
+	}
+	s.mu.Unlock()
 
 	return nil
 }
 
 // Health checks if the Azure connection is healthy by verifying share access.
 func (s *storageAdapter) Health(ctx context.Context) error {
-	if s.shareClient == nil {
-		return errAzureClientNotInitialized
+	sc, err := s.getShareClient()
+	if err != nil {
+		return err
 	}
 
-	_, err := s.shareClient.GetProperties(ctx, nil)
+	_, err = sc.GetProperties(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("azure health check failed: %w", err)
 	}
@@ -119,9 +145,13 @@ func (s *storageAdapter) Health(ctx context.Context) error {
 }
 
 // Close closes the Azure client connection.
-func (*storageAdapter) Close() error {
-	// Azure SDK clients don't have explicit Close methods
-	// They are stateless and can be reused
+func (s *storageAdapter) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	s.shareClient = nil
+	s.mu.Unlock()
 	return nil
 }
 
@@ -323,14 +353,18 @@ func (w *azureWriter) resizeAndUpload(props *azfile.GetPropertiesResponse) error
 
 // statDirectory returns metadata for a directory.
 func (s *storageAdapter) statDirectory(ctx context.Context, name string) (*file.ObjectInfo, error) {
+	sc, err := s.getShareClient()
+	if err != nil {
+		return nil, err
+	}
 	dirPath := strings.TrimSuffix(name, "/")
 	dirPath = strings.TrimPrefix(dirPath, "/")
 
 	var dirClient *directory.Client
 	if dirPath == "" {
-		dirClient = s.shareClient.NewRootDirectoryClient()
+		dirClient = sc.NewRootDirectoryClient()
 	} else {
-		dirClient = s.shareClient.NewDirectoryClient(dirPath)
+		dirClient = sc.NewDirectoryClient(dirPath)
 	}
 
 	props, err := dirClient.GetProperties(ctx, nil)
@@ -410,17 +444,21 @@ func (s *storageAdapter) DeleteObject(ctx context.Context, name string) error {
 
 	// Check if it's a directory
 	if strings.HasSuffix(name, "/") {
+		sc, err := s.getShareClient()
+		if err != nil {
+			return err
+		}
 		dirPath := strings.TrimSuffix(name, "/")
 		dirPath = strings.TrimPrefix(dirPath, "/")
 
 		var dirClient *directory.Client
 		if dirPath == "" {
-			dirClient = s.shareClient.NewRootDirectoryClient()
+			dirClient = sc.NewRootDirectoryClient()
 		} else {
-			dirClient = s.shareClient.NewDirectoryClient(dirPath)
+			dirClient = sc.NewDirectoryClient(dirPath)
 		}
 
-		_, err := dirClient.Delete(ctx, nil)
+		_, err = dirClient.Delete(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("%w %q: %w", errFailedToDeleteObject, name, err)
 		}
@@ -592,14 +630,14 @@ func normalizePrefix(prefix string) string {
 }
 
 // getDirectoryClient returns the appropriate directory client for the given prefix.
-func (s *storageAdapter) getDirectoryClient(normalizedPrefix string) *directory.Client {
+func getDirectoryClientFromShare(sc *share.Client, normalizedPrefix string) *directory.Client {
 	if normalizedPrefix == "" {
-		return s.shareClient.NewRootDirectoryClient()
+		return sc.NewRootDirectoryClient()
 	}
 
 	dirPath := strings.TrimSuffix(normalizedPrefix, "/")
 
-	return s.shareClient.NewDirectoryClient(dirPath)
+	return sc.NewDirectoryClient(dirPath)
 }
 
 // processListObjectsPage processes a single page of list results and adds files to objects.
@@ -620,14 +658,15 @@ func processListObjectsPage(page *directory.ListFilesAndDirectoriesResponse, nor
 
 // ListObjects lists all files with the given prefix.
 func (s *storageAdapter) ListObjects(ctx context.Context, prefix string) ([]string, error) {
-	if s.shareClient == nil {
-		return nil, errAzureClientNotInitialized
+	sc, err := s.getShareClient()
+	if err != nil {
+		return nil, err
 	}
 
 	var objects []string
 
 	normalizedPrefix := normalizePrefix(prefix)
-	dirClient := s.getDirectoryClient(normalizedPrefix)
+	dirClient := getDirectoryClientFromShare(sc, normalizedPrefix)
 	pager := dirClient.NewListFilesAndDirectoriesPager(&directory.ListFilesAndDirectoriesOptions{})
 
 	for pager.More() {
@@ -693,8 +732,9 @@ func processListDirFiles(files []*directory.File, objects []file.ObjectInfo) []f
 
 // ListDir lists files and directories (prefixes) under the given prefix.
 func (s *storageAdapter) ListDir(ctx context.Context, prefix string) ([]file.ObjectInfo, []string, error) {
-	if s.shareClient == nil {
-		return nil, nil, errAzureClientNotInitialized
+	sc, err := s.getShareClient()
+	if err != nil {
+		return nil, nil, err
 	}
 
 	var (
@@ -703,7 +743,7 @@ func (s *storageAdapter) ListDir(ctx context.Context, prefix string) ([]file.Obj
 	)
 
 	normalizedPrefix := normalizePrefix(prefix)
-	dirClient := s.getDirectoryClient(normalizedPrefix)
+	dirClient := getDirectoryClientFromShare(sc, normalizedPrefix)
 	pager := dirClient.NewListFilesAndDirectoriesPager(&directory.ListFilesAndDirectoriesOptions{})
 
 	for pager.More() {
@@ -833,8 +873,8 @@ func isDirectoryExistsError(err error) bool {
 }
 
 // createDirectoryLevel creates a single directory level and handles errors.
-func (s *storageAdapter) createDirectoryLevel(ctx context.Context, dirPath string) error {
-	dirClient := s.shareClient.NewDirectoryClient(dirPath)
+func (s *storageAdapter) createDirectoryLevel(ctx context.Context, sc *share.Client, dirPath string) error {
+	dirClient := sc.NewDirectoryClient(dirPath)
 
 	_, err := dirClient.Create(ctx, nil)
 	if err != nil && !isDirectoryExistsError(err) {
@@ -849,8 +889,9 @@ func (s *storageAdapter) createDirectoryLevel(ctx context.Context, dirPath strin
 // This function ensures parent directories are created before file creation, matching
 // local filesystem behavior where os.MkdirAll is called automatically.
 func (s *storageAdapter) ensureParentDirectories(ctx context.Context, filePath string) error {
-	if s.shareClient == nil {
-		return errAzureClientNotInitialized
+	sc, err := s.getShareClient()
+	if err != nil {
+		return err
 	}
 
 	// Extract parent directory path
@@ -880,7 +921,7 @@ func (s *storageAdapter) ensureParentDirectories(ctx context.Context, filePath s
 			currentPath = currentPath + "/" + component
 		}
 
-		if err := s.createDirectoryLevel(ctx, currentPath); err != nil {
+		if err := s.createDirectoryLevel(ctx, sc, currentPath); err != nil {
 			return err
 		}
 	}
@@ -907,8 +948,9 @@ func getParentDir(filePath string) string {
 
 // getFileClient returns a file client for the given path.
 func (s *storageAdapter) getFileClient(name string) (*azfile.Client, error) {
-	if s.shareClient == nil {
-		return nil, errAzureClientNotInitialized
+	sc, err := s.getShareClient()
+	if err != nil {
+		return nil, err
 	}
 
 	// Normalize the path
@@ -919,7 +961,7 @@ func (s *storageAdapter) getFileClient(name string) (*azfile.Client, error) {
 	// Handle root directory case
 	if dirPath == "." || dirPath == "" || dirPath == "/" {
 		// File is in root directory
-		return s.shareClient.NewRootDirectoryClient().NewFileClient(fileName), nil
+		return sc.NewRootDirectoryClient().NewFileClient(fileName), nil
 	}
 
 	// File is in a subdirectory
@@ -927,5 +969,5 @@ func (s *storageAdapter) getFileClient(name string) (*azfile.Client, error) {
 	dirPath = strings.TrimPrefix(dirPath, "/")
 	dirPath = strings.TrimSuffix(dirPath, "/")
 
-	return s.shareClient.NewDirectoryClient(dirPath).NewFileClient(fileName), nil
+	return sc.NewDirectoryClient(dirPath).NewFileClient(fileName), nil
 }

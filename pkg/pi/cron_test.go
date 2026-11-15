@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
@@ -233,7 +233,7 @@ func TestCronTab_AddJob(t *testing.T) {
 		},
 	}
 
-	c := NewCron(nil)
+	c := newCron(nil)
 
 	for _, tc := range testCases {
 		err := c.AddJob(tc.schedule, "test-job", fn)
@@ -253,10 +253,7 @@ func TestCronTab_runScheduled(t *testing.T) {
 		fn:        func(*Context) { fmt.Println("hello from cron") },
 	}
 
-	// can make container nil as we are not testing the internal working of
-	// dependency function as it is user defined
-	mockContainer, _ := infra.NewMockContainer(t)
-	c := NewCron(mockContainer)
+	c := newCron(newLegacyKernel(nil, logging.NewLogger(logging.FATAL), false))
 
 	// Populate the job array for cron table
 	c.jobs = []*job{j}

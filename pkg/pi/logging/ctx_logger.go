@@ -25,22 +25,37 @@ type ContextLogger struct {
 // and automatically appends OpenTelemetry trace information (trace ID) to log output
 // when available in the context.
 func NewContextLogger(ctx context.Context, base Logger) *ContextLogger {
-	var traceID string
+	cl := &ContextLogger{base: base}
+	cl.UpdateContext(ctx)
+	return cl
+}
 
-	sc := trace.SpanFromContext(ctx).SpanContext()
-
-	if sc.IsValid() {
-		traceID = sc.TraceID().String()
+// UpdateContext refreshes the cached OpenTelemetry TraceID from ctx so child spans
+// created via Context.Trace or transport supervisors immediately propagate to subsequent logs.
+func (l *ContextLogger) UpdateContext(ctx context.Context) {
+	if l == nil {
+		return
 	}
-
-	return &ContextLogger{base: base, traceID: traceID}
+	if ctx == nil {
+		l.traceID = ""
+		return
+	}
+	sc := trace.SpanFromContext(ctx).SpanContext()
+	if sc.IsValid() {
+		l.traceID = sc.TraceID().String()
+	} else {
+		l.traceID = ""
+	}
 }
 
 // withTraceInfo appends the trace ID from the context (if available).
 // This allows trace IDs to be extracted later during formatting or filtering.
 func (l *ContextLogger) withTraceInfo(args ...any) []any {
-	if l.traceID != "" {
-		return append(args, map[string]any{"__trace_id__": l.traceID})
+	if l != nil && l.traceID != "" {
+		out := make([]any, len(args)+1)
+		copy(out, args)
+		out[len(args)] = map[string]any{"__trace_id__": l.traceID}
+		return out
 	}
 
 	return args
@@ -48,6 +63,9 @@ func (l *ContextLogger) withTraceInfo(args ...any) []any {
 
 // logWithSkip logs using the correct caller skip value for ContextLogger.
 func (l *ContextLogger) logWithSkip(level Level, format string, args ...any) {
+	if l == nil || l.base == nil {
+		return
+	}
 	if ls, ok := l.base.(loggerWithSkip); ok {
 		// skip=3: runtime.Caller(0) -> logfWithSkip(1) -> logWithSkip(2) -> Debug/Info(3) -> user code
 		ls.logfWithSkip(3, level, format, l.withTraceInfo(args...)...)
@@ -108,4 +126,9 @@ func (l *ContextLogger) Error(args ...any)             { l.logWithSkip(ERROR, ""
 func (l *ContextLogger) Errorf(f string, args ...any)  { l.logWithSkip(ERROR, f, args...) }
 func (l *ContextLogger) Fatal(args ...any)             { l.logWithSkip(FATAL, "", args...) }
 func (l *ContextLogger) Fatalf(f string, args ...any)  { l.logWithSkip(FATAL, f, args...) }
-func (l *ContextLogger) ChangeLevel(level Level)       { l.base.ChangeLevel(level) }
+func (l *ContextLogger) ChangeLevel(level Level) {
+	if l == nil || l.base == nil {
+		return
+	}
+	l.base.ChangeLevel(level)
+}

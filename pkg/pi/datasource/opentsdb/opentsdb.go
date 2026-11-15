@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -21,6 +22,8 @@ var (
 	errInvalidResponseType = errors.New("invalid response type")
 	errInvalidQueryParam   = errors.New("invalid query parameters")
 	errInvalidParam        = errors.New("invalid parameter type")
+	errInvalidConfig       = errors.New("opentsdb: host is required")
+	errClientNotConnected  = errors.New("opentsdb: client not connected")
 )
 
 const (
@@ -162,6 +165,72 @@ func (c *Client) registerMetrics() {
 	)
 }
 
+// FromEnv constructs an unstarted OpenTSDB client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
+
+	host := strings.TrimSpace(get("OPENTSDB_HOST"))
+	if host == "" {
+		return nil, errInvalidConfig
+	}
+
+	return New(Config{Host: host}), nil
+}
+
+// ConnectContext initializes the OpenTSDB HTTP client and verifies reachability within ctx.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil || strings.TrimSpace(c.config.Host) == "" {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.client != nil && c.endpoint != "" {
+		return nil
+	}
+
+	c.registerMetrics()
+
+	if c.logger != nil {
+		c.logger.Debugf("connecting to OpenTSDB at host %s", c.config.Host)
+	}
+
+	c.initializeClient()
+	c.endpoint = fmt.Sprintf("http://%s", c.config.Host)
+
+	res := VersionResponse{}
+	if err := c.version(ctx, &res); err != nil {
+		_ = c.Close()
+		return err
+	}
+
+	if c.logger != nil {
+		c.logger.Logf("connected to OpenTSDB at %s", c.endpoint)
+	}
+
+	return nil
+}
+
+// Close closes idle HTTP connections and resets the OpenTSDB client idempotently.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+
+	if hc, ok := c.client.(*http.Client); ok && hc != nil {
+		hc.CloseIdleConnections()
+	}
+	c.client = nil
+	c.endpoint = ""
+
+	return nil
+}
+
 // Connect initializes an HTTP client for OpenTSDB using the provided configuration.
 // If the configuration is invalid or the endpoint is unreachable, an error is logged.
 func (c *Client) Connect() {
@@ -174,7 +243,9 @@ func (c *Client) Connect() {
 		span.End()
 	}
 
-	c.logger.Debugf("connecting to OpenTSDB at host %s", c.config.Host)
+	if c.logger != nil {
+		c.logger.Debugf("connecting to OpenTSDB at host %s", c.config.Host)
+	}
 
 	// Set default values for optional configuration fields.
 	c.initializeClient()
@@ -186,11 +257,15 @@ func (c *Client) Connect() {
 
 	err := c.version(context.Background(), &res)
 	if err != nil {
-		c.logger.Errorf("error while connecting to OpenTSDB: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("error while connecting to OpenTSDB: %v", err)
+		}
 		return
 	}
 
-	c.logger.Logf("connected to OpenTSDB at %s", c.endpoint)
+	if c.logger != nil {
+		c.logger.Logf("connected to OpenTSDB at %s", c.endpoint)
+	}
 }
 
 func (c *Client) PutDataPoints(ctx context.Context, datas any, queryParam string, resp any) error {
@@ -327,7 +402,9 @@ func (c *Client) QueryLatestDataPoints(ctx context.Context, parameters, resp any
 	status = statusSuccess
 	message = fmt.Sprintf("querylast request to url %q processed successfully", queryEndpoint)
 
-	c.logger.Logf("querylast request processed successfully")
+	if c.logger != nil {
+		c.logger.Logf("querylast request processed successfully")
+	}
 
 	return nil
 }
@@ -374,7 +451,9 @@ func (c *Client) QueryAnnotation(ctx context.Context, queryAnnoParam map[string]
 	status = statusSuccess
 	message = fmt.Sprintf("Annotation query sent to url: %s", annoEndpoint)
 
-	c.logger.Log("Annotation query processed successfully")
+	if c.logger != nil {
+		c.logger.Log("Annotation query processed successfully")
+	}
 
 	return nil
 }
@@ -415,12 +494,32 @@ func (c *Client) GetAggregators(ctx context.Context, resp any) error {
 	status = statusSuccess
 	message = fmt.Sprintf("aggregators retrieved from url: %s", aggregatorsEndpoint)
 
-	c.logger.Log("aggregators fetched successfully")
+	if c.logger != nil {
+		c.logger.Log("aggregators fetched successfully")
+	}
 
 	return nil
 }
 
 func (c *Client) HealthCheck(ctx context.Context) (any, error) {
+	if c == nil || strings.TrimSpace(c.config.Host) == "" {
+		return &Health{
+			Status:  "DOWN",
+			Details: map[string]any{"message": "opentsdb host is required"},
+		}, errInvalidConfig
+	}
+	if c.client == nil {
+		return &Health{
+			Status:  "DOWN",
+			Details: map[string]any{"message": "opentsdb not connected"},
+		}, errClientNotConnected
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	span := c.addTrace(ctx, "HealthCheck")
 
 	status := statusFailed
@@ -433,7 +532,18 @@ func (c *Client) HealthCheck(ctx context.Context) (any, error) {
 		Details: make(map[string]any),
 	}
 
-	conn, err := dialTimeout("tcp", c.config.Host, defaultDialTime)
+	timeout := defaultDialTime
+	if dl, ok := ctx.Deadline(); ok {
+		rem := time.Until(dl)
+		if rem <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+		if rem < timeout {
+			timeout = rem
+		}
+	}
+
+	conn, err := dialTimeout("tcp", c.config.Host, timeout)
 	if err != nil {
 		h.Status = "DOWN"
 		message = fmt.Sprintf("OpenTSDB is unreachable: %v", err)

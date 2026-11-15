@@ -3,13 +3,13 @@ package migration
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/mock/gomock"
 
-	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
 )
 
 var (
@@ -17,28 +17,23 @@ var (
 	errQuery = errors.New("query error")
 )
 
-func pubsubTestSetup(t *testing.T) (migrator, *infra.MockPubSubProvider, *infra.Container) {
+func pubsubTestSetup(t *testing.T) (migrator, *fakePubSub, *Deps) {
 	t.Helper()
 
-	mockContainer, mocks := infra.NewMockContainer(t)
+	mockPubSub := &fakePubSub{}
+	deps := &Deps{
+		Logger: logging.NewWriterLogger(logging.DEBUG, io.Discard, io.Discard),
+		PubSub: mockPubSub,
+	}
 
-	ds := Datasource{PubSub: mockContainer.PubSub}
-
-	pubsubDB := pubsubDS{client: mockContainer.PubSub}
+	ds := Datasource{PubSub: mockPubSub}
+	pubsubDB := pubsubDS{client: mockPubSub}
 	migratorWithPubSub := pubsubDB.apply(&ds)
 
-	mockContainer.PubSub = mocks.PubSub
-
-	return migratorWithPubSub, mocks.PubSub, mockContainer
+	return migratorWithPubSub, mockPubSub, deps
 }
 
 func Test_CreateTopic(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockPubSub := infra.NewMockPubSubProvider(ctrl)
-	ds := pubsubDS{client: mockPubSub}
-
 	testCases := []struct {
 		desc     string
 		topic    string
@@ -50,7 +45,13 @@ func Test_CreateTopic(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		mockPubSub.EXPECT().CreateTopic(t.Context(), tc.topic).Return(tc.mockErr)
+		mockPubSub := &fakePubSub{
+			createTopicFn: func(_ context.Context, name string) error {
+				assert.Equal(t, tc.topic, name)
+				return tc.mockErr
+			},
+		}
+		ds := pubsubDS{client: mockPubSub}
 
 		err := ds.CreateTopic(t.Context(), tc.topic)
 
@@ -59,12 +60,6 @@ func Test_CreateTopic(t *testing.T) {
 }
 
 func Test_DeleteTopic(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockPubSub := infra.NewMockPubSubProvider(ctrl)
-	ds := pubsubDS{client: mockPubSub}
-
 	testCases := []struct {
 		desc     string
 		topic    string
@@ -76,7 +71,13 @@ func Test_DeleteTopic(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		mockPubSub.EXPECT().DeleteTopic(t.Context(), tc.topic).Return(tc.mockErr)
+		mockPubSub := &fakePubSub{
+			deleteTopicFn: func(_ context.Context, name string) error {
+				assert.Equal(t, tc.topic, name)
+				return tc.mockErr
+			},
+		}
+		ds := pubsubDS{client: mockPubSub}
 
 		err := ds.DeleteTopic(t.Context(), tc.topic)
 
@@ -85,12 +86,6 @@ func Test_DeleteTopic(t *testing.T) {
 }
 
 func Test_Query(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockPubSub := infra.NewMockPubSubProvider(ctrl)
-	ds := pubsubDS{client: mockPubSub}
-
 	testCases := []struct {
 		desc     string
 		query    string
@@ -105,9 +100,14 @@ func Test_Query(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		mockPubSub.EXPECT().Query(
-			gomock.Eq(t.Context()), gomock.Eq(tc.query), gomock.Eq(tc.args[0]), gomock.Eq(tc.args[1]),
-		).Return(tc.mockResp, tc.mockErr)
+		mockPubSub := &fakePubSub{
+			queryFn: func(_ context.Context, query string, args ...any) ([]byte, error) {
+				assert.Equal(t, tc.query, query)
+				assert.Equal(t, tc.args, args)
+				return tc.mockResp, tc.mockErr
+			},
+		}
+		ds := pubsubDS{client: mockPubSub}
 
 		resp, err := ds.Query(t.Context(), tc.query, tc.args...)
 
@@ -117,27 +117,30 @@ func Test_Query(t *testing.T) {
 }
 
 func Test_PubSubCheckAndCreateMigrationTable(t *testing.T) {
-	migratorWithPubSub, mockPubSub, mockContainer := pubsubTestSetup(t)
+	migratorWithPubSub, mockPubSub, deps := pubsubTestSetup(t)
 
 	testCases := []struct {
-		desc string
-		err  error
+		desc      string
+		createErr error
 	}{
 		{"no error", nil},
-		{"topic already exists", nil},
+		{"topic already exists", errTopic},
 	}
 
 	for i, tc := range testCases {
-		mockPubSub.EXPECT().CreateTopic(gomock.Any(), pubsubMigrationTopic).Return(tc.err)
+		mockPubSub.createTopicFn = func(_ context.Context, name string) error {
+			assert.Equal(t, pubsubMigrationTopic, name)
+			return tc.createErr
+		}
 
-		err := migratorWithPubSub.checkAndCreateMigrationTable(t.Context(), mockContainer)
+		err := migratorWithPubSub.checkAndCreateMigrationTable(t.Context(), deps)
 
-		assert.Equal(t, tc.err, err, "TEST[%v]\n %v Failed! ", i, tc.desc)
+		assert.NoError(t, err, "TEST[%v]\n %v Failed! ", i, tc.desc)
 	}
 }
 
 func Test_PubSubCommitMigration_Success(t *testing.T) {
-	migratorWithPubSub, mockPubSub, mockContainer := pubsubTestSetup(t)
+	migratorWithPubSub, mockPubSub, deps := pubsubTestSetup(t)
 
 	fixedTime := time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC)
 	data := transactionData{
@@ -145,15 +148,21 @@ func Test_PubSubCommitMigration_Success(t *testing.T) {
 		StartTime:       fixedTime,
 	}
 
-	mockPubSub.EXPECT().Publish(gomock.Any(), pubsubMigrationTopic, gomock.Any()).Return(nil)
+	published := false
+	mockPubSub.publishFn = func(_ context.Context, name string, _ []byte) error {
+		assert.Equal(t, pubsubMigrationTopic, name)
+		published = true
+		return nil
+	}
 
-	err := migratorWithPubSub.commitMigration(t.Context(), mockContainer, data)
+	err := migratorWithPubSub.commitMigration(t.Context(), deps, data)
 
 	assert.NoError(t, err, "Successful migration commit should not return an error")
+	assert.True(t, published)
 }
 
 func Test_PubSubCommitMigration_PublishError(t *testing.T) {
-	migratorWithPubSub, mockPubSub, mockContainer := pubsubTestSetup(t)
+	migratorWithPubSub, mockPubSub, deps := pubsubTestSetup(t)
 
 	fixedTime := time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC)
 	data := transactionData{
@@ -161,21 +170,13 @@ func Test_PubSubCommitMigration_PublishError(t *testing.T) {
 		StartTime:       fixedTime,
 	}
 
-	mockPubSub.EXPECT().Publish(gomock.Any(), pubsubMigrationTopic, gomock.Any()).Return(errTopic)
+	mockPubSub.publishFn = func(_ context.Context, _ string, _ []byte) error {
+		return errTopic
+	}
 
-	err := migratorWithPubSub.commitMigration(t.Context(), mockContainer, data)
+	err := migratorWithPubSub.commitMigration(t.Context(), deps, data)
 
 	assert.Equal(t, errTopic, err, "Publish error should be returned")
-}
-
-type mockNextMigrator struct {
-	migrator
-	version int64
-	err     error
-}
-
-func (m mockNextMigrator) getLastMigration(context.Context, *infra.Container) (int64, error) {
-	return m.version, m.err
 }
 
 func Test_PubSubGetLastMigration(t *testing.T) {
@@ -224,25 +225,30 @@ func Test_PubSubGetLastMigration(t *testing.T) {
 
 	for i, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
+			mockPubSub := &fakePubSub{
+				queryFn: func(_ context.Context, query string, args ...any) ([]byte, error) {
+					assert.Equal(t, pubsubMigrationTopic, query)
+					assert.Equal(t, []any{int64(0), defaultQueryLimit}, args)
+					return tc.pubsubResult, tc.pubsubError
+				},
+			}
+			deps := &Deps{
+				Logger: logging.NewWriterLogger(logging.DEBUG, io.Discard, io.Discard),
+				PubSub: mockPubSub,
+			}
 
-			mockContainer, mocks := infra.NewMockContainer(t)
-			mockPubSub := mocks.PubSub
-
-			mockPubSub.EXPECT().
-				Query(gomock.Any(), pubsubMigrationTopic, int64(0), defaultQueryLimit).
-				Return(tc.pubsubResult, tc.pubsubError)
-
-			next := mockNextMigrator{version: tc.nextVersion, err: tc.nextErr}
+			next := &fakeMigrator{
+				lastFn: func(context.Context, *Deps) (int64, error) {
+					return tc.nextVersion, tc.nextErr
+				},
+			}
 
 			pm := pubsubMigrator{
 				PubSub:   pubsubDS{client: mockPubSub},
 				migrator: next,
 			}
 
-			// Call the method under test
-			result, err := pm.getLastMigration(t.Context(), mockContainer)
+			result, err := pm.getLastMigration(t.Context(), deps)
 
 			assert.Equal(t, tc.expectedResult, result, "TEST[%v] %v Failed!", i, tc.desc)
 

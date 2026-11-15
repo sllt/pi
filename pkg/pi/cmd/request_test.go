@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -85,4 +86,13 @@ func Test_Params(t *testing.T) {
 	assert.ElementsMatch(t, expectedCategories, r.Params("category"), "expected all values of 'category' to match")
 	assert.ElementsMatch(t, expectedTags, r.Params("tag"), "expected all values of 'tag' to match")
 	assert.Empty(t, r.Params("nonexistent"), "expected empty slice for none-existent query param")
+}
+
+func TestNewRequestWithContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	r := NewRequestWithContext(ctx, []string{"run", "--env=prod"})
+	assert.Equal(t, "prod", r.Param("env"))
+	assert.NoError(t, r.Context().Err())
+	cancel()
+	assert.ErrorIs(t, r.Context().Err(), context.Canceled)
 }

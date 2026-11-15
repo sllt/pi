@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,11 +27,12 @@ type Config struct {
 
 // Client represents the Dgraph client with logging and metrics.
 type Client struct {
-	client  DgraphClient
-	logger  Logger
-	metrics Metrics
-	config  Config
-	tracer  trace.Tracer
+	client   DgraphClient
+	grpcConn io.Closer
+	logger   Logger
+	metrics  Metrics
+	config   Config
+	tracer   trace.Tracer
 }
 
 type (
@@ -38,11 +41,13 @@ type (
 )
 
 var (
-	errInvalidMutation   = errors.New("invalid mutation type")
-	errInvalidOperation  = errors.New("invalid operation type")
-	errHealthCheckFailed = errors.New("dgraph health check failed")
-	errEmptySchema       = errors.New("schema cannot be empty")
-	errEmptyField        = errors.New("field name cannot be empty")
+	errInvalidMutation    = errors.New("invalid mutation type")
+	errInvalidOperation   = errors.New("invalid operation type")
+	errHealthCheckFailed  = errors.New("dgraph health check failed")
+	errEmptySchema        = errors.New("schema cannot be empty")
+	errEmptyField         = errors.New("field name cannot be empty")
+	errInvalidConfig      = errors.New("dgraph: host and port are required")
+	errClientNotConnected = errors.New("dgraph: client not connected")
 )
 
 // New creates a new Dgraph client with the given configuration.
@@ -52,36 +57,143 @@ func New(config Config) *Client {
 	}
 }
 
-// Connect connects to the Dgraph database using the provided configuration.
-func (d *Client) Connect() {
+// FromEnv constructs an unstarted Dgraph client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
+
+	host := strings.TrimSpace(get("DGRAPH_HOST"))
+	if host == "" {
+		return nil, errInvalidConfig
+	}
+
+	port := strings.TrimSpace(get("DGRAPH_PORT"))
+	if port == "" {
+		port = "9080"
+	} else {
+		parsed, err := strconv.Atoi(port)
+		if err != nil || parsed <= 0 || parsed > 65535 {
+			return nil, fmt.Errorf("dgraph: invalid DGRAPH_PORT %q", port)
+		}
+	}
+
+	return New(Config{
+		Host: host,
+		Port: port,
+	}), nil
+}
+
+// ConnectContext dials Dgraph, verifies connectivity via HealthCheck(ctx), and closes the gRPC connection on failure.
+func (d *Client) ConnectContext(ctx context.Context) error {
+	if d == nil || strings.TrimSpace(d.config.Host) == "" || strings.TrimSpace(d.config.Port) == "" {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d.client != nil {
+		return nil
+	}
+
 	address := fmt.Sprintf("%s:%s", d.config.Host, d.config.Port)
-	d.logger.Debugf("connecting to Dgraph at %v", address)
+	if d.logger != nil {
+		d.logger.Debugf("connecting to Dgraph at %v", address)
+	}
 
 	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		d.logger.Errorf("error while connecting to Dgraph, err: %v", err)
-		return
+		return err
 	}
 
-	var responseTimeBuckets = []float64{0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0}
-
-	// Register metrics
-	d.metrics.NewHistogram("dgraph_query_duration", "Response time of Dgraph queries in microseconds.", responseTimeBuckets...)
-	d.metrics.NewHistogram("dgraph_query_with_vars_duration", "Response time of Dgraph "+
-		"queries with variables in microseconds.", responseTimeBuckets...)
-	d.metrics.NewHistogram("dgraph_mutate_duration", "Response time of Dgraph mutations in microseconds.", responseTimeBuckets...)
-	d.metrics.NewHistogram("dgraph_alter_duration", "Response time of Dgraph alter operations in microseconds.", responseTimeBuckets...)
+	if d.metrics != nil {
+		responseTimeBuckets := []float64{0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0}
+		d.metrics.NewHistogram("dgraph_query_duration", "Response time of Dgraph queries in microseconds.", responseTimeBuckets...)
+		d.metrics.NewHistogram("dgraph_query_with_vars_duration", "Response time of Dgraph "+
+			"queries with variables in microseconds.", responseTimeBuckets...)
+		d.metrics.NewHistogram("dgraph_mutate_duration", "Response time of Dgraph mutations in microseconds.", responseTimeBuckets...)
+		d.metrics.NewHistogram("dgraph_alter_duration", "Response time of Dgraph alter operations in microseconds.", responseTimeBuckets...)
+	}
 
 	dg := dgo.NewDgraphClient(api.NewDgraphClient(conn))
 	d.client = NewDgraphClient(dg)
+	d.grpcConn = conn
 
-	// Check connection by performing a basic health check
-	if _, err := d.HealthCheck(context.Background()); err != nil {
-		d.logger.Errorf("error while connecting to Dgraph: %v", err)
+	if _, err := d.HealthCheck(ctx); err != nil {
+		_ = d.Close()
+		return err
+	}
+
+	if d.logger != nil {
+		d.logger.Logf("connected to Dgraph server at %v:%v", d.config.Host, d.config.Port)
+	}
+
+	return nil
+}
+
+// Close closes the underlying gRPC connection idempotently.
+func (d *Client) Close() error {
+	if d == nil {
+		return nil
+	}
+
+	conn := d.grpcConn
+	d.grpcConn = nil
+	d.client = nil
+
+	if conn != nil {
+		return conn.Close()
+	}
+
+	return nil
+}
+
+// Connect connects to the Dgraph database using the provided configuration.
+func (d *Client) Connect() {
+	address := fmt.Sprintf("%s:%s", d.config.Host, d.config.Port)
+	if d.logger != nil {
+		d.logger.Debugf("connecting to Dgraph at %v", address)
+	}
+
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		if d.logger != nil {
+			d.logger.Errorf("error while connecting to Dgraph, err: %v", err)
+		}
 		return
 	}
 
-	d.logger.Logf("connected to Dgraph server at %v:%v", d.config.Host, d.config.Port)
+	if d.metrics != nil {
+		var responseTimeBuckets = []float64{0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0}
+
+		// Register metrics
+		d.metrics.NewHistogram("dgraph_query_duration", "Response time of Dgraph queries in microseconds.", responseTimeBuckets...)
+		d.metrics.NewHistogram("dgraph_query_with_vars_duration", "Response time of Dgraph "+
+			"queries with variables in microseconds.", responseTimeBuckets...)
+		d.metrics.NewHistogram("dgraph_mutate_duration", "Response time of Dgraph mutations in microseconds.", responseTimeBuckets...)
+		d.metrics.NewHistogram("dgraph_alter_duration", "Response time of Dgraph alter operations in microseconds.", responseTimeBuckets...)
+	}
+
+	dg := dgo.NewDgraphClient(api.NewDgraphClient(conn))
+	d.client = NewDgraphClient(dg)
+	d.grpcConn = conn
+
+	// Check connection by performing a basic health check
+	if _, err := d.HealthCheck(context.Background()); err != nil {
+		_ = conn.Close()
+		d.grpcConn = nil
+		if d.logger != nil {
+			d.logger.Errorf("error while connecting to Dgraph: %v", err)
+		}
+		return
+	}
+
+	if d.logger != nil {
+		d.logger.Logf("connected to Dgraph server at %v:%v", d.config.Host, d.config.Port)
+	}
 }
 
 // UseLogger sets the logger for the Dgraph client which asserts the Logger interface.
@@ -140,6 +252,10 @@ func (d *Client) DropField(ctx context.Context, fieldName string) error {
 
 // Query executes a read-only query in the Dgraph database and returns the result.
 func (d *Client) Query(ctx context.Context, query string) (any, error) {
+	if d == nil || d.client == nil {
+		return nil, errClientNotConnected
+	}
+
 	start := time.Now()
 
 	tracedCtx, span := d.addTrace(ctx, "query")
@@ -156,7 +272,12 @@ func (d *Client) Query(ctx context.Context, query string) (any, error) {
 	}
 
 	if err != nil {
-		d.logger.Error("dgraph query failed: ", err)
+		if span != nil {
+			span.End()
+		}
+		if d.logger != nil {
+			d.logger.Error("dgraph query failed: ", err)
+		}
 		ql.PrettyPrint(d.logger)
 
 		return nil, err
@@ -170,6 +291,10 @@ func (d *Client) Query(ctx context.Context, query string) (any, error) {
 // QueryWithVars executes a read-only query with variables in the Dgraph database.
 // QueryWithVars executes a read-only query with variables in the Dgraph database.
 func (d *Client) QueryWithVars(ctx context.Context, query string, vars map[string]string) (any, error) {
+	if d == nil || d.client == nil {
+		return nil, errClientNotConnected
+	}
+
 	start := time.Now()
 
 	tracedCtx, span := d.addTrace(ctx, "query-with-vars")
@@ -190,7 +315,12 @@ func (d *Client) QueryWithVars(ctx context.Context, query string, vars map[strin
 	}
 
 	if err != nil {
-		d.logger.Error("dgraph queryWithVars failed: ", err)
+		if span != nil {
+			span.End()
+		}
+		if d.logger != nil {
+			d.logger.Error("dgraph queryWithVars failed: ", err)
+		}
 		ql.PrettyPrint(d.logger)
 
 		return nil, err
@@ -203,15 +333,18 @@ func (d *Client) QueryWithVars(ctx context.Context, query string, vars map[strin
 
 // Mutate executes a write operation (mutation) in the Dgraph database and returns the result.
 func (d *Client) Mutate(ctx context.Context, mu any) (any, error) {
-	start := time.Now()
-
-	tracedCtx, span := d.addTrace(ctx, "mutate")
-
 	// Cast to proper mutation type
 	mutation, ok := mu.(*api.Mutation)
 	if !ok {
 		return nil, errInvalidMutation
 	}
+	if d == nil || d.client == nil {
+		return nil, errClientNotConnected
+	}
+
+	start := time.Now()
+
+	tracedCtx, span := d.addTrace(ctx, "mutate")
 
 	// Execute mutation
 	resp, err := d.client.NewTxn().Mutate(tracedCtx, mutation)
@@ -225,7 +358,12 @@ func (d *Client) Mutate(ctx context.Context, mu any) (any, error) {
 	}
 
 	if err != nil {
-		d.logger.Error("dgraph mutation failed: ", err)
+		if span != nil {
+			span.End()
+		}
+		if d.logger != nil {
+			d.logger.Error("dgraph mutation failed: ", err)
+		}
 		ql.PrettyPrint(d.logger)
 
 		return nil, err
@@ -238,16 +376,21 @@ func (d *Client) Mutate(ctx context.Context, mu any) (any, error) {
 
 // Alter applies schema or other changes to the Dgraph database.
 func (d *Client) Alter(ctx context.Context, op any) error {
-	start := time.Now()
-
-	tracedCtx, span := d.addTrace(ctx, "alter")
-
 	// Cast to proper operation type
 	operation, ok := op.(*api.Operation)
 	if !ok {
-		d.logger.Error("invalid operation type provided to alter")
+		if d != nil && d.logger != nil {
+			d.logger.Error("invalid operation type provided to alter")
+		}
 		return errInvalidOperation
 	}
+	if d == nil || d.client == nil {
+		return errClientNotConnected
+	}
+
+	start := time.Now()
+
+	tracedCtx, span := d.addTrace(ctx, "alter")
 
 	// Apply the schema changes
 	err := d.client.Alter(tracedCtx, operation)
@@ -265,7 +408,12 @@ func (d *Client) Alter(ctx context.Context, op any) error {
 	}
 
 	if err != nil {
-		d.logger.Error("dgraph alter failed: ", err)
+		if span != nil {
+			span.End()
+		}
+		if d.logger != nil {
+			d.logger.Error("dgraph alter failed: ", err)
+		}
 		ql.PrettyPrint(d.logger)
 
 		return err
@@ -278,16 +426,29 @@ func (d *Client) Alter(ctx context.Context, op any) error {
 
 // NewTxn creates a new transaction (read-write) for interacting with the Dgraph database.
 func (d *Client) NewTxn() any {
+	if d == nil || d.client == nil {
+		return nil
+	}
 	return d.client.NewTxn()
 }
 
 // NewReadOnlyTxn creates a new read-only transaction for querying the Dgraph database.
 func (d *Client) NewReadOnlyTxn() any {
+	if d == nil || d.client == nil {
+		return nil
+	}
 	return d.client.NewReadOnlyTxn()
 }
 
 // HealthCheck performs a basic health check by pinging the Dgraph server.
 func (d *Client) HealthCheck(ctx context.Context) (any, error) {
+	if d == nil || d.client == nil {
+		return "DOWN", errHealthCheckFailed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	healthResponse, err := d.client.NewTxn().Query(ctx, `{
         health(func: has(dgraph.type)) {
             status
@@ -295,7 +456,9 @@ func (d *Client) HealthCheck(ctx context.Context) (any, error) {
     }`)
 
 	if err != nil || len(healthResponse.Json) == 0 {
-		d.logger.Error("dgraph health check failed: ", err)
+		if d.logger != nil {
+			d.logger.Error("dgraph health check failed: ", err)
+		}
 		return "DOWN", errHealthCheckFailed
 	}
 
@@ -324,7 +487,9 @@ func (d *Client) sendOperationStats(ctx context.Context, start time.Time, query,
 	}
 
 	queryLog.PrettyPrint(d.logger)
-	d.metrics.RecordHistogram(ctx, metricName, float64(queryLog.Duration))
+	if d.metrics != nil {
+		d.metrics.RecordHistogram(ctx, metricName, float64(queryLog.Duration))
+	}
 }
 
 func mutationToString(mutation *api.Mutation) string {

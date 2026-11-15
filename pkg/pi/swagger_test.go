@@ -19,7 +19,6 @@ import (
 
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/response"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 )
 
@@ -39,9 +38,9 @@ func TestOpenAPIHandler(t *testing.T) {
 		}
 	}()
 
-	testContainer, _ := infra.NewMockContainer(t)
+	testKernel := newTestKernel(nil)
 
-	ctx := createTestContext(http.MethodGet, "/.well-known/openapi.json", "", nil, testContainer)
+	ctx := createTestContext(http.MethodGet, "/.well-known/openapi.json", "", nil, testKernel)
 
 	result, err := OpenAPIHandler(ctx)
 	if err != nil {
@@ -63,10 +62,10 @@ func TestOpenAPIHandler(t *testing.T) {
 }
 
 func TestOpenAPIHandler_Error(t *testing.T) {
-	testContainer, _ := infra.NewMockContainer(t)
+	testKernel := newTestKernel(nil)
 
-	ctx := createTestContext(http.MethodGet, "/.well-known/openapi.json", "", nil, testContainer)
-	ctx.ContextLogger = *logging.NewContextLogger(ctx, testContainer.Logger)
+	ctx := createTestContext(http.MethodGet, "/.well-known/openapi.json", "", nil, testKernel)
+	ctx.ContextLogger = *logging.NewContextLogger(ctx, testKernel.getLogger())
 
 	result, err := OpenAPIHandler(ctx)
 
@@ -76,7 +75,7 @@ func TestOpenAPIHandler_Error(t *testing.T) {
 }
 
 func TestSwaggerHandler(t *testing.T) {
-	testContainer, _ := infra.NewMockContainer(t)
+	testKernel := newTestKernel(nil)
 
 	tests := []struct {
 		desc           string
@@ -103,7 +102,7 @@ func TestSwaggerHandler(t *testing.T) {
 			testReq = testReq.WithContext(context.WithValue(testReq.Context(), chi.RouteCtxKey, rctx))
 			piReq := piHTTP.NewRequest(testReq)
 
-			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piReq, testContainer)
+			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piReq, testKernel)
 
 			resp, err := SwaggerUIHandler(ctx)
 			require.NoError(t, err, "Expected err to be nil")
@@ -138,7 +137,7 @@ func TestSwaggerHandler(t *testing.T) {
 }
 
 func TestRequestAcceptsGzip(t *testing.T) {
-	testContainer, _ := infra.NewMockContainer(t)
+	testKernel := newTestKernel(nil)
 
 	cases := []struct {
 		name    string
@@ -165,14 +164,14 @@ func TestRequestAcceptsGzip(t *testing.T) {
 			for _, h := range tc.headers {
 				req.Header.Add("Accept-Encoding", h)
 			}
-			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piHTTP.NewRequest(req), testContainer)
+			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piHTTP.NewRequest(req), testKernel)
 			assert.Equal(t, tc.want, requestAcceptsGzip(ctx))
 		})
 	}
 }
 
 func TestSwaggerUIHandler_Error(t *testing.T) {
-	testContainer, _ := infra.NewMockContainer(t)
+	testKernel := newTestKernel(nil)
 
 	for _, badFile := range []string{"abc.abc", "scalar.js.gz", "files.go"} {
 		t.Run(badFile, func(t *testing.T) {
@@ -182,8 +181,8 @@ func TestSwaggerUIHandler_Error(t *testing.T) {
 			testReq = testReq.WithContext(context.WithValue(testReq.Context(), chi.RouteCtxKey, rctx))
 
 			piReq := piHTTP.NewRequest(testReq)
-			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piReq, testContainer)
-			ctx.ContextLogger = *logging.NewContextLogger(ctx, testContainer.Logger)
+			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodGet), piReq, testKernel)
+			ctx.ContextLogger = *logging.NewContextLogger(ctx, testKernel.getLogger())
 
 			resp, err := SwaggerUIHandler(ctx)
 

@@ -13,7 +13,6 @@ import (
 
 	"github.com/sllt/pi/pkg/pi/config"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
@@ -39,8 +38,8 @@ func TestRun_ServerStartsListening(t *testing.T) {
 
 	router.RegisteredRoutes = &registeredMethods
 
-	// Create a mock container
-	c := infra.NewContainer(getConfigs(t))
+	// Create a test runtime kernel
+	c := newLegacyKernel(getConfigs(t), nil, false)
 
 	// Create an instance of httpServer
 	server := &httpServer{
@@ -87,10 +86,8 @@ func TestShutdown_ServerStopsListening(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	// Create a mock container
-	c := &infra.Container{
-		Logger: logging.NewLogger(logging.INFO),
-	}
+	// Create a test runtime kernel
+	c := newTestKernel(logging.NewLogger(logging.INFO))
 
 	// Create an instance of httpServer
 	server := &httpServer{
@@ -100,7 +97,7 @@ func TestShutdown_ServerStopsListening(t *testing.T) {
 
 	// Startup is synchronous, as it is in App.Start. Sleeping after a goroutine
 	// launch does not synchronize publication of server.srv with Shutdown.
-	require.NoError(t, server.start(c, func(err error) { c.Logger.Error(err) }))
+	require.NoError(t, server.start(c, func(err error) { c.getLogger().Error(err) }))
 
 	// Create a context with a timeout to test the shutdown
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -118,10 +115,8 @@ func TestShutdown_ServerContextDeadline(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	// Create a mock container
-	c := &infra.Container{
-		Logger: logging.NewLogger(logging.INFO),
-	}
+	// Create a test runtime kernel
+	c := newTestKernel(logging.NewLogger(logging.INFO))
 
 	// Create an instance of httpServer
 	server := &httpServer{
@@ -129,7 +124,7 @@ func TestShutdown_ServerContextDeadline(t *testing.T) {
 		port:   testutil.GetFreePort(t),
 	}
 
-	require.NoError(t, server.start(c, func(err error) { c.Logger.Error(err) }))
+	require.NoError(t, server.start(c, func(err error) { c.getLogger().Error(err) }))
 
 	// Create a context with a timeout to test the shutdown
 	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))

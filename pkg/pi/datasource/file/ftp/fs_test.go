@@ -1,6 +1,7 @@
 package ftp
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -57,7 +58,7 @@ func TestNew_ConnectionFailure_StartsRetry(t *testing.T) {
 	require.NotNil(t, fs)
 	defer func() { _ = fs.(*fileSystem).Close() }()
 
-	// Inject logger and metrics (mimicking AddFileStore behavior)
+	// Inject logger and metrics (mimicking WithFile / SetFile behavior)
 	fs.UseLogger(mockLogger)
 	fs.UseMetrics(mockMetrics)
 
@@ -294,4 +295,45 @@ func TestStartRetryConnect_ExitWhenRetryDisabled(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("startRetryConnect did not exit when retry is disabled")
 	}
+}
+
+func TestFTP_ConnectContext_Health_Close_FromEnv(t *testing.T) {
+	_, err := FromEnv(func(string) string { return "" })
+	require.ErrorIs(t, err, errInvalidConfig)
+
+	server, _, cleanup := setupTestFTPServer(t)
+	defer cleanup()
+
+	fsProvider, err := FromEnv(func(key string) string {
+		switch key {
+		case "FTP_HOST":
+			return "127.0.0.1"
+		case "FTP_PORT":
+			return "2121"
+		case "FTP_USER":
+			return "test"
+		case "FTP_PASSWORD":
+			return "test"
+		default:
+			return ""
+		}
+	})
+	require.NoError(t, err)
+	require.NotNil(t, fsProvider)
+
+	// Cancelled context fails fast without spawning background retry
+	ftpFS := fsProvider.(*fileSystem)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, ftpFS.ConnectContext(ctx), context.Canceled)
+	assert.Nil(t, ftpFS.retryDone)
+
+	// ConnectContext against embedded test FTP server + Health + idempotent Close
+	liveFS := New(getTestConfig(server.Port)).(*fileSystem)
+	require.NoError(t, liveFS.ConnectContext(context.Background()))
+	adapter := liveFS.CommonFileSystem.Provider.(*storageAdapter)
+	require.NoError(t, adapter.Health(context.Background()))
+	require.NoError(t, liveFS.Close())
+	require.NoError(t, liveFS.Close())
+	require.ErrorIs(t, adapter.Health(context.Background()), errFTPClientNotInitialized)
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/segmentio/kafka-go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
 )
@@ -138,6 +139,70 @@ func New(conf *Config, logger pubsub.Logger, metrics Metrics) *kafkaClient { //n
 
 	return client
 }
+
+// ValidateConfig validates Kafka configuration purely in memory without opening sockets or reading TLS files.
+func ValidateConfig(conf *Config) error {
+	if conf == nil {
+		return errBrokerNotProvided
+	}
+	cfgCopy := *conf
+	return validateConfigs(&cfgCopy)
+}
+
+// OpenContext opens and verifies a Kafka client bounded by ctx without spawning retryConnect goroutines.
+func OpenContext(ctx context.Context, conf *Config, logger pubsub.Logger, metrics Metrics, tp trace.TracerProvider) (pubsub.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if conf == nil {
+		return nil, errBrokerNotProvided
+	}
+	cfgCopy := *conf
+	if err := validateConfigs(&cfgCopy); err != nil {
+		return nil, err
+	}
+	if logger == nil {
+		logger = nopKafkaLogger{}
+	}
+	if metrics == nil {
+		metrics = nopKafkaMetrics{}
+	}
+	var tracer trace.Tracer
+	if tp != nil {
+		tracer = tp.Tracer("pi")
+	} else {
+		tracer = noop.NewTracerProvider().Tracer("pi")
+	}
+
+	client := &kafkaClient{
+		logger:  logger,
+		config:  cfgCopy,
+		metrics: metrics,
+		mu:      &sync.RWMutex{},
+		tracer:  tracer,
+	}
+	if err := client.initialize(ctx); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
+type nopKafkaLogger struct{}
+
+func (nopKafkaLogger) Debugf(string, ...any) {}
+func (nopKafkaLogger) Debug(...any)          {}
+func (nopKafkaLogger) Logf(string, ...any)   {}
+func (nopKafkaLogger) Log(...any)            {}
+func (nopKafkaLogger) Errorf(string, ...any) {}
+func (nopKafkaLogger) Error(...any)          {}
+
+type nopKafkaMetrics struct{}
+
+func (nopKafkaMetrics) IncrementCounter(context.Context, string, ...string) {}
 
 func (k *kafkaClient) Publish(ctx context.Context, topic string, message []byte) error {
 	ctx, span := k.getTracer().Start(ctx, "kafka-publish")

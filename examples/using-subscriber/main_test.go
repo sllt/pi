@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sllt/pi/pkg/pi"
-	"github.com/sllt/pi/pkg/pi/infra"
-	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/testkit"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
@@ -21,6 +21,14 @@ func TestMain(m *testing.M) {
 }
 
 func TestMainInitialization(t *testing.T) {
+	conn, err := net.DialTimeout("tcp", "localhost:9092", 200*time.Millisecond)
+	if err != nil {
+		t.Skipf("skipping live Kafka broker test: localhost:9092 unavailable (%v)", err)
+	}
+	_ = conn.Close()
+
+	_ = testutil.NewServerConfigs(t)
+
 	log := testutil.StdoutOutputForFunc(func() {
 		go main()
 
@@ -31,6 +39,18 @@ func TestMainInitialization(t *testing.T) {
 	if !strings.Contains(log, expectedLog) {
 		t.Errorf("Expected log to contain %q, but got: %s", expectedLog, log)
 	}
+}
+
+func newTestSubscriberContext(t *testing.T, req pi.Request) *pi.Context {
+	t.Helper()
+
+	app := testkit.New(t, pi.WithConfig(map[string]string{
+		"HTTP_ENABLED": "false",
+		"GRPC_ENABLED": "false",
+	}))
+	ctx := app.NewContext(context.Background())
+	ctx.Request = req
+	return ctx
 }
 
 type errorRequest struct{}
@@ -46,13 +66,7 @@ func (e *errorRequest) HostName() string            { return "" }
 func (e *errorRequest) Params(key string) []string  { return nil }
 
 func TestProductSubscribe_BindError(t *testing.T) {
-	mockContainer, _ := infra.NewMockContainer(t)
-
-	ctx := &pi.Context{
-		Request:       &errorRequest{},
-		Container:     mockContainer,
-		ContextLogger: *logging.NewContextLogger(context.Background(), mockContainer.Logger),
-	}
+	ctx := newTestSubscriberContext(t, &errorRequest{})
 
 	err := productHandler(ctx)
 
@@ -62,13 +76,7 @@ func TestProductSubscribe_BindError(t *testing.T) {
 }
 
 func TestOrderSubscribe_BindError(t *testing.T) {
-	mockContainer, _ := infra.NewMockContainer(t)
-
-	ctx := &pi.Context{
-		Request:       &errorRequest{},
-		Container:     mockContainer,
-		ContextLogger: *logging.NewContextLogger(context.Background(), mockContainer.Logger),
-	}
+	ctx := newTestSubscriberContext(t, &errorRequest{})
 
 	err := orderHandler(ctx)
 	if err != nil {
@@ -98,12 +106,7 @@ func (r *successProductRequest) HostName() string        { return "" }
 func (r *successProductRequest) Params(string) []string  { return nil }
 
 func TestProductHandler_Success(t *testing.T) {
-	mockContainer, _ := infra.NewMockContainer(t)
-	ctx := &pi.Context{
-		Request:       &successProductRequest{},
-		Container:     mockContainer,
-		ContextLogger: *logging.NewContextLogger(context.Background(), mockContainer.Logger),
-	}
+	ctx := newTestSubscriberContext(t, &successProductRequest{})
 
 	err := productHandler(ctx)
 	if err != nil {
@@ -132,12 +135,7 @@ func (r *successOrderRequest) HostName() string        { return "" }
 func (r *successOrderRequest) Params(string) []string  { return nil }
 
 func TestOrderHandler_Success(t *testing.T) {
-	mockContainer, _ := infra.NewMockContainer(t)
-	ctx := &pi.Context{
-		Request:       &successOrderRequest{},
-		Container:     mockContainer,
-		ContextLogger: *logging.NewContextLogger(context.Background(), mockContainer.Logger),
-	}
+	ctx := newTestSubscriberContext(t, &successOrderRequest{})
 	err := orderHandler(ctx)
 	if err != nil {
 		t.Errorf("Expected nil error, got %v", err)

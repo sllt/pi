@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	piRedis "github.com/sllt/pi/pkg/pi/datasource/redis"
 )
 
 func TestTokenBucket_Allow(t *testing.T) {
@@ -99,4 +101,31 @@ func TestRedisRateLimiterStore_toInt64_ErrorCases(t *testing.T) {
 	_, err := toInt64(struct{}{})
 
 	assert.ErrorIs(t, err, errInvalidRedisResultType)
+}
+
+func TestRedisRateLimiterStore_ClientInterfaceAndTypedNilSafety(t *testing.T) {
+	cfg := RateLimiterConfig{Requests: 5, Burst: 5, Window: time.Second}
+
+	// Untyped nil
+	storeNil := NewRedisRateLimiterStore(nil)
+	allowed, retry, err := storeNil.Allow(context.Background(), "k1", cfg)
+	assert.True(t, allowed)
+	assert.Zero(t, retry)
+	assert.Error(t, err)
+
+	// Typed nil (*piRedis.Redis)(nil)
+	var typedNil *piRedis.Redis
+	storeTypedNil := NewRedisRateLimiterStore(typedNil)
+	allowed, retry, err = storeTypedNil.Allow(context.Background(), "k2", cfg)
+	assert.True(t, allowed)
+	assert.Zero(t, retry)
+	assert.Error(t, err)
+
+	// Unstarted *piRedis.Handle satisfies piRedis.Client and fails open with ErrNotStarted
+	handle := piRedis.NewHandle(nil, nil, nil)
+	storeHandle := NewRedisRateLimiterStore(handle)
+	allowed, retry, err = storeHandle.Allow(context.Background(), "k3", cfg)
+	assert.True(t, allowed)
+	assert.Zero(t, retry)
+	assert.ErrorIs(t, err, piRedis.ErrNotStarted)
 }

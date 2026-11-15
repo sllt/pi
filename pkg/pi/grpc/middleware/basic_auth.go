@@ -12,15 +12,13 @@ import (
 	"google.golang.org/grpc/status"
 
 	auth "github.com/sllt/pi/pkg/pi/http/middleware"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 // BasicAuthProvider holds the configuration for basic authentication.
 type BasicAuthProvider struct {
-	Users                       map[string]string
-	ValidateFunc                func(username, password string) bool
-	ValidateFuncWithDatasources func(c *infra.Container, username, password string) bool
-	Container                   *infra.Container
+	Users                   map[string]string
+	ValidateFunc            func(username, password string) bool
+	ValidateFuncWithContext func(ctx context.Context, username, password string) bool
 }
 
 // BasicAuthUnaryInterceptor returns a gRPC unary server interceptor that validates the Basic Auth credentials.
@@ -64,16 +62,16 @@ func validateBasicAuth(ctx context.Context, provider BasicAuthProvider) (string,
 		return "", status.Error(codes.Unauthenticated, "invalid credentials format")
 	}
 
-	if !provider.verifyCredentials(username, password) {
+	if !provider.verifyCredentials(ctx, username, password) {
 		return "", status.Error(codes.Unauthenticated, "invalid credentials")
 	}
 
 	return username, nil
 }
 
-func (b BasicAuthProvider) verifyCredentials(username, password string) bool {
-	if b.ValidateFuncWithDatasources != nil {
-		return b.ValidateFuncWithDatasources(b.Container, username, password)
+func (b BasicAuthProvider) verifyCredentials(ctx context.Context, username, password string) bool {
+	if b.ValidateFuncWithContext != nil {
+		return b.ValidateFuncWithContext(ctx, username, password)
 	}
 
 	if b.ValidateFunc != nil {
@@ -82,7 +80,6 @@ func (b BasicAuthProvider) verifyCredentials(username, password string) bool {
 
 	expectedPass, ok := b.Users[username]
 	if !ok {
-		// Use dummy comparison to prevent timing attacks
 		subtle.ConstantTimeCompare([]byte(password), []byte("dummy"))
 
 		return false

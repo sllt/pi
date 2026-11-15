@@ -3,12 +3,38 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/joho/godotenv"
 )
+
+var snapshotEmbeddedURLPattern = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"',;<>]+`)
+
+func scrubValueUserInfo(raw string) string {
+	if !strings.Contains(raw, "://") {
+		return raw
+	}
+	return snapshotEmbeddedURLPattern.ReplaceAllStringFunc(raw, func(match string) string {
+		trimmed := strings.TrimRight(match, ".,;:)]}")
+		suffix := match[len(trimmed):]
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			if strings.Contains(trimmed, "@") {
+				return "[redacted]" + suffix
+			}
+			return match
+		}
+		if u.User != nil {
+			u.User = url.UserPassword("[redacted]", "[redacted]")
+			return strings.ReplaceAll(u.String(), "%5Bredacted%5D", "[redacted]") + suffix
+		}
+		return match
+	})
+}
 
 // Snapshot is immutable. Values and Redacted return independent copies.
 type Snapshot struct{ values map[string]string }
@@ -47,7 +73,7 @@ func RedactMap(values map[string]string) map[string]string {
 		u := strings.ToUpper(k)
 		redacted := false
 		isPublicHeaderList := u == "CORS_ALLOWED_HEADERS" || u == "CORS_EXPOSE_HEADERS"
-		for _, word := range []string{"SECRET", "PASSWORD", "PASS", "PRIVATE", "TOKEN", "KEY", "DSN", "CREDENTIAL", "URL", "AUTH", "HEADER"} {
+		for _, word := range []string{"SECRET", "PASSWORD", "PASS", "PRIVATE", "TOKEN", "KEY", "DSN", "CREDENTIAL", "URL", "URI", "CONN", "REPLICAS", "AUTH", "HEADER"} {
 			if word == "HEADER" && isPublicHeaderList {
 				continue
 			}
@@ -59,7 +85,7 @@ func RedactMap(values map[string]string) map[string]string {
 		if redacted {
 			m[k] = "[redacted]"
 		} else {
-			m[k] = v
+			m[k] = scrubValueUserInfo(v)
 		}
 	}
 	return m

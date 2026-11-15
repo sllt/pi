@@ -26,7 +26,6 @@ const (
 )
 
 var (
-	errContainerNil      = errors.New("container is nil")
 	errValidateFuncEmpty = errors.New("validate func is empty")
 )
 

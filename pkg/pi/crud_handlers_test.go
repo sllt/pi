@@ -17,11 +17,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
 	piSql "github.com/sllt/pi/pkg/pi/datasource/sql"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 var (
@@ -31,7 +29,7 @@ var (
 	errMock = errors.New("mock error")
 )
 
-func createTestContext(method, path, id string, body []byte, cont *infra.Container) *Context {
+func createTestContext(method, path, id string, body []byte, rt *runtimeKernel) *Context {
 	testReq := httptest.NewRequest(method, path+"/"+id, bytes.NewBuffer(body))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", id)
@@ -39,7 +37,7 @@ func createTestContext(method, path, id string, body []byte, cont *infra.Contain
 	testReq.Header.Set("Content-Type", "application/json")
 	piReq := piHTTP.NewRequest(testReq)
 
-	return newContext(piHTTP.NewResponder(httptest.NewRecorder(), method), piReq, cont)
+	return newContext(piHTTP.NewResponder(httptest.NewRecorder(), method), piReq, rt)
 }
 
 type userEntity struct {
@@ -254,22 +252,15 @@ func Test_CreateHandler(t *testing.T) {
 
 	for i, tc := range tests {
 		t.Run(tc.dialect+" "+tc.desc, func(t *testing.T) {
-			c, mocks := infra.NewMockContainer(t)
-
-			ctrl := gomock.NewController(t)
-			mockMetrics := piSql.NewMockMetrics(ctrl)
+			c := newTestKernel(nil)
+			db, mock, _ := piSql.NewSQLMocksWithConfig(t, &piSql.DBConfig{Dialect: tc.dialect})
+			c.sql = db
+			defer db.Close()
 
 			ctx := createTestContext(http.MethodPost, "/users", "", tc.reqBody, c)
 
-			mockMetrics.EXPECT().RecordHistogram(gomock.Any(), "app_sql_stats", gomock.Any(),
-				"hostname", gomock.Any(), "database", gomock.Any(), "type", "INSERT").MaxTimes(2)
-
-			if tc.expectedErr == nil {
-				mocks.SQL.ExpectDialect().WillReturnString(tc.dialect)
-			}
-
 			if tc.expectedQuery != "" {
-				mocks.SQL.ExpectExec(tc.expectedQuery).WithArgs(tc.id, "pi", true).WillReturnResult(mocks.SQL.NewResult(10, 1))
+				mock.ExpectExec(tc.expectedQuery).WithArgs(tc.id, "pi", true).WillReturnResult(sqlmock.NewResult(10, 1))
 			}
 
 			resp, err := e.Create(ctx)
@@ -350,9 +341,9 @@ func Test_GetAllHandler(t *testing.T) {
 		}
 		for i, tc := range tests {
 			t.Run(dc.dialect+" "+tc.desc, func(t *testing.T) {
-				c := infra.NewContainer(nil)
+				c := newTestKernel(nil)
 				db, mock, _ := piSql.NewSQLMocksWithConfig(t, &piSql.DBConfig{Dialect: dc.dialect})
-				c.SQL = db
+				c.sql = db
 
 				defer db.Close()
 
@@ -435,9 +426,9 @@ func Test_GetHandler(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(dc.dialect+" "+tc.desc, func(t *testing.T) {
-				c := infra.NewContainer(nil)
+				c := newTestKernel(nil)
 				db, mock, _ := piSql.NewSQLMocksWithConfig(t, &piSql.DBConfig{Dialect: dc.dialect})
-				c.SQL = db
+				c.sql = db
 
 				defer db.Close()
 
@@ -460,7 +451,7 @@ func Test_GetHandler(t *testing.T) {
 }
 
 func Test_UpdateHandler(t *testing.T) {
-	c := infra.NewContainer(nil)
+	c := newTestKernel(nil)
 
 	e := entity{
 		name:       "userEntity",
@@ -521,7 +512,7 @@ func Test_UpdateHandler(t *testing.T) {
 		}
 
 		db, mock, _ := piSql.NewSQLMocksWithConfig(t, &piSql.DBConfig{Dialect: dc.dialect})
-		c.SQL = db
+		c.sql = db
 
 		for i, tc := range tests {
 			t.Run(dc.dialect+" "+tc.desc, func(t *testing.T) {
@@ -550,8 +541,6 @@ func Test_UpdateHandler(t *testing.T) {
 }
 
 func Test_DeleteHandler(t *testing.T) {
-	c, mocks := infra.NewMockContainer(t)
-
 	e := entity{
 		name:       "userEntity",
 		entityType: nil,
@@ -622,10 +611,14 @@ func Test_DeleteHandler(t *testing.T) {
 		}
 		for i, tc := range tests {
 			t.Run(dc.dialect+" "+tc.desc, func(t *testing.T) {
+				c := newTestKernel(nil)
+				db, mock, _ := piSql.NewSQLMocksWithConfig(t, &piSql.DBConfig{Dialect: dc.dialect})
+				c.sql = db
+				defer db.Close()
+
 				ctx := createTestContext(http.MethodDelete, "/user", tc.id, nil, c)
 
-				mocks.SQL.ExpectDialect().WillReturnString(dc.dialect)
-				mocks.SQL.ExpectExec(dc.expectedQuery).WithArgs(tc.id).WillReturnResult(tc.mockResp).WillReturnError(tc.mockErr)
+				mock.ExpectExec(dc.expectedQuery).WithArgs(tc.id).WillReturnResult(tc.mockResp).WillReturnError(tc.mockErr)
 
 				resp, err := tc.entity.Delete(ctx)
 
@@ -653,6 +646,11 @@ func Test_DeleteHandler(t *testing.T) {
 
 	for _, dc := range customDialectCases {
 		t.Run(dc.dialect+" custom primary key", func(t *testing.T) {
+			c := newTestKernel(nil)
+			db, mock, _ := piSql.NewSQLMocksWithConfig(t, &piSql.DBConfig{Dialect: dc.dialect})
+			c.sql = db
+			defer db.Close()
+
 			testReq := httptest.NewRequest(http.MethodDelete, "/product/P123", nil)
 			rctx := chi.NewRouteContext()
 			rctx.URLParams.Add("product_id", "P123")
@@ -660,8 +658,7 @@ func Test_DeleteHandler(t *testing.T) {
 			piReq := piHTTP.NewRequest(testReq)
 			ctx := newContext(piHTTP.NewResponder(httptest.NewRecorder(), http.MethodDelete), piReq, c)
 
-			mocks.SQL.ExpectDialect().WillReturnString(dc.dialect)
-			mocks.SQL.ExpectExec(dc.expectedQuery).WithArgs("P123").WillReturnResult(sqlmock.NewResult(1, 1)).WillReturnError(nil)
+			mock.ExpectExec(dc.expectedQuery).WithArgs("P123").WillReturnResult(sqlmock.NewResult(1, 1)).WillReturnError(nil)
 
 			resp, err := eCustom.Delete(ctx)
 

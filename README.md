@@ -6,7 +6,7 @@
 
 English | [简体中文](./README.zh-CN.md)
 
-**Pi** is a production-grade Go microservice and web application framework built around explicit resource lifecycles, actor-supervised background runtimes, zero-reflection-call generic HTTP contracts, and built-in OpenAPI 3.0.3 with an offline Scalar API Reference UI.
+**Pi** is a production-grade Go microservice and web application framework built around a lean runtime microkernel, explicit resource lifecycles, zero-lock generic adapter injection, actor-supervised background runtimes, zero-reflection-call generic HTTP contracts, and built-in OpenAPI 3.0.3 with an offline Scalar API Reference UI.
 
 Pair Pi with the official [pi-layout](https://github.com/sllt/pi-layout) Fx scaffold and the `pi` CLI to generate reproducible, multi-transport Go services out of the box.
 
@@ -14,13 +14,13 @@ Pair Pi with the official [pi-layout](https://github.com/sllt/pi-layout) Fx scaf
 
 ## Highlights
 
-- **Explicit Construction & Lifecycle (`pi.Build`)** — Pure, side-effect-free construction with explicit `Owned` / `Borrowed` resource ownership (`WithManagedSQL`, `WithResource`), deterministic reverse-order shutdown, and portless integration testing via `pkg/pi/testkit`.
+- **Runtime Microkernel & Generic Adapter Registry (`pi.Build` + `pi.Use[T]`)** — Side-effect-free construction with explicit `Owned` / `Borrowed` ownership (`WithManagedDatasources`, `WithManagedSQL`, `WithManagedRedis`, `WithManagedPubSub`, `WithAdapter`), symmetric read-only accessors (`ctx.SQL()`, `ctx.Redis()`, `ctx.PubSub()`, `ctx.File()`), lock-free O(1) generic resolution (`pi.Use[T]`, `pi.Resolve[T]`, `pi.MustUse[T]`), automatic capability probing (`ConnectContext`, `Shutdown`, `Close`, `HealthCheck`), and deterministic reverse-order rollback/shutdown.
 - **Typed HTTP Contracts & Pre-flight Validation** — Generic `pi.Register[Req, Res]` and `pi.Meta` struct tags bind `path`, `query`, `header`, and `json` inputs without `reflect.Value.Call` on the hot path. Route conflicts, invalid validation rules, and incompatible group mounts are caught before serving via `app.RouteError()`.
 - **Zero-Tooling OpenAPI 3.0.3 & Offline Scalar UI** — Export or serve deterministic OpenAPI 3.0.3 JSON/YAML directly from registered routes—no `swag` comment annotations or external codegen required. Includes a 100% air-gapped, pre-compressed Scalar API Reference UI (`/.well-known/swagger`).
-- **Actor-Supervised Runtime** — Powered by `github.com/sllt/tao/actor`, Pi supervises background workers (`AddWorker` with `SuperviseFatal`, `SuperviseRestart`, `SuperviseDegrade`), overlap-protected Cron jobs (`AddCron`), resilient Pub/Sub subscribers with bounded backoff and Ack/Nack capabilities, and managed WebSocket sessions.
-- **Unified Business Contracts & Security** — Protocol-agnostic `pkg/pi/apperror` maps cleanly across HTTP, gRPC, and CLI exit codes while sanitizing internal failures. `pkg/pi/auth` propagates verified `Principal` identities across transports; strict CORS, TLS validation, and bounded request body limits are enforced by default.
-- **Observability & Health Probes** — Instance-isolated OpenTelemetry tracing, Prometheus metrics, structured logging with secret redaction, dynamic remote log levels, and built-in `/livez` & `/readyz` probes.
-- **Reproducible CLI & Code Generation** — `cmd/pi` scaffolds verified projects (`pi init`), generates module skeletons (`pi create`), wraps protobuf gRPC servers (`pi wrap grpc`), and manages database migrations (`pi migrate`).
+- **Actor-Supervised Runtime** — Powered by `github.com/sllt/tao/actor`, Pi supervises background workers (`AddWorker` with `SuperviseFatal`, `SuperviseRestart`, `SuperviseDegrade`), overlap-protected Cron jobs (`AddCron`), resilient Pub/Sub subscribers with static `AckSemantics` validation and Ack/Nack safety, and managed WebSocket sessions.
+- **Unified Business Contracts & Security** — Protocol-agnostic `pkg/pi/apperror` maps cleanly across HTTP, gRPC, and CLI exit codes while sanitizing internal failures. `pkg/pi/auth` propagates verified `Principal` identities across transports; custom auth validators receive a full `*pi.Context` (`ctx.Header`, bounded request body, gRPC incoming metadata).
+- **Observability & Singleflight Health Probes** — Instance-isolated OpenTelemetry tracing (with dynamic child-span `trace_id` propagation in `ctx.Trace`), Prometheus metrics, structured logging with secret redaction, three-state Kubernetes probes (`/.well-known/{startup,alive,ready}`), and caller-isolated singleflight deep health checks (`/.well-known/health`).
+- **Reproducible CLI & Code Generation** — `cmd/pi` scaffolds verified projects (`pi init`), generates module skeletons (`pi create`), wraps protobuf gRPC servers/clients (`pi wrap grpc`), and scaffolds database migrations (`pi migrate`).
 
 ---
 
@@ -29,13 +29,13 @@ Pair Pi with the official [pi-layout](https://github.com/sllt/pi-layout) Fx scaf
 ### Framework Module
 
 ```bash
-go get github.com/sllt/pi@v0.5.0
+go get github.com/sllt/pi@v0.5.1
 ```
 
 ### Pi CLI
 
 ```bash
-go install github.com/sllt/pi/cmd/pi@v0.5.0
+go install github.com/sllt/pi/cmd/pi@v0.5.1
 ```
 
 Scaffold a new production-ready project from [pi-layout](https://github.com/sllt/pi-layout):
@@ -70,6 +70,7 @@ type GreetResponse struct {
 }
 
 func Greet(ctx *pi.Context, req *GreetRequest) (*GreetResponse, error) {
+	ctx.Infof("greeting user=%s", req.Name)
 	return &GreetResponse{
 		Message: "Hello, " + req.Title + " " + req.Name + "!",
 	}, nil
@@ -106,15 +107,15 @@ Run the server and explore the built-in endpoints:
 - `GET http://127.0.0.1:8000/greetings/alice?title=captain` — Typed JSON endpoint
 - `GET http://127.0.0.1:8000/.well-known/openapi.json` — Generated OpenAPI 3.0.3 JSON (`openapi.yaml` also available)
 - `GET http://127.0.0.1:8000/.well-known/swagger` — Built-in offline Scalar API Reference UI
-- `GET http://127.0.0.1:8000/livez` & `/readyz` — Liveness and readiness probes
+- `GET http://127.0.0.1:8000/.well-known/{startup,alive,ready,health}` — Startup, liveness, readiness, and deep health probes
 
 ---
 
 ## Core Capabilities
 
-### 1. Explicit Configuration, Managed SQL & Transactions
+### 1. Managed Datasources, External Adapters & `pi.Use[T]`
 
-`pi.Build` never reads implicit global state or opens network sockets during construction. Connections activate in `Start` and close in reverse order during `Stop`:
+`pi.Build` never reads implicit global state or opens network sockets during construction. Built-in SQL, Redis, and Pub/Sub handles—as well as any external datasource adapter—activate in registration order during `Start` and shut down in reverse order during `Stop`:
 
 ```go
 cfg, err := config.LoadSnapshot("configs", os.Environ())
@@ -122,16 +123,39 @@ if err != nil {
 	return err
 }
 
+mongoClient, err := mongo.FromEnv(cfg.Get)
+if err != nil {
+	return err
+}
+
 app, err := pi.Build(
 	pi.WithConfig(cfg.Values()),
 	pi.WithManagedSQL(),
+	pi.WithManagedRedis(),
+	pi.WithAdapter("mongo", mongoClient, pi.Owned),
 )
 if err != nil {
 	return err
 }
 ```
 
-Inside repositories or services, `BeginTxContext` returns a Pi `Tx` (`Executor`) with ownership tracking (`Owns`) and dialect-aware unique violation detection (`IsUniqueViolation`).
+Inside any HTTP, gRPC, Pub/Sub, Cron, or Worker `*pi.Context` (or directly on `*pi.App`), access core slots via symmetric read-only methods and external adapters via zero-lock generic helpers:
+
+```go
+func GetOrder(ctx *pi.Context, req *GetOrderReq) (*OrderRes, error) {
+	// Built-in core slots (guaranteed untyped nil when unconfigured)
+	row := ctx.SQL().QueryRowContext(ctx, "SELECT id, total FROM orders WHERE id = ?", req.ID)
+	_ = ctx.Redis().Get(ctx, "order:"+req.ID)
+
+	// External or multi-instance adapters resolved with compile-time type safety
+	docStore := pi.MustUse[*mongo.Client](ctx)
+	_ = docStore
+	// For multiple instances of the same type: pi.MustUseNamed[*mongo.Client](ctx, "mongo-archive")
+	...
+}
+```
+
+Inside database migrations (`migration.Datasource`), `migration.Resolve[T](d)` and `migration.ResolveNamed[T](d, name)` provide safe access to mounted adapters while strictly blocking accidental raw pool (`sql.Client`) bypasses of the active `d.SQL` transaction (`ErrTransactionalDatasource`).
 
 ### 2. Route Groups, Middleware & OpenAPI Security
 
@@ -199,11 +223,15 @@ if err := auth.AuthorizeSubject(ctx, targetUserID, "users:write:any"); err != ni
 
 ### 5. Portless Testing with `testkit`
 
-Exercise full routing, middleware, binding, validation, and lifecycle cleanup in unit/integration tests without opening TCP ports:
+Exercise full routing, middleware, binding, validation, mock adapters, and lifecycle cleanup in unit/integration tests without opening TCP ports:
 
 ```go
 func TestGreet(t *testing.T) {
-	app := testkit.New(t, pi.WithExplicitHTTPStatus())
+	app := testkit.New(
+		t,
+		pi.WithExplicitHTTPStatus(),
+		pi.WithAdapter("docs", &fakeDocStore{}, pi.Borrowed),
+	)
 	if err := pi.Register(app, Greet); err != nil {
 		t.Fatal(err)
 	}
@@ -218,9 +246,9 @@ func TestGreet(t *testing.T) {
 
 ## Datasources & Adapter Submodules
 
-Pi keeps core SQL, Redis, and standard messaging support in the root module while isolating heavy third-party drivers in independent Go submodules so your `go.mod` stays lean.
+Pi keeps core SQL, Redis, local filesystem, and standard messaging contracts in the root module while isolating 25 third-party drivers in independent Go submodules (`FromEnv` + `ConnectContext` + `Shutdown`/`Close` + `HealthCheck`) so your `go.mod` stays lean.
 
-| Category | Built-in (`github.com/sllt/pi`) | Independent Adapter Submodules (`@v0.5.0`) |
+| Category | Built-in (`github.com/sllt/pi`) | Independent Adapter Submodules (`@v0.5.1`) |
 | --- | --- | --- |
 | **Relational SQL** | MySQL, PostgreSQL, SQLite | `oracle`, `dbresolver` |
 | **Key-Value / Cache** | Redis | `kv-store/badger`, `kv-store/dynamodb`, `kv-store/nats` |
@@ -228,15 +256,15 @@ Pi keeps core SQL, Redis, and standard messaging support in the root module whil
 | **Columnar / Wide-Column** | — | `clickhouse`, `cassandra`, `scylladb` |
 | **Time-Series** | — | `influxdb`, `opentsdb` |
 | **Search & Graph** | — | `elasticsearch`, `solr`, `dgraph` |
-| **Pub/Sub Messaging** | Kafka, MQTT, Google Pub/Sub | `pubsub/nats`, `pubsub/sqs`, `pubsub/eventhub` |
+| **Pub/Sub Messaging** | Kafka, MQTT, Google Pub/Sub, Redis Streams/PubSub | `pubsub/nats`, `pubsub/sqs`, `pubsub/eventhub` |
 | **File Storage** | Local Filesystem | `file/s3`, `file/gcs`, `file/azure`, `file/sftp`, `file/ftp` |
 
-Install any independent adapter submodule with matching version tags:
+Install any independent adapter submodule and mount it via `pi.WithAdapter`:
 
 ```bash
-go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.0
-go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.0
-go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.0
+go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.1
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.1
+go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.1
 ```
 
 ---
@@ -246,17 +274,17 @@ go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.0
 ```text
 pi/
 ├── cmd/pi/                  # Pi CLI (init, create, wrap, migrate)
-├── pkg/pi/                  # Core runtime, typed HTTP router, supervision & lifecycle
+├── pkg/pi/                  # Runtime microkernel, adapter registry, typed router & supervision
 │   ├── apperror/            # Protocol-agnostic business error model
 │   ├── auth/                # Verified Principal propagation & authorization helpers
 │   ├── cli/                 # CLI subcommand & template generators
 │   ├── config/              # Deterministic env/config snapshot loader & redaction
-│   ├── datasource/          # Built-in SQL/Redis/PubSub + 25 independent adapter modules
+│   ├── datasource/          # Core SQL/Redis/PubSub/File contracts + 25 adapter submodules
 │   ├── grpc/                # gRPC interceptors, health & error mapping
 │   ├── http/                # Router, middleware, responder & contract compiler
-│   ├── migration/           # Lock-protected Migration v2 engine
+│   ├── migration/           # Lock-protected, transaction-safe Migration v2 engine
 │   ├── openapi/             # OpenAPI 3.0.3 AST, JSON/YAML serializer & Scalar UI helper
-│   ├── service/             # Circuit-breaker, retry & rate-limited HTTP client
+│   ├── service/             # Unsealed HTTP client interface with circuit-breaker, retry & rate limit
 │   ├── testkit/             # Portless testing harness & lifecycle probes
 │   └── websocket/           # Managed WebSocket connections & hubs
 └── examples/                # Runnable HTTP, gRPC, Cron, PubSub & migration examples

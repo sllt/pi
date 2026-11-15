@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"sync"
 
 	"cloud.google.com/go/storage"
 	"github.com/sllt/pi/pkg/pi/datasource/file"
@@ -15,6 +17,7 @@ import (
 var (
 	// Storage adapter errors.
 	errGCSConfigNil              = errors.New("GCS config is nil")
+	errGCSBucketRequired         = errors.New("GCS bucket name is required")
 	errGCSClientNotInitialized   = errors.New("GCS client or bucket is not initialized")
 	errEmptyObjectName           = errors.New("object name is empty")
 	errInvalidOffset             = errors.New("invalid offset: must be >= 0")
@@ -36,20 +39,45 @@ const (
 
 // storageAdapter adapts GCS client to implement file.StorageProvider.
 type storageAdapter struct {
+	mu     sync.RWMutex
 	cfg    *Config
 	client *storage.Client
 	bucket *storage.BucketHandle
 }
 
+func (s *storageAdapter) getBucket() (*storage.BucketHandle, error) {
+	if s == nil {
+		return nil, errGCSClientNotInitialized
+	}
+	s.mu.RLock()
+	client := s.client
+	bucket := s.bucket
+	s.mu.RUnlock()
+	if client == nil || bucket == nil {
+		return nil, errGCSClientNotInitialized
+	}
+	return bucket, nil
+}
+
 // Connect initializes the GCS client and validates bucket access.
 func (s *storageAdapter) Connect(ctx context.Context) error {
+	if s == nil {
+		return errGCSConfigNil
+	}
 	// fast-path
-	if s.client != nil && s.bucket != nil {
+	s.mu.RLock()
+	ready := s.client != nil && s.bucket != nil
+	s.mu.RUnlock()
+	if ready {
 		return nil
 	}
 
 	if s.cfg == nil {
 		return errGCSConfigNil
+	}
+
+	if strings.TrimSpace(s.cfg.BucketName) == "" {
+		return errGCSBucketRequired
 	}
 
 	var (
@@ -76,19 +104,27 @@ func (s *storageAdapter) Connect(ctx context.Context) error {
 		return fmt.Errorf("bucket validation failed: %w", err)
 	}
 
+	s.mu.Lock()
+	if s.client != nil && s.bucket != nil {
+		s.mu.Unlock()
+		_ = client.Close()
+		return nil
+	}
 	s.client = client
 	s.bucket = bucket
+	s.mu.Unlock()
 
 	return nil
 }
 
 // Health checks if the GCS connection is healthy by verifying bucket access.
 func (s *storageAdapter) Health(ctx context.Context) error {
-	if s.client == nil || s.bucket == nil {
-		return errGCSClientNotInitialized
+	bucket, err := s.getBucket()
+	if err != nil {
+		return err
 	}
 
-	_, err := s.bucket.Attrs(ctx)
+	_, err = bucket.Attrs(ctx)
 	if err != nil {
 		return fmt.Errorf("GCS health check failed: %w", err)
 	}
@@ -96,13 +132,20 @@ func (s *storageAdapter) Health(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the GCS client connection.
+// Close closes the GCS client connection idempotently.
 func (s *storageAdapter) Close() error {
-	if s.client != nil {
-		return s.client.Close()
+	if s == nil {
+		return nil
 	}
-
-	return nil
+	s.mu.Lock()
+	client := s.client
+	s.client = nil
+	s.bucket = nil
+	s.mu.Unlock()
+	if client == nil {
+		return nil
+	}
+	return client.Close()
 }
 
 // NewReader creates a reader for the given object.
@@ -110,8 +153,12 @@ func (s *storageAdapter) NewReader(ctx context.Context, name string) (io.ReadClo
 	if name == "" {
 		return nil, errEmptyObjectName
 	}
+	bucket, err := s.getBucket()
+	if err != nil {
+		return nil, err
+	}
 
-	reader, err := s.bucket.Object(name).NewReader(ctx)
+	reader, err := bucket.Object(name).NewReader(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%w for %q: %w", errFailedToCreateReader, name, err)
 	}
@@ -128,8 +175,12 @@ func (s *storageAdapter) NewRangeReader(ctx context.Context, name string, offset
 	if offset < 0 {
 		return nil, fmt.Errorf("%w (got: %d)", errInvalidOffset, offset)
 	}
+	bucket, err := s.getBucket()
+	if err != nil {
+		return nil, err
+	}
 
-	reader, err := s.bucket.Object(name).NewRangeReader(ctx, offset, length)
+	reader, err := bucket.Object(name).NewRangeReader(ctx, offset, length)
 	if err != nil {
 		return nil, fmt.Errorf("%w for %q: %w", errFailedToCreateRangeReader, name, err)
 	}
@@ -145,8 +196,12 @@ func (s *storageAdapter) NewWriter(ctx context.Context, name string) io.WriteClo
 		// Return a no-op writer that fails on Write
 		return &failWriter{err: errEmptyObjectName}
 	}
+	bucket, err := s.getBucket()
+	if err != nil {
+		return &failWriter{err: err}
+	}
 
-	return s.bucket.Object(name).NewWriter(ctx)
+	return bucket.Object(name).NewWriter(ctx)
 }
 
 // failWriter is a helper for NewWriter validation errors.
@@ -167,8 +222,12 @@ func (s *storageAdapter) StatObject(ctx context.Context, name string) (*file.Obj
 	if name == "" {
 		return nil, errEmptyObjectName
 	}
+	bucket, err := s.getBucket()
+	if err != nil {
+		return nil, err
+	}
 
-	attrs, err := s.bucket.Object(name).Attrs(ctx)
+	attrs, err := bucket.Object(name).Attrs(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, fmt.Errorf("%w %q: %w", errObjectNotFound, name, err)
@@ -191,8 +250,12 @@ func (s *storageAdapter) DeleteObject(ctx context.Context, name string) error {
 	if name == "" {
 		return errEmptyObjectName
 	}
+	bucket, err := s.getBucket()
+	if err != nil {
+		return err
+	}
 
-	attrs, err := s.bucket.Object(name).Attrs(ctx)
+	attrs, err := bucket.Object(name).Attrs(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return fmt.Errorf("%w %q: %w", errObjectNotFound, name, err)
@@ -201,7 +264,7 @@ func (s *storageAdapter) DeleteObject(ctx context.Context, name string) error {
 		return fmt.Errorf("%w for %q: %w", errFailedToGetObjectAttrs, name, err)
 	}
 
-	err = s.bucket.Object(name).If(storage.Conditions{GenerationMatch: attrs.Generation}).Delete(ctx)
+	err = bucket.Object(name).If(storage.Conditions{GenerationMatch: attrs.Generation}).Delete(ctx)
 	if err != nil {
 		return fmt.Errorf("%w %q: %w", errFailedToDeleteObject, name, err)
 	}
@@ -218,11 +281,15 @@ func (s *storageAdapter) CopyObject(ctx context.Context, src, dst string) error 
 	if src == dst {
 		return errSameSourceAndDest
 	}
+	bucket, err := s.getBucket()
+	if err != nil {
+		return err
+	}
 
-	srcObj := s.bucket.Object(src)
-	dstObj := s.bucket.Object(dst)
+	srcObj := bucket.Object(src)
+	dstObj := bucket.Object(dst)
 
-	_, err := dstObj.CopierFrom(srcObj).Run(ctx)
+	_, err = dstObj.CopierFrom(srcObj).Run(ctx)
 	if err != nil {
 		return fmt.Errorf("%w from %q to %q: %w", errFailedToCopyObject, src, dst, err)
 	}
@@ -232,9 +299,13 @@ func (s *storageAdapter) CopyObject(ctx context.Context, src, dst string) error 
 
 // ListObjects lists all objects with the given prefix.
 func (s *storageAdapter) ListObjects(ctx context.Context, prefix string) ([]string, error) {
+	bucket, err := s.getBucket()
+	if err != nil {
+		return nil, err
+	}
 	var objects []string
 
-	it := s.bucket.Objects(ctx, &storage.Query{Prefix: prefix})
+	it := bucket.Objects(ctx, &storage.Query{Prefix: prefix})
 
 	for {
 		obj, err := it.Next()
@@ -254,11 +325,15 @@ func (s *storageAdapter) ListObjects(ctx context.Context, prefix string) ([]stri
 
 // ListDir lists objects and prefixes (directories) under the given prefix.
 func (s *storageAdapter) ListDir(ctx context.Context, prefix string) ([]file.ObjectInfo, []string, error) {
+	bucket, err := s.getBucket()
+	if err != nil {
+		return nil, nil, err
+	}
 	var objects []file.ObjectInfo
 
 	var prefixes []string
 
-	it := s.bucket.Objects(ctx, &storage.Query{
+	it := bucket.Objects(ctx, &storage.Query{
 		Prefix:    prefix,
 		Delimiter: "/",
 	})

@@ -21,9 +21,16 @@ func (c *Client) IndexDocument(ctx context.Context, index, id string, document a
 		return errEmptyDocumentID
 	}
 
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
+
 	start := time.Now()
 
 	tracedCtx, span := c.addTrace(ctx, "index-document", []string{index}, id)
+	if span != nil {
+		defer span.End()
+	}
 
 	body, err := json.Marshal(document)
 	if err != nil {
@@ -63,9 +70,16 @@ func (c *Client) GetDocument(ctx context.Context, index, id string) (map[string]
 		return nil, errEmptyDocumentID
 	}
 
+	if c == nil || c.client == nil {
+		return nil, errClientNotConnected
+	}
+
 	start := time.Now()
 
 	tracedCtx, span := c.addTrace(ctx, "get-document", []string{index}, id)
+	if span != nil {
+		defer span.End()
+	}
 
 	req := esapi.GetRequest{
 		Index:      index,
@@ -107,9 +121,16 @@ func (c *Client) UpdateDocument(ctx context.Context, index, id string, update ma
 		return errEmptyQuery
 	}
 
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
+
 	start := time.Now()
 
 	tracedCtx, span := c.addTrace(ctx, "update-document", []string{index}, id)
+	if span != nil {
+		defer span.End()
+	}
 
 	body, err := json.Marshal(map[string]any{"doc": update})
 	if err != nil {
@@ -150,9 +171,16 @@ func (c *Client) DeleteDocument(ctx context.Context, index, id string) error {
 		return errEmptyDocumentID
 	}
 
+	if c == nil || c.client == nil {
+		return errClientNotConnected
+	}
+
 	start := time.Now()
 
 	tracedCtx, span := c.addTrace(ctx, "delete-document", []string{index}, id)
+	if span != nil {
+		defer span.End()
+	}
 
 	req := esapi.DeleteRequest{
 		Index:      index,

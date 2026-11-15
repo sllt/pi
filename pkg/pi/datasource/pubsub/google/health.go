@@ -12,12 +12,28 @@ import (
 
 func (g *googleClient) Health() (health datasource.Health) {
 	health.Details = make(map[string]any)
+	health.Details["backend"] = "GOOGLE"
+
+	if g == nil {
+		health.Status = datasource.StatusDown
+		return health
+	}
+
+	health.Details["projectID"] = g.Config.ProjectID
+
+	g.mu.RLock()
+	client := g.client
+	g.mu.RUnlock()
+
+	if client == nil {
+		health.Status = datasource.StatusDown
+		health.Details["error"] = errClientNotConnected.Error()
+		return health
+	}
 
 	var writerStatus, readerStatus string
 
 	health.Status = datasource.StatusUp
-	health.Details["projectID"] = g.Config.ProjectID
-	health.Details["backend"] = "GOOGLE"
 
 	writerStatus, health.Details["writers"] = g.getWriterDetails()
 	readerStatus, health.Details["readers"] = g.getReaderDetails()
@@ -33,14 +49,23 @@ func (g *googleClient) Health() (health datasource.Health) {
 func (g *googleClient) getWriterDetails() (status string, details map[string]any) {
 	const contextTimeoutDuration = 50
 
+	details = make(map[string]any)
+	if g == nil {
+		return datasource.StatusDown, details
+	}
+	g.mu.RLock()
+	client := g.client
+	g.mu.RUnlock()
+	if client == nil {
+		return datasource.StatusDown, details
+	}
+
 	status = datasource.StatusUp
 
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeoutDuration*time.Millisecond)
 	defer cancel()
 
-	it := g.client.Topics(ctx)
-
-	details = make(map[string]any)
+	it := client.Topics(ctx)
 
 	for {
 		topic, err := it.Next()
@@ -66,14 +91,23 @@ func (g *googleClient) getWriterDetails() (status string, details map[string]any
 func (g *googleClient) getReaderDetails() (status string, details map[string]any) {
 	const contextTimeoutDuration = 50
 
+	details = make(map[string]any)
+	if g == nil {
+		return datasource.StatusDown, details
+	}
+	g.mu.RLock()
+	client := g.client
+	g.mu.RUnlock()
+	if client == nil {
+		return datasource.StatusDown, details
+	}
+
 	status = datasource.StatusUp
 
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeoutDuration*time.Millisecond)
 	defer cancel()
 
-	subIt := g.client.Subscriptions(ctx)
-
-	details = make(map[string]any)
+	subIt := client.Subscriptions(ctx)
 
 	for {
 		subscription, err := subIt.Next()

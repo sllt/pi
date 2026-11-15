@@ -92,8 +92,8 @@ func (a *App) canMutateRoutesLocked(action string) bool {
 	}
 
 	if a.httpServer.registry.compiled {
-		if a.container != nil && a.container.Logger != nil {
-			a.container.Logger.Errorf("cannot %s after routes have been compiled; register all routes and middleware before Run", action)
+		if l := a.safeLogger(); l != nil {
+			l.Errorf("cannot %s after routes have been compiled; register all routes and middleware before Run", action)
 		}
 		return false
 	}
@@ -114,7 +114,7 @@ func (a *App) getRequestTimeout() time.Duration {
 func (a *App) AddRESTHandlers(object any) error {
 	cfg, err := scanEntity(object)
 	if err != nil {
-		a.container.Logger.Errorf("%s", err.Error())
+		a.Logger().Errorf("%s", err.Error())
 		return err
 	}
 

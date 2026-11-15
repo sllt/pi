@@ -22,6 +22,7 @@ var (
 	errClientNotConnected = errors.New("sqs client not connected")
 	errQueueNotFound      = errors.New("sqs queue not found")
 	errEmptyQueueName     = errors.New("queue name cannot be empty")
+	errRegionRequired     = errors.New("sqs region is required")
 )
 
 // Config holds the configuration for the SQS client.
@@ -81,6 +82,53 @@ func New(cfg *Config) *Client {
 	}
 }
 
+// FromEnv constructs a zero-I/O SQS *Client from an environment/config lookup function.
+//
+// Supported keys:
+//   - SQS_REGION (fallback: AWS_REGION, required)
+//   - SQS_ENDPOINT (fallback: AWS_ENDPOINT_URL)
+//   - SQS_ACCESS_KEY_ID (fallback: AWS_ACCESS_KEY_ID)
+//   - SQS_SECRET_ACCESS_KEY (fallback: AWS_SECRET_ACCESS_KEY)
+//   - SQS_SESSION_TOKEN (fallback: AWS_SESSION_TOKEN)
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errRegionRequired
+	}
+
+	region := strings.TrimSpace(get("SQS_REGION"))
+	if region == "" {
+		region = strings.TrimSpace(get("AWS_REGION"))
+	}
+	if region == "" {
+		return nil, errRegionRequired
+	}
+
+	endpoint := strings.TrimSpace(get("SQS_ENDPOINT"))
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(get("AWS_ENDPOINT_URL"))
+	}
+	ak := strings.TrimSpace(get("SQS_ACCESS_KEY_ID"))
+	if ak == "" {
+		ak = strings.TrimSpace(get("AWS_ACCESS_KEY_ID"))
+	}
+	sk := strings.TrimSpace(get("SQS_SECRET_ACCESS_KEY"))
+	if sk == "" {
+		sk = strings.TrimSpace(get("AWS_SECRET_ACCESS_KEY"))
+	}
+	token := strings.TrimSpace(get("SQS_SESSION_TOKEN"))
+	if token == "" {
+		token = strings.TrimSpace(get("AWS_SESSION_TOKEN"))
+	}
+
+	return New(&Config{
+		Region:          region,
+		Endpoint:        endpoint,
+		AccessKeyID:     ak,
+		SecretAccessKey: sk,
+		SessionToken:    token,
+	}), nil
+}
+
 // UseLogger sets the logger for the SQS client.
 func (c *Client) UseLogger(logger any) {
 	if l, ok := logger.(pubsub.Logger); ok {
@@ -100,6 +148,65 @@ func (c *Client) UseTracer(tracer any) {
 	if t, ok := tracer.(trace.Tracer); ok {
 		c.tracer = t
 	}
+}
+
+// ConnectContext establishes a connection to AWS SQS bounded by ctx without spawning background retry loops on failure.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil {
+		return errClientNotConnected
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	if c.conn != nil {
+		return nil
+	}
+	if c.cfg == nil || c.cfg.Region == "" {
+		if c.logger != nil {
+			c.logger.Error("SQS region is required")
+		}
+		return errRegionRequired
+	}
+
+	if c.logger != nil {
+		c.logger.Debugf("connecting to AWS SQS in region: %s", c.cfg.Region)
+	}
+
+	awsCfg, err := c.loadAWSConfig(ctx)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Errorf("failed to load AWS config: %v", err)
+		}
+		return err
+	}
+
+	opts := func(o *sqs.Options) {
+		if c.cfg.Endpoint != "" {
+			o.BaseEndpoint = aws.String(c.cfg.Endpoint)
+		}
+	}
+
+	conn := sqs.NewFromConfig(awsCfg, opts)
+	if _, err = conn.ListQueues(ctx, &sqs.ListQueuesInput{MaxResults: aws.Int32(1)}); err != nil {
+		if c.logger != nil {
+			c.logger.Errorf("failed to connect to SQS: %v", err)
+		}
+		return err
+	}
+
+	c.conn = conn
+	if c.logger != nil {
+		c.logger.Logf("connected to AWS SQS in region: %s", c.cfg.Region)
+	}
+
+	return nil
 }
 
 // Connect establishes a connection to AWS SQS.
@@ -301,10 +408,24 @@ func (c *Client) isConnected() bool {
 	return c.conn != nil
 }
 
+func (c *Client) getConn() sqsClient {
+	if c == nil {
+		return nil
+	}
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	return conn
+}
+
 // Publish sends a message to the specified SQS queue.
 // The topic parameter is the queue name (not the full URL).
 func (c *Client) Publish(ctx context.Context, topic string, message []byte) error {
-	if !c.isConnected() {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn := c.getConn()
+	if conn == nil {
 		return errClientNotConnected
 	}
 
@@ -315,11 +436,15 @@ func (c *Client) Publish(ctx context.Context, topic string, message []byte) erro
 	ctx, span := c.startTrace(ctx, "sqs-publish")
 	defer span.End()
 
-	c.metrics.IncrementCounter(ctx, "app_pubsub_publish_total_count", "topic", topic)
+	if c.metrics != nil {
+		c.metrics.IncrementCounter(ctx, "app_pubsub_publish_total_count", "topic", topic)
+	}
 
 	queueURL, err := c.getQueueURL(ctx, topic)
 	if err != nil {
-		c.logger.Errorf("failed to get queue URL for %s: %v", topic, err)
+		if c.logger != nil {
+			c.logger.Errorf("failed to get queue URL for %s: %v", topic, err)
+		}
 		return err
 	}
 
@@ -330,25 +455,32 @@ func (c *Client) Publish(ctx context.Context, topic string, message []byte) erro
 		MessageBody: aws.String(string(message)),
 	}
 
-	result, err := c.conn.SendMessage(ctx, input)
+	result, err := conn.SendMessage(ctx, input)
 	if err != nil {
-		c.logger.Errorf("failed to publish message to queue %s: %v", topic, err)
+		if c.logger != nil {
+			c.logger.Errorf("failed to publish message to queue %s: %v", topic, err)
+		}
 		return err
 	}
 
-	c.logger.Debug(&pubsub.Log{
-		Mode:          "PUB",
-		CorrelationID: span.SpanContext().TraceID().String(),
-		MessageValue:  string(message),
-		Topic:         topic,
-		Host:          c.cfg.Region,
-		PubSubBackend: "SQS",
-		Time:          time.Since(start).Microseconds(),
-	})
+	if c.logger != nil {
+		c.logger.Debug(&pubsub.Log{
+			Mode:          "PUB",
+			CorrelationID: span.SpanContext().TraceID().String(),
+			MessageValue:  string(message),
+			Topic:         topic,
+			Host:          c.cfg.Region,
+			PubSubBackend: "SQS",
+			Time:          time.Since(start).Microseconds(),
+		})
+		if result != nil && result.MessageId != nil {
+			c.logger.Debugf("message published to queue %s with ID: %s", topic, *result.MessageId)
+		}
+	}
 
-	c.logger.Debugf("message published to queue %s with ID: %s", topic, *result.MessageId)
-
-	c.metrics.IncrementCounter(ctx, "app_pubsub_publish_success_count", "topic", topic)
+	if c.metrics != nil {
+		c.metrics.IncrementCounter(ctx, "app_pubsub_publish_success_count", "topic", topic)
+	}
 
 	return nil
 }
@@ -356,7 +488,14 @@ func (c *Client) Publish(ctx context.Context, topic string, message []byte) erro
 // Subscribe receives a single message from the specified SQS queue.
 // The topic parameter is the queue name (not the full URL).
 func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, error) {
-	if !c.isConnected() {
+	if c == nil {
+		return nil, errClientNotConnected
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn := c.getConn()
+	if conn == nil {
 		timer := time.NewTimer(defaultRetryDuration)
 		select {
 		case <-ctx.Done():
@@ -376,12 +515,14 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, 
 	ctx, span := c.startTrace(ctx, "sqs-subscribe")
 	defer span.End()
 
-	c.metrics.IncrementCounter(ctx, "app_pubsub_subscribe_total_count", "topic", topic)
+	if c.metrics != nil {
+		c.metrics.IncrementCounter(ctx, "app_pubsub_subscribe_total_count", "topic", topic)
+	}
 
 	queueURL, err := c.getQueueURL(ctx, topic)
 	if err != nil {
 		// Don't log for context cancellation or if it's a transient error
-		if !isContextCanceled(err) && !isConnectionError(err) {
+		if !isContextCanceled(err) && !isConnectionError(err) && c.logger != nil {
 			c.logger.Errorf("queue %s not found: %v", topic, err)
 		}
 
@@ -400,10 +541,10 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, 
 		},
 	}
 
-	result, err := c.conn.ReceiveMessage(ctx, input)
+	result, err := conn.ReceiveMessage(ctx, input)
 	if err != nil {
 		// Only log non-transient errors, avoid flooding logs
-		if !isContextCanceled(err) && !isConnectionError(err) {
+		if !isContextCanceled(err) && !isConnectionError(err) && c.logger != nil {
 			c.logger.Errorf("failed to receive message from queue %s: %v", topic, err)
 		}
 
@@ -425,21 +566,25 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, 
 	msg.Committer = newMessage(
 		*sqsMsg.ReceiptHandle,
 		queueURL,
-		c.conn,
+		conn,
 		c.logger,
 	)
 
-	c.logger.Debug(&pubsub.Log{
-		Mode:          "SUB",
-		CorrelationID: span.SpanContext().TraceID().String(),
-		MessageValue:  string(msg.Value),
-		Topic:         topic,
-		Host:          c.cfg.Region,
-		PubSubBackend: "SQS",
-		Time:          duration.Microseconds(),
-	})
+	if c.logger != nil {
+		c.logger.Debug(&pubsub.Log{
+			Mode:          "SUB",
+			CorrelationID: span.SpanContext().TraceID().String(),
+			MessageValue:  string(msg.Value),
+			Topic:         topic,
+			Host:          c.cfg.Region,
+			PubSubBackend: "SQS",
+			Time:          duration.Microseconds(),
+		})
+	}
 
-	c.metrics.IncrementCounter(ctx, "app_pubsub_subscribe_success_count", "topic", topic)
+	if c.metrics != nil {
+		c.metrics.IncrementCounter(ctx, "app_pubsub_subscribe_success_count", "topic", topic)
+	}
 
 	return msg, nil
 }
@@ -447,7 +592,11 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (*pubsub.Message, 
 // CreateTopic creates a new SQS queue with the specified name.
 // In SQS terminology, this creates a queue, not a topic.
 func (c *Client) CreateTopic(ctx context.Context, name string) error {
-	if !c.isConnected() {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn := c.getConn()
+	if conn == nil {
 		return errClientNotConnected
 	}
 
@@ -455,24 +604,34 @@ func (c *Client) CreateTopic(ctx context.Context, name string) error {
 		return errEmptyQueueName
 	}
 
-	c.logger.Debugf("creating SQS queue: %s", name)
+	if c.logger != nil {
+		c.logger.Debugf("creating SQS queue: %s", name)
+	}
 
-	_, err := c.conn.CreateQueue(ctx, &sqs.CreateQueueInput{
+	_, err := conn.CreateQueue(ctx, &sqs.CreateQueueInput{
 		QueueName: aws.String(name),
 	})
 	if err != nil {
-		c.logger.Errorf("failed to create queue %s: %v", name, err)
+		if c.logger != nil {
+			c.logger.Errorf("failed to create queue %s: %v", name, err)
+		}
 		return err
 	}
 
-	c.logger.Logf("SQS queue created: %s", name)
+	if c.logger != nil {
+		c.logger.Logf("SQS queue created: %s", name)
+	}
 
 	return nil
 }
 
 // DeleteTopic deletes an SQS queue with the specified name.
 func (c *Client) DeleteTopic(ctx context.Context, name string) error {
-	if !c.isConnected() {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn := c.getConn()
+	if conn == nil {
 		return errClientNotConnected
 	}
 
@@ -485,13 +644,17 @@ func (c *Client) DeleteTopic(ctx context.Context, name string) error {
 		return err
 	}
 
-	c.logger.Debugf("deleting SQS queue: %s", name)
+	if c.logger != nil {
+		c.logger.Debugf("deleting SQS queue: %s", name)
+	}
 
-	_, err = c.conn.DeleteQueue(ctx, &sqs.DeleteQueueInput{
+	_, err = conn.DeleteQueue(ctx, &sqs.DeleteQueueInput{
 		QueueUrl: aws.String(queueURL),
 	})
 	if err != nil {
-		c.logger.Errorf("failed to delete queue %s: %v", name, err)
+		if c.logger != nil {
+			c.logger.Errorf("failed to delete queue %s: %v", name, err)
+		}
 		return err
 	}
 
@@ -500,7 +663,9 @@ func (c *Client) DeleteTopic(ctx context.Context, name string) error {
 	delete(c.queueURLCache, name)
 	c.cacheMu.Unlock()
 
-	c.logger.Logf("SQS queue deleted: %s", name)
+	if c.logger != nil {
+		c.logger.Logf("SQS queue deleted: %s", name)
+	}
 
 	return nil
 }
@@ -508,7 +673,11 @@ func (c *Client) DeleteTopic(ctx context.Context, name string) error {
 // Query retrieves multiple messages from an SQS queue.
 // Args: [0] = limit (int32, max 10).
 func (c *Client) Query(ctx context.Context, query string, args ...any) ([]byte, error) {
-	if !c.isConnected() {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn := c.getConn()
+	if conn == nil {
 		return nil, errClientNotConnected
 	}
 
@@ -532,7 +701,7 @@ func (c *Client) Query(ctx context.Context, query string, args ...any) ([]byte, 
 		defer cancel()
 	}
 
-	result, err := c.conn.ReceiveMessage(readCtx, &sqs.ReceiveMessageInput{
+	result, err := conn.ReceiveMessage(readCtx, &sqs.ReceiveMessageInput{
 		QueueUrl:            aws.String(queueURL),
 		MaxNumberOfMessages: limit,
 		WaitTimeSeconds:     defaultWaitTimeSeconds,
@@ -556,6 +725,9 @@ func (c *Client) Query(ctx context.Context, query string, args ...any) ([]byte, 
 
 // Close closes the SQS client connection and stops any background reconnect loop.
 func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
 	c.retryMu.Lock()
 	if !c.closed {
 		c.closed = true
@@ -597,8 +769,13 @@ func (c *Client) getQueueURL(ctx context.Context, queueName string) (string, err
 
 	c.cacheMu.RUnlock()
 
+	conn := c.getConn()
+	if conn == nil {
+		return "", errClientNotConnected
+	}
+
 	// Get queue URL from SQS
-	result, err := c.conn.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+	result, err := conn.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 		QueueName: aws.String(queueName),
 	})
 	if err != nil {

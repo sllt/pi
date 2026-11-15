@@ -35,23 +35,90 @@ func NewHandleWithTracerProvider(c config.Config, l datasource.Logger, m Metrics
 	return &Handle{config: c, logger: l, metrics: m, tracerProvider: tp}
 }
 
-func (h *Handle) Start(ctx context.Context) error {
+func (h *Handle) IsStarted() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return !h.closed && h.db != nil
+}
+
+func (h *Handle) UseLogger(v any) {
+	if h == nil {
+		return
+	}
+	l, ok := v.(datasource.Logger)
+	if !ok || l == nil {
+		return
+	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.logger = l
+	h.mu.Unlock()
+}
+
+func (h *Handle) UseMetrics(v any) {
+	if h == nil {
+		return
+	}
+	m, ok := v.(Metrics)
+	if !ok || m == nil {
+		return
+	}
+	h.mu.Lock()
+	h.metrics = m
+	h.mu.Unlock()
+}
+
+func (h *Handle) UseTracerProvider(tp trace.TracerProvider) {
+	if h == nil || tp == nil {
+		return
+	}
+	h.mu.Lock()
+	h.tracerProvider = tp
+	h.mu.Unlock()
+}
+
+func (h *Handle) Start(ctx context.Context) error {
+	if h == nil {
+		return sql.ErrConnDone
+	}
+	h.mu.Lock()
 	if h.closed {
+		h.mu.Unlock()
 		return sql.ErrConnDone
 	}
 	if h.db != nil {
+		h.mu.Unlock()
 		return nil
 	}
-	db, err := OpenContextWithTracerProvider(ctx, h.config, h.logger, h.metrics, h.tracerProvider)
+	cfg, logger, m, tp := h.config, h.logger, h.metrics, h.tracerProvider
+	h.mu.Unlock()
+
+	db, err := OpenContextWithTracerProvider(ctx, cfg, logger, m, tp)
 	if err != nil {
 		return err
 	}
+
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		_ = db.Close()
+		return sql.ErrConnDone
+	}
+	if h.db != nil {
+		h.mu.Unlock()
+		_ = db.Close()
+		return nil
+	}
 	h.db = db
+	h.mu.Unlock()
 	return nil
 }
 func (h *Handle) ready() (*DB, error) {
+	if h == nil {
+		return nil, sql.ErrConnDone
+	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if h.closed {
@@ -63,18 +130,29 @@ func (h *Handle) ready() (*DB, error) {
 	return h.db, nil
 }
 func (h *Handle) Close() error {
+	if h == nil {
+		return nil
+	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.closed {
+		h.mu.Unlock()
 		return nil
 	}
 	h.closed = true
-	if h.db != nil {
-		return h.db.Close()
+	db := h.db
+	h.db = nil
+	h.mu.Unlock()
+	if db != nil {
+		return db.Close()
 	}
 	return nil
 }
-func (h *Handle) Dialect() string { return h.config.Get("DB_DIALECT") }
+func (h *Handle) Dialect() string {
+	if h == nil || h.config == nil {
+		return ""
+	}
+	return h.config.Get("DB_DIALECT")
+}
 func (h *Handle) Exec(q string, a ...any) (sql.Result, error) {
 	return h.ExecContext(context.Background(), q, a...)
 }

@@ -100,6 +100,13 @@ type cassandraSession struct {
 	session *gocql.Session
 }
 
+func (c *cassandraSession) Close() {
+	if c != nil && c.session != nil {
+		c.session.Close()
+		c.session = nil
+	}
+}
+
 // query creates a Cassandra query.
 // This method wraps the `Query` method of the underlying `session` object.
 func (c *cassandraSession) query(stmt string, values ...any) query {

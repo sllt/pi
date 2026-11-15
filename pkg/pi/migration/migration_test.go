@@ -3,24 +3,21 @@ package migration
 import (
 	"context"
 	"database/sql"
-	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/mock/gomock"
 
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMigration_InvalidKeys(t *testing.T) {
 	logs := testutil.StderrOutputForFunc(func() {
-		c, _ := infra.NewMockContainer(t)
+		deps := Deps{Logger: logging.NewLogger(logging.DEBUG)}
 
-		Run(t.Context(), map[int64]Migrate{
+		_, _ = Run(t.Context(), map[int64]Migrate{
 			1: {UP: nil},
-		}, c)
+		}, deps)
 	})
 
 	assert.Contains(t, logs, "migration run failed! UP not defined for the following keys: [1]")
@@ -28,192 +25,126 @@ func TestMigration_InvalidKeys(t *testing.T) {
 
 func TestMigration_NoDatasource(t *testing.T) {
 	logs := testutil.StderrOutputForFunc(func() {
-		c := infra.NewContainer(nil)
-		c.Logger = logging.NewLogger(logging.DEBUG)
+		deps := Deps{Logger: logging.NewLogger(logging.DEBUG)}
 
-		Run(t.Context(), map[int64]Migrate{
+		_, _ = Run(t.Context(), map[int64]Migrate{
 			1: {UP: func(d Datasource) error {
 				_, err := d.SQL.Exec("CREATE table customer(id int not null);")
-				if err != nil {
-					return err
-				}
-
-				return nil
+				return err
 			}},
-		}, c)
+		}, deps)
 	})
 
 	assert.Contains(t, logs, "no migrations are running")
 }
 
 func Test_getMigratorDBInitialisation(t *testing.T) {
-	cntnr, _ := infra.NewMockContainer(t)
+	deps, _, _ := newTestSQLDeps(t, "mysql")
+	deps.Redis = &fakeRedis{}
 
-	datasource, _, isInitialized := getMigrator(cntnr)
+	datasource, _, isInitialized := getMigrator(deps)
 
 	assert.NotNil(t, datasource.SQL, "TEST Failed \nSQL not initialized, but should have been initialized")
 	assert.NotNil(t, datasource.Redis, "TEST Failed \nRedis not initialized, but should have been initialized")
 	assert.True(t, isInitialized, "TEST Failed \nNo datastores are Initialized")
 }
 
-func TestMigrationRunClickhouseSuccess(t *testing.T) {
+func TestMigrationRunPubSubSuccess(t *testing.T) {
 	logs := testutil.StdoutOutputForFunc(func() {
+		ps := &fakePubSub{}
+		deps := Deps{
+			Logger: logging.NewMockLogger(logging.DEBUG),
+			PubSub: ps,
+		}
+
 		migrationMap := map[int64]Migrate{
 			1: {UP: func(d Datasource) error {
-				err := d.Clickhouse.Exec(t.Context(), "SELECT * FROM users")
-				if err != nil {
+				if err := d.PubSub.CreateTopic(t.Context(), "orders"); err != nil {
 					return err
 				}
-
-				d.Logger.Infof("Clickhouse Migration Ran Successfully")
-
+				d.Logger.Infof("PubSub Migration Ran Successfully")
 				return nil
 			}},
 		}
 
-		mockClickHouse, mockContainer := initializeClickHouseRunMocks(t)
-
-		mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(nil)
-		mockClickHouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).Return(nil)
-		mockClickHouse.EXPECT().Exec(gomock.Any(), "SELECT * FROM users").Return(nil)
-		mockClickHouse.EXPECT().Exec(gomock.Any(), insertChPiMigrationRow, int64(1),
-			"UP", gomock.Any(), gomock.Any()).Return(nil)
-
-		Run(t.Context(), migrationMap, mockContainer)
+		_, _ = Run(t.Context(), migrationMap, deps)
 	})
 
 	assert.Contains(t, logs, "Migration 1 ran successfully")
-	assert.Contains(t, logs, "Clickhouse Migration Ran Successfully")
+	assert.Contains(t, logs, "PubSub Migration Ran Successfully")
 }
 
-func TestMigrationRunClickhouseMigrationFailure(t *testing.T) {
+func TestMigrationRunPubSubMigrationFailure(t *testing.T) {
 	logs := testutil.StderrOutputForFunc(func() {
-		mockClickHouse, mockContainer := initializeClickHouseRunMocks(t)
+		ps := &fakePubSub{
+			createTopicFn: func(_ context.Context, name string) error {
+				if name == "orders" {
+					return sql.ErrConnDone
+				}
+				return nil
+			},
+		}
+		deps := Deps{
+			Logger: logging.NewMockLogger(logging.DEBUG),
+			PubSub: ps,
+		}
 
 		migrationMap := map[int64]Migrate{
 			1: {UP: func(d Datasource) error {
-				err := d.Clickhouse.Exec(t.Context(), "SELECT * FROM users")
-				if err != nil {
-					return err
-				}
-
-				return nil
+				return d.PubSub.CreateTopic(t.Context(), "orders")
 			}},
 		}
 
-		mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(nil)
-		mockClickHouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).Return(nil)
-		mockClickHouse.EXPECT().Exec(gomock.Any(), "SELECT * FROM users").Return(sql.ErrConnDone)
-
-		Run(t.Context(), migrationMap, mockContainer)
-
-		assert.True(t, mockClickHouse.ctrl.Satisfied())
+		_, _ = Run(t.Context(), migrationMap, deps)
 	})
 
 	assert.Contains(t, logs, "failed to run migration : [1], err: sql: connection is already closed")
 }
 
-func TestMigrationRunClickhouseMigrationFailureWhileCheckingTable(t *testing.T) {
-	mockClickHouse, mockContainer := initializeClickHouseRunMocks(t)
-
-	testutil.StderrOutputForFunc(func() {
-		migrationMap := map[int64]Migrate{
-			1: {UP: func(d Datasource) error {
-				err := d.Clickhouse.Exec(t.Context(), "SELECT * FROM users")
-				if err != nil {
-					return err
-				}
-
-				return nil
-			}},
-		}
-
-		mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(sql.ErrConnDone)
-
-		Run(t.Context(), migrationMap, mockContainer)
-	})
-
-	assert.True(t, mockClickHouse.ctrl.Satisfied())
-}
-
-func TestMigrationRunClickhouseCurrentMigrationEqualLastMigration(t *testing.T) {
+func TestMigrationRunPubSubCurrentMigrationEqualLastMigration(t *testing.T) {
 	logs := testutil.StdoutOutputForFunc(func() {
+		ps := &fakePubSub{
+			queryFn: func(context.Context, string, ...any) ([]byte, error) {
+				return []byte(`{"version":1,"method":"UP","start_time":1625000000000,"duration":100}`), nil
+			},
+		}
+		deps := Deps{
+			Logger: logging.NewMockLogger(logging.DEBUG),
+			PubSub: ps,
+		}
+
 		migrationMap := map[int64]Migrate{
 			1: {UP: func(d Datasource) error {
-				err := d.Clickhouse.Exec(t.Context(), "SELECT * FROM users")
-				if err != nil {
-					return err
-				}
-
-				return nil
+				return d.PubSub.CreateTopic(t.Context(), "orders")
 			}},
 		}
 
-		mockClickHouse, mockContainer := initializeClickHouseRunMocks(t)
-
-		mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(nil)
-		mockClickHouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).
-			DoAndReturn(func(_ context.Context, dest any, _ string, _ ...any) error {
-				value := reflect.ValueOf(dest).Elem()
-				row := reflect.New(value.Type().Elem()).Elem()
-				row.FieldByName("Timestamp").SetInt(1)
-				value.Set(reflect.Append(value, row))
-				return nil
-			})
-
-		Run(t.Context(), migrationMap, mockContainer)
+		_, _ = Run(t.Context(), migrationMap, deps)
 	})
 
 	assert.Contains(t, logs, "skipping migration 1")
 }
 
-func TestMigrationRunClickhouseCommitError(t *testing.T) {
+func TestMigrationRunPubSubCommitError(t *testing.T) {
 	logs := testutil.StderrOutputForFunc(func() {
-		migrationMap := map[int64]Migrate{
-			1: {UP: func(d Datasource) error {
-				err := d.Clickhouse.Exec(t.Context(), "SELECT * FROM users")
-				if err != nil {
-					return err
-				}
+		ps := &fakePubSub{
+			publishFn: func(context.Context, string, []byte) error {
+				return sql.ErrConnDone
+			},
+		}
+		deps := Deps{
+			Logger: logging.NewMockLogger(logging.DEBUG),
+			PubSub: ps,
+		}
 
+		migrationMap := map[int64]Migrate{
+			1: {UP: func(Datasource) error {
 				return nil
 			}},
 		}
 
-		mockClickHouse, mockContainer := initializeClickHouseRunMocks(t)
-
-		mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(nil)
-		mockClickHouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).Return(nil)
-		mockClickHouse.EXPECT().Exec(gomock.Any(), "SELECT * FROM users").Return(nil)
-		mockClickHouse.EXPECT().Exec(gomock.Any(), insertChPiMigrationRow, int64(1),
-			"UP", gomock.Any(), gomock.Any()).Return(sql.ErrConnDone)
-
-		Run(t.Context(), migrationMap, mockContainer)
+		_, _ = Run(t.Context(), migrationMap, deps)
 	})
 
 	assert.Contains(t, logs, "failed to commit migration, err: sql: connection is already closed")
-}
-
-func initializeClickHouseRunMocks(t *testing.T) (*MockClickhouse, *infra.Container) {
-	t.Helper()
-
-	mockClickHouse := NewMockClickhouse(gomock.NewController(t))
-
-	mockContainer, _ := infra.NewMockContainer(t)
-	mockContainer.SQL = nil
-	mockContainer.Redis = nil
-	mockContainer.Mongo = nil
-	mockContainer.Cassandra = nil
-	mockContainer.PubSub = nil
-	mockContainer.ArangoDB = nil
-	mockContainer.SurrealDB = nil
-	mockContainer.DGraph = nil
-	mockContainer.Elasticsearch = nil
-	mockContainer.OpenTSDB = nil
-	mockContainer.ScyllaDB = nil
-	mockContainer.Oracle = nil
-	mockContainer.Logger = logging.NewMockLogger(logging.DEBUG)
-	mockContainer.Clickhouse = mockClickHouse
-
-	return mockClickHouse, mockContainer
 }

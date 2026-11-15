@@ -3,6 +3,7 @@ package gcs
 import (
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,59 @@ func New(config *Config) file.FileSystemProvider {
 	}
 
 	return fs
+}
+
+// FromEnv constructs an unstarted GCS FileSystemProvider from an environment lookup function.
+func FromEnv(get func(string) string) (file.FileSystemProvider, error) {
+	if get == nil {
+		return nil, errGCSConfigNil
+	}
+
+	firstNonEmpty := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(get(k)); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	bucket := firstNonEmpty("GCS_BUCKET", "GCS_BUCKET_NAME")
+	if bucket == "" {
+		return nil, errGCSBucketRequired
+	}
+
+	return New(&Config{
+		BucketName:      bucket,
+		EndPoint:        firstNonEmpty("GCS_ENDPOINT"),
+		CredentialsJSON: get("GCS_CREDENTIALS_JSON"),
+		ProjectID:       firstNonEmpty("GCS_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"),
+	}), nil
+}
+
+// ConnectContext establishes the GCS bucket connection within ctx and fails fast without background retries.
+func (f *fileSystem) ConnectContext(ctx context.Context) error {
+	if f == nil || f.CommonFileSystem == nil {
+		return errGCSConfigNil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if f.CommonFileSystem.IsConnected() {
+		return nil
+	}
+	if adapter, ok := f.CommonFileSystem.Provider.(*storageAdapter); ok {
+		if adapter.cfg == nil {
+			return errGCSConfigNil
+		}
+		if strings.TrimSpace(adapter.cfg.BucketName) == "" {
+			return errGCSBucketRequired
+		}
+	}
+	return f.CommonFileSystem.Connect(ctx)
 }
 
 // Connect tries a single immediate connect via provider; on failure it starts a background retry.
@@ -122,10 +176,6 @@ func (f *fileSystem) Close() error {
 		return nil
 	}
 
-	if f.CommonFileSystem != nil {
-		f.CommonFileSystem.SetDisableRetry(true)
-	}
-
 	f.retryMu.Lock()
 	if !f.closed {
 		f.closed = true
@@ -139,6 +189,11 @@ func (f *fileSystem) Close() error {
 
 	if done != nil {
 		<-done
+	}
+
+	if f.CommonFileSystem != nil {
+		f.CommonFileSystem.SetDisableRetry(true)
+		f.CommonFileSystem.SetConnected(false)
 	}
 
 	if f.CommonFileSystem != nil && f.CommonFileSystem.Provider != nil {

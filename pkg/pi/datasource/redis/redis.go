@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	otelglobal "go.opentelemetry.io/otel"
 	oteltrace "go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/sllt/pi/pkg/pi/config"
 	"github.com/sllt/pi/pkg/pi/datasource"
@@ -335,12 +338,45 @@ func newPubSubWithState(
 	retryDone chan struct{},
 	ownsClient bool,
 ) *PubSub {
+	return newPubSubWithTracer(
+		client,
+		redisCfg,
+		logger,
+		metrics,
+		otelglobal.GetTracerProvider().Tracer("pi"),
+		initialConnected,
+		stopCh,
+		retryDone,
+		ownsClient,
+	)
+}
+
+func newPubSubWithTracer(
+	client *redis.Client,
+	redisCfg *Config,
+	logger datasource.Logger,
+	metrics Metrics,
+	tracer oteltrace.Tracer,
+	initialConnected bool,
+	stopCh chan struct{},
+	retryDone chan struct{},
+	ownsClient bool,
+) *PubSub {
+	if logger == nil {
+		logger = nopRedisLogger{}
+	}
+	if metrics == nil {
+		metrics = nopRedisMetrics{}
+	}
+	if tracer == nil {
+		tracer = noop.NewTracerProvider().Tracer("pi")
+	}
 	ps := &PubSub{
 		client:          client,
 		config:          redisCfg,
 		logger:          logger,
 		metrics:         metrics,
-		tracer:          otelglobal.GetTracerProvider().Tracer("pi"),
+		tracer:          tracer,
 		receiveChan:     make(map[string]chan *pubsub.Message),
 		subStarted:      make(map[string]struct{}),
 		subCtx:          make(map[string]context.Context),
@@ -363,7 +399,148 @@ func newPubSubWithState(
 	return ps
 }
 
-// TODO - if we make Redis an interface and expose from container we can avoid c.Redis(c, command) using methods on c and still pass c.
-// type Redis interface {
-//	Get(string) (string, error)
-// }
+// OpenContext opens and verifies a Redis client bounded by ctx without spawning
+// background retry loops or mutating global OpenTelemetry state.
+func OpenContext(ctx context.Context, c config.Config, logger datasource.Logger, metrics Metrics) (*Redis, error) {
+	return OpenContextWithTracerProvider(ctx, c, logger, metrics, nil)
+}
+
+// OpenContextWithTracerProvider opens and verifies a Redis client bounded by ctx,
+// strictly validating TLS files and instrumenting with tp when non-nil.
+func OpenContextWithTracerProvider(
+	ctx context.Context,
+	c config.Config,
+	logger datasource.Logger,
+	metrics Metrics,
+	tp oteltrace.TracerProvider,
+) (*Redis, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, errors.New("redis: config is required")
+	}
+	redisConfig, err := buildStrictRedisConfig(c, strings.EqualFold(strings.TrimSpace(c.Get("PUBSUB_BACKEND")), "REDIS"))
+	if err != nil {
+		return nil, err
+	}
+	if logger == nil {
+		logger = nopRedisLogger{}
+	}
+
+	rc := redis.NewClient(redisConfig.Options)
+	rc.AddHook(&redisHook{config: redisConfig, logger: logger, metrics: metrics})
+	if tp != nil {
+		if err := otel.InstrumentTracing(rc, otel.WithTracerProvider(tp)); err != nil {
+			_ = rc.Close()
+			return nil, fmt.Errorf("redis: instrument tracing: %w", err)
+		}
+	}
+
+	pingCtx := ctx
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		pingCtx, cancel = context.WithTimeout(ctx, redisPingTimeout)
+		defer cancel()
+	}
+
+	if err := rc.Ping(pingCtx).Err(); err != nil {
+		_ = rc.Close()
+		return nil, fmt.Errorf("redis: connect %s:%d: %w", redisConfig.HostName, redisConfig.Port, err)
+	}
+
+	return &Redis{
+		Client: rc,
+		config: redisConfig,
+		logger: logger,
+	}, nil
+}
+
+// OpenPubSubContext opens and verifies a Redis PubSub client bounded by ctx without
+// spawning retryConnect loops or touching global OpenTelemetry state.
+func OpenPubSubContext(
+	ctx context.Context,
+	conf config.Config,
+	logger datasource.Logger,
+	metrics Metrics,
+	tp oteltrace.TracerProvider,
+) (*PubSub, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	redisConfig, err := buildStrictRedisConfig(conf, true)
+	if err != nil {
+		return nil, err
+	}
+	setPubSubDB(conf, redisConfig)
+	if logger == nil {
+		logger = nopRedisLogger{}
+	}
+	if metrics == nil {
+		metrics = nopRedisMetrics{}
+	}
+	if mainHost := strings.TrimSpace(conf.Get("REDIS_HOST")); mainHost != "" &&
+		strings.TrimSpace(conf.Get("REDIS_PUBSUB_DB")) != "" &&
+		redisConfig.PubSubMode != modePubSub {
+		mainDB := 0
+		if rawMainDB := strings.TrimSpace(conf.Get("REDIS_DB")); rawMainDB != "" {
+			mainDB, _ = strconv.Atoi(rawMainDB)
+		}
+		if redisConfig.DB == mainDB {
+			logger.Warnf(
+				"REDIS_PUBSUB_DB (%d) is the same as REDIS_DB (%d); migrations may fail (kite_migrations HASH/STREAM). "+
+					"Set REDIS_PUBSUB_DB to a different DB.",
+				redisConfig.DB, mainDB,
+			)
+		}
+	}
+
+	rc := redis.NewClient(redisConfig.Options)
+	rc.AddHook(&redisHook{config: redisConfig, logger: logger, metrics: metrics})
+	var tracer oteltrace.Tracer
+	if tp != nil {
+		if err := otel.InstrumentTracing(rc, otel.WithTracerProvider(tp)); err != nil {
+			_ = rc.Close()
+			return nil, fmt.Errorf("redis: instrument pubsub tracing: %w", err)
+		}
+		tracer = tp.Tracer("pi")
+	} else {
+		tracer = noop.NewTracerProvider().Tracer("pi")
+	}
+
+	pingCtx := ctx
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		pingCtx, cancel = context.WithTimeout(ctx, redisPingTimeout)
+		defer cancel()
+	}
+
+	if err := rc.Ping(pingCtx).Err(); err != nil {
+		_ = rc.Close()
+		return nil, fmt.Errorf("redis: pubsub connect %s:%d: %w", redisConfig.HostName, redisConfig.Port, err)
+	}
+
+	return newPubSubWithTracer(rc, redisConfig, logger, metrics, tracer, true, make(chan struct{}), nil, true), nil
+}
+
+type nopRedisLogger struct{}
+
+func (nopRedisLogger) Debug(...any)          {}
+func (nopRedisLogger) Debugf(string, ...any) {}
+func (nopRedisLogger) Info(...any)           {}
+func (nopRedisLogger) Infof(string, ...any)  {}
+func (nopRedisLogger) Error(...any)          {}
+func (nopRedisLogger) Errorf(string, ...any) {}
+func (nopRedisLogger) Warn(...any)           {}
+func (nopRedisLogger) Warnf(string, ...any)  {}
+
+type nopRedisMetrics struct{}
+
+func (nopRedisMetrics) RecordHistogram(context.Context, string, float64, ...string) {}
+func (nopRedisMetrics) IncrementCounter(context.Context, string, ...string)         {}

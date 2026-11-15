@@ -23,7 +23,7 @@ This is useful for building **real-time applications** such as chat systems, das
 1. **Clone the repository** and navigate to the example folder:
 
    ```bash
-   git clone https://github.com/kite-dev/pi.git
+   git clone https://github.com/sllt/pi.git
    cd pi/examples/using-web-socket
    ```
 

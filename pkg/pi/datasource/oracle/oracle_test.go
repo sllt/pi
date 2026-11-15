@@ -23,7 +23,7 @@ var (
 	errQueryTest     = errors.New("query error")
 )
 
-func getOracleTestConnection(t *testing.T) (*MockConnection, *MockLogger, Client) {
+func getOracleTestConnection(t *testing.T) (*MockConnection, *MockLogger, *Client) {
 	t.Helper()
 
 	ctrl := gomock.NewController(t)
@@ -32,7 +32,7 @@ func getOracleTestConnection(t *testing.T) (*MockConnection, *MockLogger, Client
 	mockMetric := NewMockMetrics(ctrl)
 	mockLogger := NewMockLogger(ctrl)
 
-	c := Client{conn: mockConn, config: Config{
+	c := &Client{conn: mockConn, config: Config{
 		Host:     "localhost",
 		Port:     1521,
 		Username: "system",
@@ -738,4 +738,44 @@ func Test_OracleTx_Rollback(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func Test_Oracle_HealthCheck_Unconnected_And_Close_And_FromEnv(t *testing.T) {
+	c := New(&Config{Host: "localhost", Port: 1521, Service: "ORCL"})
+	resp, err := c.HealthCheck(context.Background())
+	require.ErrorIs(t, err, errStatusDown)
+	h, ok := resp.(*Health)
+	require.True(t, ok)
+	assert.Equal(t, StatusDown, h.Status)
+
+	// ConnectContext with invalid host returns error without panicking even with nil logger.
+	bad := New(&Config{Host: "", Port: 1521})
+	require.ErrorIs(t, bad.ConnectContext(context.Background()), errEmptyHost)
+
+	// Close on sqlConn is idempotent.
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	mock.ExpectClose()
+	c.conn = &sqlConn{db: db}
+	require.NoError(t, c.Close())
+	require.NoError(t, c.Close())
+	assert.NoError(t, mock.ExpectationsWereMet())
+
+	// FromEnv parses config cleanly.
+	env := map[string]string{
+		"ORACLE_HOST":     "ora.local",
+		"ORACLE_PORT":     "1522",
+		"ORACLE_USER":     "scott",
+		"ORACLE_PASSWORD": "tiger",
+		"ORACLE_SERVICE":  "XEPDB1",
+	}
+	fromEnvClient, err := FromEnv(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	assert.Equal(t, "ora.local", fromEnvClient.config.Host)
+	assert.Equal(t, 1522, fromEnvClient.config.Port)
+	assert.Equal(t, "scott", fromEnvClient.config.Username)
+	assert.Equal(t, "XEPDB1", fromEnvClient.config.Service)
+
+	_, err = FromEnv(func(string) string { return "" })
+	require.ErrorIs(t, err, errEmptyHost)
 }

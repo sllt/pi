@@ -10,7 +10,6 @@ import (
 	goRedis "github.com/redis/go-redis/v9"
 
 	piSql "github.com/sllt/pi/pkg/pi/datasource/sql"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 type MigrateFunc func(d Datasource) error
@@ -40,13 +39,12 @@ type transactionData struct {
 	StartTime       time.Time
 	MigrationNumber int64
 
-	SQLTx    *piSql.Tx
-	RedisTx  goRedis.Pipeliner
-	OracleTx infra.OracleTx
+	SQLTx   *piSql.Tx
+	RedisTx goRedis.Pipeliner
 }
 
 // Run applies pending migrations and returns a structured result.
-func Run(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Container, opts ...Option) (result Result, err error) {
+func Run(ctx context.Context, migrationsMap map[int64]Migrate, target Target, opts ...Option) (result Result, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -68,8 +66,8 @@ func Run(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Containe
 	invalidKeys, keys := getKeys(migrationsMap)
 	if len(invalidKeys) > 0 {
 		err = fmt.Errorf("%w: versions must be positive and define UP or UpContext: %v", ErrInvalidMigration, invalidKeys)
-		if c != nil {
-			c.Errorf("migration run failed! UP not defined for the following keys: %v", invalidKeys)
+		if deps, _ := resolveDeps(target); deps != nil {
+			deps.log().Errorf("migration run failed! UP not defined for the following keys: %v", invalidKeys)
 		}
 
 		return result, err
@@ -81,29 +79,24 @@ func Run(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Containe
 		return result, err
 	}
 
-	ds, mg, ok := getMigrator(c)
-	if c != nil {
-		ds.Logger = c.Logger
-	}
-
-	// Returning with an error as migration would eventually fail if no databases are initialized.
-	// Pub/Sub is considered initialized if its configurations are given.
+	deps, _ := resolveDeps(target)
+	ds, mg, ok := getMigrator(deps)
 	if !ok {
-		if c != nil {
-			c.Errorf("no migrations are running as datasources are not initialized")
+		if deps != nil {
+			deps.log().Errorf("no migrations are running as datasources are not initialized")
 		}
 
 		return result, ErrNoDatasource
 	}
 
-	stateReader := selectMigrationStateReader(c, mg)
+	stateReader := selectMigrationStateReader(deps, mg)
 	result.StateSource = stateReader.source
 	result.StatePrecise = stateReader.precise
-	if err = mg.checkAndCreateMigrationTable(ctx, c); err != nil {
+	if err = mg.checkAndCreateMigrationTable(ctx, deps); err != nil {
 		return result, fmt.Errorf("migration: ensure state store: %w", err)
 	}
 
-	releaseLock, err := acquireMigrationLock(ctx, c, options)
+	releaseLock, err := acquireMigrationLock(ctx, deps, options)
 	if err != nil {
 		return result, err
 	}
@@ -115,7 +108,7 @@ func Run(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Containe
 		}()
 	}
 
-	state, err := readMigrationState(ctx, c, stateReader, migrationsMap)
+	state, err := readMigrationState(ctx, deps, stateReader, migrationsMap)
 	if err != nil {
 		return result, err
 	}
@@ -135,9 +128,7 @@ func Run(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Containe
 		}
 
 		if state.shouldSkipAsApplied(currentMigration) {
-			if c != nil {
-				c.Infof("skipping migration %v", currentMigration)
-			}
+			deps.log().Infof("skipping migration %v", currentMigration)
 
 			result.Skipped = append(result.Skipped, VersionResult{Version: currentMigration, Name: name, Reason: SkipAlreadyApplied})
 			continue
@@ -152,55 +143,45 @@ func Run(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Containe
 			return result, err
 		}
 
-		if c != nil {
-			c.Logger.Infof("running migration %v", currentMigration)
-		}
+		deps.log().Infof("running migration %v", currentMigration)
 
-		migrationInfo, err := mg.beginTransaction(ctx, c)
+		migrationInfo, err := mg.beginTransaction(ctx, deps)
 		if err != nil {
 			ve := &VersionError{Version: currentMigration, Name: name, Op: "begin", Err: err}
 			result.Failed = &VersionResult{Version: currentMigration, Name: name, Error: ve}
 			return result, joinVersionError(ve, nil)
 		}
 
-		// Replacing the objects in datasource object only for those Datasources which support transactions.
+		execDS := ds
 		if migrationInfo.SQLTx != nil {
-			ds.SQL = migrationInfo.SQLTx
+			execDS.SQL = migrationInfo.SQLTx
 		}
 		if migrationInfo.RedisTx != nil {
-			ds.Redis = migrationInfo.RedisTx
-		}
-
-		if migrationInfo.OracleTx != nil {
-			ds.Oracle = &oracleTransactionWrapper{tx: migrationInfo.OracleTx}
+			execDS.Redis = migrationInfo.RedisTx
 		}
 
 		migrationInfo.StartTime = time.Now()
 		migrationInfo.MigrationNumber = currentMigration
 
-		err = migrationDef.runUp(ctx, ds)
+		err = migrationDef.runUp(ctx, execDS)
 		if err == nil {
 			err = ctx.Err()
 		}
 		if err != nil {
-			if c != nil {
-				c.Logger.Errorf("failed to run migration : [%v], err: %v", currentMigration, err)
-			}
+			deps.log().Errorf("failed to run migration : [%v], err: %v", currentMigration, err)
 
-			rollbackErr := rollbackMigration(ctx, mg, c, migrationInfo)
+			rollbackErr := rollbackMigration(ctx, mg, deps, migrationInfo)
 			ve := &VersionError{Version: currentMigration, Name: name, Op: "up", Err: err}
 			result.Failed = &VersionResult{Version: currentMigration, Name: name, Duration: time.Since(migrationInfo.StartTime), Error: ve}
 
 			return result, joinVersionError(ve, rollbackErr)
 		}
 
-		err = invokeMigration(func() error { return mg.commitMigration(ctx, c, migrationInfo) })
+		err = invokeMigration(func() error { return mg.commitMigration(ctx, deps, migrationInfo) })
 		if err != nil {
-			if c != nil {
-				c.Errorf("failed to commit migration, err: %v", err)
-			}
+			deps.log().Errorf("failed to commit migration, err: %v", err)
 
-			rollbackErr := rollbackMigration(ctx, mg, c, migrationInfo)
+			rollbackErr := rollbackMigration(ctx, mg, deps, migrationInfo)
 			ve := &VersionError{Version: currentMigration, Name: name, Op: "commit", Err: err}
 			result.Failed = &VersionResult{Version: currentMigration, Name: name, Duration: time.Since(migrationInfo.StartTime), Error: ve}
 
@@ -249,10 +230,10 @@ func invokeMigration(fn func() error) (err error) {
 	return fn()
 }
 
-func rollbackMigration(ctx context.Context, mg migrator, c *infra.Container, data transactionData) error {
+func rollbackMigration(ctx context.Context, mg migrator, deps *Deps, data transactionData) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	return invokeMigration(func() error { return mg.rollback(cleanupCtx, c, data) })
+	return invokeMigration(func() error { return mg.rollback(cleanupCtx, deps, data) })
 }
 
 func (m Migrate) displayName(version int64) string {
@@ -281,14 +262,21 @@ func getKeys(migrationsMap map[int64]Migrate) (invalidKey, keys []int64) {
 	return invalidKey, keys
 }
 
-func getMigrator(c *infra.Container) (Datasource, migrator, bool) {
+func getMigrator(deps *Deps) (Datasource, migrator, bool) {
 	var (
 		ds Datasource
 		mg migrator = &ds
 		ok bool
 	)
 
-	mg, ok = initializeDatasources(c, &ds, mg)
+	if deps != nil {
+		ds.Logger = deps.log()
+		ds.adapters = deps.Adapters
+	} else {
+		ds.Logger = nopLogger{}
+	}
+
+	mg, ok = initializeDatasources(deps, &ds, mg)
 
 	return ds, mg, ok
 }
@@ -300,8 +288,8 @@ type datasourceInitializer struct {
 	logIdentifier string
 }
 
-func initializeDatasources(c *infra.Container, ds *Datasource, mg migrator) (migrator, bool) {
-	if c == nil {
+func initializeDatasources(deps *Deps, ds *Datasource, mg migrator) (migrator, bool) {
+	if deps == nil {
 		return mg, false
 	}
 
@@ -309,83 +297,22 @@ func initializeDatasources(c *infra.Container, ds *Datasource, mg migrator) (mig
 
 	initializers := []datasourceInitializer{
 		{
-			condition:     func() bool { return !isNil(c.SQL) },
-			setDS:         func() { ds.SQL = c.SQL },
+			condition:     func() bool { return !isNil(deps.SQL) },
+			setDS:         func() { ds.SQL = deps.SQL },
 			apply:         func(m migrator) migrator { return (&sqlDS{ds.SQL}).apply(m) },
 			logIdentifier: "SQL",
 		},
 		{
-			condition:     func() bool { return !isNil(c.Redis) },
-			setDS:         func() { ds.Redis = c.Redis },
+			condition:     func() bool { return !isNil(deps.Redis) },
+			setDS:         func() { ds.Redis = deps.Redis },
 			apply:         func(m migrator) migrator { return redisDS{ds.Redis}.apply(m) },
 			logIdentifier: "Redis",
 		},
 		{
-			condition:     func() bool { return !isNil(c.DGraph) },
-			setDS:         func() { ds.DGraph = dgraphDS{c.DGraph} },
-			apply:         func(m migrator) migrator { return dgraphDS{c.DGraph}.apply(m) },
-			logIdentifier: "DGraph",
-		},
-		{
-			condition:     func() bool { return !isNil(c.Clickhouse) },
-			setDS:         func() { ds.Clickhouse = c.Clickhouse },
-			apply:         func(m migrator) migrator { return clickHouseDS{ds.Clickhouse}.apply(m) },
-			logIdentifier: "Clickhouse",
-		},
-		{
-			condition:     func() bool { return !isNil(c.Oracle) },
-			setDS:         func() { ds.Oracle = c.Oracle },
-			apply:         func(m migrator) migrator { return oracleDS{c.Oracle}.apply(m) },
-			logIdentifier: "Oracle",
-		},
-
-		{
-			condition:     func() bool { return c.PubSub != nil },
-			setDS:         func() { ds.PubSub = c.PubSub },
-			apply:         func(m migrator) migrator { return pubsubDS{c.PubSub}.apply(m) },
+			condition:     func() bool { return !isNil(deps.PubSub) },
+			setDS:         func() { ds.PubSub = deps.PubSub },
+			apply:         func(m migrator) migrator { return pubsubDS{deps.PubSub}.apply(m) },
 			logIdentifier: "PubSub",
-		},
-		{
-			condition:     func() bool { return !isNil(c.Cassandra) },
-			setDS:         func() { ds.Cassandra = cassandraDS{c.Cassandra} },
-			apply:         func(m migrator) migrator { return cassandraDS{c.Cassandra}.apply(m) },
-			logIdentifier: "Cassandra",
-		},
-		{
-			condition:     func() bool { return !isNil(c.Mongo) },
-			setDS:         func() { ds.Mongo = mongoDS{c.Mongo} },
-			apply:         func(m migrator) migrator { return mongoDS{c.Mongo}.apply(m) },
-			logIdentifier: "Mongo",
-		},
-		{
-			condition:     func() bool { return !isNil(c.ArangoDB) },
-			setDS:         func() { ds.ArangoDB = arangoDS{c.ArangoDB} },
-			apply:         func(m migrator) migrator { return arangoDS{c.ArangoDB}.apply(m) },
-			logIdentifier: "ArangoDB",
-		},
-		{
-			condition:     func() bool { return !isNil(c.SurrealDB) },
-			setDS:         func() { ds.SurrealDB = surrealDS{c.SurrealDB} },
-			apply:         func(m migrator) migrator { return surrealDS{c.SurrealDB}.apply(m) },
-			logIdentifier: "SurrealDB",
-		},
-		{
-			condition:     func() bool { return !isNil(c.Elasticsearch) },
-			setDS:         func() { ds.Elasticsearch = c.Elasticsearch },
-			apply:         func(m migrator) migrator { return elasticsearchDS{c.Elasticsearch}.apply(m) },
-			logIdentifier: "Elasticsearch",
-		},
-		{
-			condition:     func() bool { return !isNil(c.OpenTSDB) },
-			setDS:         func() { ds.OpenTSDB = c.OpenTSDB },
-			apply:         func(m migrator) migrator { return openTSDBDS{c.OpenTSDB, "kite_migrations.json"}.apply(m) },
-			logIdentifier: "OpenTSDB",
-		},
-		{
-			condition:     func() bool { return !isNil(c.ScyllaDB) },
-			setDS:         func() { ds.ScyllaDB = c.ScyllaDB },
-			apply:         func(m migrator) migrator { return scyllaDS{c.ScyllaDB}.apply(m) },
-			logIdentifier: "ScyllaDB",
 		},
 	}
 
@@ -398,7 +325,7 @@ func initializeDatasources(c *infra.Container, ds *Datasource, mg migrator) (mig
 		mg = init.apply(mg)
 		initialized = true
 
-		c.Debugf("initialized data source for %s", init.logIdentifier)
+		deps.log().Debugf("initialized data source for %s", init.logIdentifier)
 	}
 
 	return mg, initialized

@@ -1,6 +1,7 @@
 package gcs
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -81,7 +82,7 @@ func TestNew_Success(t *testing.T) {
 	require.NotNil(t, fs)
 	defer func() { _ = fs.(*fileSystem).Close() }()
 
-	// Inject logger and metrics (mimicking AddFileStore behavior)
+	// Inject logger and metrics (mimicking WithFile / SetFile behavior)
 	fs.UseLogger(mockLogger)
 	fs.UseMetrics(mockMetrics)
 
@@ -221,4 +222,34 @@ func TestStartRetryConnect_Success(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	_ = fs.Close()
 	<-retryExited
+}
+
+func TestGCS_ConnectContext_And_FromEnv(t *testing.T) {
+	_, err := FromEnv(func(string) string { return "" })
+	require.ErrorIs(t, err, errGCSBucketRequired)
+
+	fsProvider, err := FromEnv(func(key string) string {
+		switch key {
+		case "GCS_BUCKET":
+			return "my-bucket"
+		case "GCS_ENDPOINT":
+			return "http://127.0.0.1:1"
+		default:
+			return ""
+		}
+	})
+	require.NoError(t, err)
+	require.NotNil(t, fsProvider)
+
+	gcsFS := fsProvider.(*fileSystem)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, gcsFS.ConnectContext(ctx), context.Canceled)
+	assert.Nil(t, gcsFS.retryDone)
+
+	emptyFS := New(&Config{}).(*fileSystem)
+	require.ErrorIs(t, emptyFS.ConnectContext(context.Background()), errGCSBucketRequired)
+
+	require.NoError(t, gcsFS.Close())
+	require.NoError(t, gcsFS.Close())
 }

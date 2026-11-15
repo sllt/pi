@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"strconv"
 	"time"
-
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 var errInvalidRedisTransaction = errors.New("migration: invalid Redis transaction")
@@ -36,8 +34,8 @@ type redisData struct {
 	Duration  int64     `json:"duration"`
 }
 
-func (m redisMigrator) listApplied(ctx context.Context, c *infra.Container) ([]Record, error) {
-	table, err := c.Redis.HGetAll(ctx, "kite_migrations").Result()
+func (m redisMigrator) listApplied(ctx context.Context, deps *Deps) ([]Record, error) {
+	table, err := deps.Redis.HGetAll(ctx, "kite_migrations").Result()
 	if err != nil {
 		return nil, fmt.Errorf("redis: %w", err)
 	}
@@ -69,7 +67,7 @@ func (m redisMigrator) listApplied(ctx context.Context, c *infra.Container) ([]R
 		return records, nil
 	}
 
-	nested, err := m.migrator.listApplied(ctx, c)
+	nested, err := m.migrator.listApplied(ctx, deps)
 	if err != nil {
 		return nil, err
 	}
@@ -77,10 +75,10 @@ func (m redisMigrator) listApplied(ctx context.Context, c *infra.Container) ([]R
 	return mergeAppliedRecords(records, nested), nil
 }
 
-func (m redisMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
+func (m redisMigrator) getLastMigration(ctx context.Context, deps *Deps) (int64, error) {
 	var lastMigration int64
 
-	table, err := c.Redis.HGetAll(ctx, "kite_migrations").Result()
+	table, err := deps.Redis.HGetAll(ctx, "kite_migrations").Result()
 	if err != nil {
 		return -1, fmt.Errorf("redis: %w", err)
 	}
@@ -100,9 +98,13 @@ func (m redisMigrator) getLastMigration(ctx context.Context, c *infra.Container)
 		}
 	}
 
-	c.Debugf("Redis last migration fetched value is: %v", lastMigration)
+	deps.log().Debugf("Redis last migration fetched value is: %v", lastMigration)
 
-	last, err := m.migrator.getLastMigration(ctx, c)
+	if m.migrator == nil {
+		return lastMigration, nil
+	}
+
+	last, err := m.migrator.getLastMigration(ctx, deps)
 	if err != nil {
 		return -1, err
 	}
@@ -110,24 +112,30 @@ func (m redisMigrator) getLastMigration(ctx context.Context, c *infra.Container)
 	return max(lastMigration, last), nil
 }
 
-func (m redisMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
-	redisTx := c.Redis.TxPipeline()
+func (m redisMigrator) beginTransaction(ctx context.Context, deps *Deps) (transactionData, error) {
+	redisTx := deps.Redis.TxPipeline()
 
-	cmt, err := m.migrator.beginTransaction(ctx, c)
-	if err != nil {
-		redisTx.Discard()
+	var (
+		cmt transactionData
+		err error
+	)
+	if m.migrator != nil {
+		cmt, err = m.migrator.beginTransaction(ctx, deps)
+		if err != nil {
+			redisTx.Discard()
 
-		return transactionData{}, err
+			return transactionData{}, err
+		}
 	}
 
 	cmt.RedisTx = redisTx
 
-	c.Debug("Redis Transaction begin successful")
+	deps.log().Debug("Redis Transaction begin successful")
 
 	return cmt, nil
 }
 
-func (m redisMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
+func (m redisMigrator) commitMigration(ctx context.Context, deps *Deps, data transactionData) error {
 	if data.RedisTx == nil {
 		return errInvalidRedisTransaction
 	}
@@ -140,21 +148,21 @@ func (m redisMigrator) commitMigration(ctx context.Context, c *infra.Container, 
 		Duration:  time.Since(data.StartTime).Milliseconds(),
 	})
 	if err != nil {
-		c.Logger.Errorf("migration %v for Redis failed with err: %v", migrationVersion, err)
+		deps.log().Errorf("migration %v for Redis failed with err: %v", migrationVersion, err)
 
 		return err
 	}
 
 	_, err = data.RedisTx.HSet(ctx, "kite_migrations", map[string]string{migrationVersion: string(jsonData)}).Result()
 	if err != nil {
-		c.Logger.Errorf("migration %v for Redis failed with err: %v", migrationVersion, err)
+		deps.log().Errorf("migration %v for Redis failed with err: %v", migrationVersion, err)
 
 		return err
 	}
 
 	_, err = data.RedisTx.Exec(ctx)
 	if err != nil {
-		c.Logger.Errorf("migration %v for Redis failed with err: %v", migrationVersion, err)
+		deps.log().Errorf("migration %v for Redis failed with err: %v", migrationVersion, err)
 
 		return err
 	}
@@ -163,10 +171,10 @@ func (m redisMigrator) commitMigration(ctx context.Context, c *infra.Container, 
 		return nil
 	}
 
-	return m.migrator.commitMigration(ctx, c, data)
+	return m.migrator.commitMigration(ctx, deps, data)
 }
 
-func (m redisMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
+func (m redisMigrator) rollback(ctx context.Context, deps *Deps, data transactionData) error {
 	if data.RedisTx != nil {
 		data.RedisTx.Discard()
 	}
@@ -174,5 +182,5 @@ func (m redisMigrator) rollback(ctx context.Context, c *infra.Container, data tr
 		return nil
 	}
 
-	return m.migrator.rollback(ctx, c, data)
+	return m.migrator.rollback(ctx, deps, data)
 }

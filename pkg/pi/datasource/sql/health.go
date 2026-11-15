@@ -32,7 +32,14 @@ func (d *DB) HealthCheckContext(ctx context.Context) *datasource.Health {
 		Details: make(map[string]any),
 	}
 
-	h.Details["host"] = d.config.HostName + ":" + d.config.Port + "/" + d.config.Database
+	if d == nil {
+		h.Status = datasource.StatusDown
+		return &h
+	}
+
+	if d.config != nil {
+		h.Details["host"] = d.config.HostName + ":" + d.config.Port + "/" + d.config.Database
+	}
 
 	if d.DB == nil {
 		h.Status = datasource.StatusDown

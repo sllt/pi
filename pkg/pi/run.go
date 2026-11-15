@@ -19,20 +19,19 @@ func (a *App) Run() {
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := a.RunContext(signalCtx); err != nil {
+	if err := a.RunContext(signalCtx); err != nil && a.cmd == nil {
 		a.Logger().Errorf("Application stopped with error: %v", err)
 	}
 }
 
 // RunContext starts the application and blocks until ctx is canceled or a managed runtime component requests shutdown.
 func (a *App) RunContext(ctx context.Context) error {
-	if a.cmd != nil {
-		a.cmd.Run(a.container)
-		return nil
-	}
-
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	if a.cmd != nil {
+		return a.runCMDContext(ctx)
 	}
 
 	if err := a.Start(ctx); err != nil {
@@ -75,6 +74,129 @@ func (a *App) RunContext(ctx context.Context) error {
 	return joinShutdownErr(cause, stopErr)
 }
 
+func (a *App) runCMDContext(ctx context.Context) (retErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	a.runtimeMu.Lock()
+	switch a.runtimeState {
+	case lifecycleStarting, lifecycleRunning:
+		a.runtimeMu.Unlock()
+		return ErrAppAlreadyStarted
+	case lifecycleStopping, lifecycleStopped:
+		a.runtimeMu.Unlock()
+		return errAppAlreadyStopped
+	}
+	a.runtimeState = lifecycleStarting
+	a.atomicState.Store(uint32(lifecycleStarting))
+	a.startupDone = make(chan struct{})
+	a.startDone = make(chan struct{})
+	a.stopDone = make(chan struct{})
+	cmdCtx := a.initRuntimeContextsLocked(ctx, ctx)
+	a.runtimeMu.Unlock()
+
+	startupClosed := false
+	closeStartupChans := func(err error) {
+		if startupClosed {
+			return
+		}
+		startupClosed = true
+		a.runtimeMu.Lock()
+		a.startErr = err
+		close(a.startupDone)
+		close(a.startDone)
+		a.runtimeMu.Unlock()
+	}
+
+	defer func() {
+		if re := recover(); re != nil {
+			retErr = joinShutdownErr(retErr, fmt.Errorf("%w: %v", errRuntimeStartPanic, re))
+		}
+		closeStartupChans(retErr)
+
+		a.runtimeMu.Lock()
+		a.runtimeState = lifecycleStopping
+		a.atomicState.Store(uint32(lifecycleStopping))
+		a.runtimeMu.Unlock()
+
+		a.beginStopIntake(nil)
+
+		timeout, _ := a.shutdownTimeout()
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		defer cancel()
+
+		var cleanupErr error
+		a.cancelDrainExec(context.Canceled)
+		a.stopCompatWSServices()
+		if a.kernel != nil {
+			a.kernel.CloseHealthAdmission()
+			if waitErr := a.kernel.WaitHealthSamplers(cleanupCtx); waitErr != nil {
+				cleanupErr = joinShutdownErr(cleanupErr, waitErr)
+				a.kernel.WaitHealthSamplersAll()
+			}
+		}
+		cleanupErr = joinShutdownErr(cleanupErr, a.runOnStopHooks(cleanupCtx))
+		if a.kernel != nil {
+			a.kernel.closeAllWSConnections(cleanupCtx)
+		}
+		cleanupErr = joinShutdownErr(cleanupErr, a.closeMiddlewareClosers())
+		cleanupErr = joinShutdownErr(cleanupErr, a.stopResources(cleanupCtx))
+		if a.ownedTracerShutdown != nil {
+			cleanupErr = joinShutdownErr(cleanupErr, a.ownedTracerShutdown(cleanupCtx))
+		}
+		retErr = joinShutdownErr(retErr, cleanupErr)
+		if retErr != nil {
+			if l := a.safeLogger(); l != nil {
+				l.Errorf("Command stopped with error: %v", retErr)
+			}
+		}
+		if a.kernel != nil {
+			loggerErr := a.kernel.closeOwnedLogger()
+			cleanupErr = joinShutdownErr(cleanupErr, loggerErr)
+			retErr = joinShutdownErr(retErr, loggerErr)
+		}
+
+		a.runtimeMu.Lock()
+		a.stopErr = cleanupErr
+		a.runtimeState = lifecycleStopped
+		a.atomicState.Store(uint32(lifecycleStopped))
+		close(a.stopDone)
+		if a.waitDone != nil {
+			close(a.waitDone)
+		}
+		a.runtimeMu.Unlock()
+	}()
+
+	if a.initErr != nil {
+		return a.initErr
+	}
+	if a.subConfigErr != nil {
+		return a.subConfigErr
+	}
+	if a.kernel != nil {
+		a.kernel.freeze()
+	}
+	if err := a.startResources(cmdCtx); err != nil {
+		return err
+	}
+	if err := a.handleStartupHooks(cmdCtx); err != nil {
+		return err
+	}
+
+	a.runtimeMu.Lock()
+	a.runtimeState = lifecycleRunning
+	a.atomicState.Store(uint32(lifecycleRunning))
+	a.startupCompleted.Store(true)
+	a.runtimeMu.Unlock()
+	closeStartupChans(nil)
+
+	return a.cmd.RunContext(cmdCtx, a.kernel)
+}
+
 // Start starts the application without installing signal handlers.
 // It returns after startup hooks and registered servers/workers have been started.
 // Concurrent calls share one startup result. The first caller's context remains
@@ -99,6 +221,7 @@ func (a *App) Start(ctx context.Context) error {
 		return errAppAlreadyStopped
 	}
 	a.runtimeState = lifecycleStarting
+	a.atomicState.Store(uint32(lifecycleStarting))
 	a.startupDone = make(chan struct{})
 	a.startDone = make(chan struct{})
 	runtimeParent := ctx
@@ -138,6 +261,7 @@ func (a *App) Start(ctx context.Context) error {
 	close(a.startupDone)
 	if err == nil {
 		a.runtimeState = lifecycleRunning
+		a.atomicState.Store(uint32(lifecycleRunning))
 		a.startupCompleted.Store(true)
 		close(a.startDone)
 		a.runtimeMu.Unlock()
@@ -163,6 +287,12 @@ func (a *App) startPure(startupCtx, _ context.Context) (err error) {
 			err = fmt.Errorf("%w: %v", errRuntimeStartPanic, v)
 		}
 	}()
+	if a.subConfigErr != nil {
+		return a.subConfigErr
+	}
+	if a.kernel != nil {
+		a.kernel.freeze()
+	}
 	if err = a.validateRoutesPreStart(); err != nil {
 		return err
 	}
@@ -243,14 +373,19 @@ func (a *App) startOnce(ctx context.Context) (err error) {
 	if a.initErr != nil {
 		return a.initErr
 	}
+	if a.subConfigErr != nil {
+		return a.subConfigErr
+	}
 	if err = contextCauseOrErr(ctx); err != nil {
 		return err
 	}
-	if a.cmd != nil {
-		a.cmd.Run(a.container)
-		return nil
+	if a.kernel != nil {
+		a.kernel.freeze()
 	}
 	if err = a.validateRoutesPreStart(); err != nil {
+		return err
+	}
+	if err = a.startResources(ctx); err != nil {
 		return err
 	}
 	if err = a.handleStartupHooks(ctx); err != nil {
@@ -347,11 +482,8 @@ func (a *App) startTelemetryIfEnabled() {
 	if !a.tryAdmitRuntimeTask() {
 		return
 	}
-	var appName, appVersion string
-	if a.container != nil {
-		appName = a.container.GetAppName()
-		appVersion = a.container.GetAppVersion()
-	}
+	appName := a.AppName()
+	appVersion := a.AppVersion()
 	go func() {
 		defer a.runtimeTasks.Done()
 		a.sendTelemetryContext(intakeCtx, http.DefaultClient, true)
@@ -388,7 +520,7 @@ func (a *App) startMetricsServer() error {
 	// Start Metrics Server
 	// running metrics server before HTTP and gRPC
 	if a.metricServer != nil {
-		return a.metricServer.start(a.container, func(err error) {
+		return a.metricServer.start(a.kernel, func(err error) {
 			a.Logger().Errorf("Metrics server failed: %v", err)
 			a.recordFatalCause(err)
 		})
@@ -407,7 +539,7 @@ func (a *App) startHTTPServer() error {
 			return err
 		}
 
-		return a.httpServer.start(a.container, func(err error) {
+		return a.httpServer.start(a.kernel, func(err error) {
 			a.Logger().Errorf("HTTP server failed: %v", err)
 			a.recordFatalCause(err)
 		})
@@ -423,7 +555,7 @@ func (a *App) startGRPCServer() error {
 	}
 	if a.grpcRegistered {
 		a.ensureDefaultGRPCHealth()
-		err := a.grpcServer.start(a.container, func(err error) {
+		err := a.grpcServer.start(a.kernel, func(err error) {
 			a.Logger().Errorf("gRPC server failed: %v", err)
 			a.recordFatalCause(err)
 		})

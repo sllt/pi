@@ -19,16 +19,21 @@ func TestConnect(t *testing.T) {
 	ctrl := gomock.NewController(t)
 
 	client := New(getTestConfigs())
+	defer func() { _ = client.Close() }()
 
 	mockLogger := NewMockLogger(ctrl)
 
+	mockLogger.EXPECT().Debugf("Using default consumer group: %s", azeventhubs.DefaultConsumerGroup)
 	mockLogger.EXPECT().Debug("Event Hub connection started using connection string")
 	mockLogger.EXPECT().Debug("Event Hub producer client setup success")
 	mockLogger.EXPECT().Debug("Event Hub container client setup success")
 	mockLogger.EXPECT().Debug("Event Hub blobstore client setup success")
 	mockLogger.EXPECT().Debug("Event Hub consumer client setup success")
 	mockLogger.EXPECT().Debug("Event Hub processor setup success")
+	mockLogger.EXPECT().Debug("Event Hub client initialization complete")
 	mockLogger.EXPECT().Debug("Event Hub processor running successfully").AnyTimes()
+	mockLogger.EXPECT().Debug("Event Hub processor context canceled").AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 
 	client.UseLogger(mockLogger)
 	client.UseMetrics(NewMockMetrics(ctrl))
@@ -74,6 +79,7 @@ func TestConnect_ProducerError(t *testing.T) {
 		client.UseMetrics(NewMockMetrics(ctrl))
 
 		mockLogger.EXPECT().Debug(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		mockLogger.EXPECT().Errorf("error occurred while creating producer client %v", gomock.Any())
 
@@ -98,6 +104,7 @@ func TestConnect_ContainerError(t *testing.T) {
 		client.UseMetrics(NewMockMetrics(ctrl))
 
 		mockLogger.EXPECT().Debug(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		mockLogger.EXPECT().Errorf("error occurred while creating container client %v", gomock.Any())
 
@@ -148,17 +155,22 @@ func TestPublish_FailedInvalidTopic(t *testing.T) {
 	ctrl := gomock.NewController(t)
 
 	client := New(getTestConfigs())
+	defer func() { _ = client.Close() }()
 
 	mockLogger := NewMockLogger(ctrl)
 	mockMetrics := NewMockMetrics(ctrl)
 
+	mockLogger.EXPECT().Debugf("Using default consumer group: %s", azeventhubs.DefaultConsumerGroup)
 	mockLogger.EXPECT().Debug("Event Hub connection started using connection string")
 	mockLogger.EXPECT().Debug("Event Hub producer client setup success")
 	mockLogger.EXPECT().Debug("Event Hub container client setup success")
 	mockLogger.EXPECT().Debug("Event Hub blobstore client setup success")
 	mockLogger.EXPECT().Debug("Event Hub consumer client setup success")
 	mockLogger.EXPECT().Debug("Event Hub processor setup success")
+	mockLogger.EXPECT().Debug("Event Hub client initialization complete")
 	mockLogger.EXPECT().Debug("Event Hub processor running successfully").AnyTimes()
+	mockLogger.EXPECT().Debug("Event Hub processor context canceled").AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 
 	client.UseLogger(mockLogger)
 	client.UseMetrics(mockMetrics)
@@ -176,17 +188,22 @@ func Test_CreateTopic(t *testing.T) {
 	ctrl := gomock.NewController(t)
 
 	client := New(getTestConfigs())
+	defer func() { _ = client.Close() }()
 
 	mockLogger := NewMockLogger(ctrl)
 	mockMetrics := NewMockMetrics(ctrl)
 
+	mockLogger.EXPECT().Debugf("Using default consumer group: %s", azeventhubs.DefaultConsumerGroup)
 	mockLogger.EXPECT().Debug("Event Hub connection started using connection string")
 	mockLogger.EXPECT().Debug("Event Hub producer client setup success")
 	mockLogger.EXPECT().Debug("Event Hub container client setup success")
 	mockLogger.EXPECT().Debug("Event Hub blobstore client setup success")
 	mockLogger.EXPECT().Debug("Event Hub consumer client setup success")
 	mockLogger.EXPECT().Debug("Event Hub processor setup success")
+	mockLogger.EXPECT().Debug("Event Hub client initialization complete")
 	mockLogger.EXPECT().Debug("Event Hub processor running successfully").AnyTimes()
+	mockLogger.EXPECT().Debug("Event Hub processor context canceled").AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 	mockLogger.EXPECT().Error("topic creation is not supported in Event Hub")
 
 	client.UseLogger(mockLogger)
@@ -205,17 +222,22 @@ func Test_DeleteTopic(t *testing.T) {
 	ctrl := gomock.NewController(t)
 
 	client := New(getTestConfigs())
+	defer func() { _ = client.Close() }()
 
 	mockLogger := NewMockLogger(ctrl)
 	mockMetrics := NewMockMetrics(ctrl)
 
+	mockLogger.EXPECT().Debugf("Using default consumer group: %s", azeventhubs.DefaultConsumerGroup)
 	mockLogger.EXPECT().Debug("Event Hub connection started using connection string")
 	mockLogger.EXPECT().Debug("Event Hub producer client setup success")
 	mockLogger.EXPECT().Debug("Event Hub container client setup success")
 	mockLogger.EXPECT().Debug("Event Hub blobstore client setup success")
 	mockLogger.EXPECT().Debug("Event Hub consumer client setup success")
 	mockLogger.EXPECT().Debug("Event Hub processor setup success")
+	mockLogger.EXPECT().Debug("Event Hub client initialization complete")
 	mockLogger.EXPECT().Debug("Event Hub processor running successfully").AnyTimes()
+	mockLogger.EXPECT().Debug("Event Hub processor context canceled").AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 	mockLogger.EXPECT().Error("topic deletion is not supported in Event Hub")
 
 	client.UseLogger(mockLogger)
@@ -235,26 +257,40 @@ func Test_HealthCheck(t *testing.T) {
 
 	client := New(getTestConfigs())
 
+	// Unconnected client must report DOWN.
+	require.Equal(t, datasource.StatusDown, client.Health().Status)
+
 	mockLogger := NewMockLogger(ctrl)
 	mockMetrics := NewMockMetrics(ctrl)
 
-	mockLogger.EXPECT().Debug("Event Hub connection started using connection string")
-	mockLogger.EXPECT().Debug("Event Hub producer client setup success")
-	mockLogger.EXPECT().Debug("Event Hub container client setup success")
-	mockLogger.EXPECT().Debug("Event Hub blobstore client setup success")
-	mockLogger.EXPECT().Debug("Event Hub consumer client setup success")
-	mockLogger.EXPECT().Debug("Event Hub processor setup success")
-	mockLogger.EXPECT().Debug("Event Hub processor running successfully").AnyTimes()
-	mockLogger.EXPECT().Error("health-check not implemented for Event Hub")
+	mockLogger.EXPECT().Debug(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 
 	client.UseLogger(mockLogger)
 	client.UseMetrics(mockMetrics)
 
-	client.Connect()
+	require.NoError(t, client.ConnectContext(context.Background()))
+	require.Equal(t, datasource.StatusUp, client.Health().Status)
 
-	_ = client.Health()
+	require.NoError(t, client.Shutdown(context.Background()))
+	require.Equal(t, datasource.StatusDown, client.Health().Status)
 
-	require.True(t, mockLogger.ctrl.Satisfied(), "Event Hub Topic Deletion not allowed failed")
+	// FromEnv validation & success.
+	_, err := FromEnv(func(string) string { return "" })
+	require.Error(t, err)
+
+	env := map[string]string{
+		"EVENTHUB_CONNECTION_STRING":         "Endpoint=sb://test.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=v",
+		"EVENTHUB_NAME":                      "orders",
+		"EVENTHUB_STORAGE_CONNECTION_STRING": "DefaultEndpointsProtocol=https;AccountName=a;AccountKey=b;EndpointSuffix=core.windows.net",
+		"EVENTHUB_STORAGE_SERVICE_URL":       "https://a.blob.core.windows.net",
+		"EVENTHUB_STORAGE_CONTAINER_NAME":    "checkpoints",
+		"EVENTHUB_CONSUMER_GROUP":            "cg1",
+	}
+	envClient, err := FromEnv(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	require.Equal(t, "orders", envClient.GetEventHubName())
 }
 
 func getTestConfigs() Config {
@@ -410,11 +446,9 @@ func Test_Health(t *testing.T) {
 	client := New(getTestConfigs())
 	client.UseLogger(mockLogger)
 
-	mockLogger.EXPECT().Error("health-check not implemented for Event Hub")
-
 	health := client.Health()
 
-	require.Equal(t, datasource.Health{}, health, "Health should return an empty datasource.Health struct")
+	require.Equal(t, datasource.StatusDown, health.Status, "Health should report DOWN when client is not connected")
 }
 
 func TestCreateTopic_ForMigrations(t *testing.T) {
@@ -449,6 +483,7 @@ func TestConnect_ConsumerGroupDefaults(t *testing.T) {
 	cfg.ConsumerGroup = ""
 
 	client := New(cfg)
+	defer func() { _ = client.Close() }()
 	mockLogger := NewMockLogger(ctrl)
 
 	mockLogger.EXPECT().Debugf("Using default consumer group: %s", azeventhubs.DefaultConsumerGroup)
@@ -473,6 +508,7 @@ func TestConnect_ConsumerGroupProvided(t *testing.T) {
 	cfg.ConsumerGroup = expectedGroup
 
 	client := New(cfg)
+	defer func() { _ = client.Close() }()
 	mockLogger := NewMockLogger(ctrl)
 
 	mockLogger.EXPECT().Debugf("Using provided consumer group: %s", expectedGroup)

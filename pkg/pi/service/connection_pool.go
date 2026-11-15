@@ -1,11 +1,15 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -127,16 +131,34 @@ func CloseService(h HTTP) error {
 		}
 		return nil
 	case *circuitBreaker:
+		if v == nil {
+			return nil
+		}
 		return v.Close()
 	case *rateLimiter:
+		if v == nil {
+			return nil
+		}
 		return v.Close()
 	case *retryProvider:
+		if v == nil {
+			return nil
+		}
 		return CloseService(v.HTTP)
 	case *authProvider:
+		if v == nil {
+			return nil
+		}
 		return CloseService(v.HTTP)
 	case *customHealthService:
+		if v == nil {
+			return nil
+		}
 		return CloseService(v.HTTP)
 	case *customHeader:
+		if v == nil {
+			return nil
+		}
 		return CloseService(v.HTTP)
 	default:
 		if closer, ok := h.(io.Closer); ok {
@@ -153,18 +175,159 @@ func extractHTTPService(h HTTP) *httpService {
 	case *httpService:
 		return v
 	case *circuitBreaker:
+		if v == nil {
+			return nil
+		}
 		return extractHTTPService(v.HTTP)
 	case *retryProvider:
+		if v == nil {
+			return nil
+		}
 		return extractHTTPService(v.HTTP)
 	case *authProvider:
+		if v == nil {
+			return nil
+		}
 		return extractHTTPService(v.HTTP)
 	case *customHealthService:
+		if v == nil {
+			return nil
+		}
 		return extractHTTPService(v.HTTP)
 	case *rateLimiter:
+		if v == nil {
+			return nil
+		}
 		return extractHTTPService(v.HTTP)
 	case *customHeader:
+		if v == nil {
+			return nil
+		}
 		return extractHTTPService(v.HTTP)
 	default:
 		return nil
+	}
+}
+
+type endpointHealthChecker interface {
+	getHealthResponseForEndpoint(ctx context.Context, endpoint string, timeout int) *Health
+}
+
+// checkEndpointHealth unwraps built-in service decorators to reach endpointHealthChecker
+// (*httpService) so custom HealthConfig endpoints/timeouts work identically without
+// sealing the public HTTP interface. External test fakes fall back to curr.HealthCheck(ctx).
+func checkEndpointHealth(ctx context.Context, h HTTP, endpoint string, timeout int) *Health {
+	if h == nil {
+		return &Health{
+			Status:  serviceDown,
+			Details: map[string]any{"error": "http service is nil"},
+		}
+	}
+	curr := h
+	for curr != nil {
+		switch v := curr.(type) {
+		case *httpService:
+			if v == nil {
+				return &Health{
+					Status:  serviceDown,
+					Details: map[string]any{"error": "http service is nil"},
+				}
+			}
+			return v.getHealthResponseForEndpoint(ctx, endpoint, timeout)
+		case *circuitBreaker:
+			if v == nil {
+				curr = nil
+			} else {
+				curr = v.HTTP
+			}
+		case *retryProvider:
+			if v == nil {
+				curr = nil
+			} else {
+				curr = v.HTTP
+			}
+		case *authProvider:
+			if v == nil {
+				curr = nil
+			} else {
+				curr = v.HTTP
+			}
+		case *customHealthService:
+			if v == nil {
+				curr = nil
+			} else {
+				curr = v.HTTP
+			}
+		case *rateLimiter:
+			if v == nil {
+				curr = nil
+			} else {
+				curr = v.HTTP
+			}
+		case *customHeader:
+			if v == nil {
+				curr = nil
+			} else {
+				curr = v.HTTP
+			}
+		default:
+			if checker, ok := curr.(endpointHealthChecker); ok {
+				return checker.getHealthResponseForEndpoint(ctx, endpoint, timeout)
+			}
+			return curr.HealthCheck(ctx)
+		}
+	}
+	return &Health{
+		Status:  serviceDown,
+		Details: map[string]any{"error": "http service is nil"},
+	}
+}
+
+func isNilServiceAny(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Func, reflect.Map, reflect.Slice, reflect.Chan:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
+func propagateServiceName(h HTTP, name string) {
+	if isNilServiceAny(h) || name == "" {
+		return
+	}
+	if s, ok := h.(interface{ UseServiceName(string) }); ok {
+		s.UseServiceName(name)
+	}
+}
+
+func propagateLogger(h HTTP, logger any) {
+	if isNilServiceAny(h) || isNilServiceAny(logger) {
+		return
+	}
+	if s, ok := h.(interface{ UseLogger(any) }); ok {
+		s.UseLogger(logger)
+	}
+}
+
+func propagateMetrics(h HTTP, metrics any) {
+	if isNilServiceAny(h) || isNilServiceAny(metrics) {
+		return
+	}
+	if s, ok := h.(interface{ UseMetrics(any) }); ok {
+		s.UseMetrics(metrics)
+	}
+}
+
+func propagateTracerProvider(h HTTP, tp trace.TracerProvider) {
+	if isNilServiceAny(h) || isNilServiceAny(tp) {
+		return
+	}
+	if s, ok := h.(interface{ UseTracerProvider(trace.TracerProvider) }); ok {
+		s.UseTracerProvider(tp)
 	}
 }

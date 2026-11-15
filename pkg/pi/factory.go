@@ -7,7 +7,6 @@ import (
 
 	"github.com/sllt/pi/pkg/pi/cmd/terminal"
 	"github.com/sllt/pi/pkg/pi/http/middleware"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 )
 
@@ -15,7 +14,7 @@ import (
 func New() *App {
 	app := &App{}
 	app.readConfig(false)
-	app.container = infra.NewContainer(app.Config)
+	app.kernel = newLegacyKernel(app.Config, nil, false)
 
 	app.initTracer()
 	app.initMetricsServer()
@@ -26,7 +25,7 @@ func New() *App {
 	app.httpDisabled = !enabled
 	middlewareConfig := middleware.GetConfigs(app.Config)
 	app.initErr = errors.Join(app.initErr, middleware.ValidateCORS(middlewareConfig.CorsHeaders))
-	app.httpServer = newHTTPServer(app.container, defaultHTTPPort, middlewareConfig)
+	app.httpServer = newHTTPServer(app.kernel, defaultHTTPPort, middlewareConfig)
 	app.httpServer.address = address
 	app.httpServer.certFile = app.Config.GetOrDefault("CERT_FILE", "")
 	app.httpServer.keyFile = app.Config.GetOrDefault("KEY_FILE", "")
@@ -40,17 +39,17 @@ func New() *App {
 	address, enabled, err = endpointConfig(app.Config, "GRPC", defaultGRPCPort)
 	app.initErr = errors.Join(app.initErr, err)
 	app.grpcDisabled = !enabled
-	app.grpcServer, err = newGRPCServer(app.container, defaultGRPCPort, app.Config)
+	app.grpcServer, err = newGRPCServer(app.kernel, defaultGRPCPort, app.Config)
 
 	// Continue without gRPC server rather than failing the entire app
 	if err != nil {
-		app.container.Logger.Errorf("failed to create gRPC server: %v", err)
+		app.Logger().Errorf("failed to create gRPC server: %v", err)
 		app.initErr = errors.Join(app.initErr, err)
 	} else {
 		app.grpcServer.address = address
 	}
 
-	app.subscriptionManager = newSubscriptionManager(app.container)
+	app.subscriptionManager = newSubscriptionManager(app.kernel)
 
 	// static file server
 	currentWd, _ := os.Getwd()
@@ -67,14 +66,13 @@ func New() *App {
 func NewCMD() *App {
 	app := &App{}
 	app.readConfig(true)
-	app.container = infra.NewContainer(nil)
-	app.container.Logger = logging.NewFileLogger(app.Config.Get("CMD_LOGS_FILE"))
+	cmdLogger := logging.NewFileLogger(app.Config.Get("CMD_LOGS_FILE"))
+	app.kernel = newLegacyKernel(app.Config, cmdLogger, true)
 
 	app.cmd = &cmd{
 		out: terminal.New(),
 	}
 
-	app.container.Create(app.Config)
 	app.initTracer()
 
 	return app

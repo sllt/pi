@@ -3,6 +3,7 @@ package dbresolver
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sllt/pi/pkg/pi/config"
 	"github.com/sllt/pi/pkg/pi/datasource"
 	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -34,6 +35,31 @@ var errReplicaFailedNoFallback = errors.New("replica query failed and fallback d
 
 type contextKey string
 
+// DB is the 15-method SQL client interface routed by Resolver.
+// It matches github.com/sllt/pi/pkg/pi/datasource/sql.Client without importing pkg/pi or pkg/pi/infra.
+type DB interface {
+	piSQL.Executor
+
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+	Exec(query string, args ...any) (sql.Result, error)
+	Prepare(query string) (*sql.Stmt, error)
+
+	Begin() (*piSQL.Tx, error)
+	BeginTxContext(ctx context.Context, opts *sql.TxOptions) (*piSQL.Tx, error)
+
+	HealthCheck() *datasource.Health
+	HealthCheckContext(ctx context.Context) *datasource.Health
+	Owns(tx *piSQL.Tx) bool
+	Dialect() string
+	Close() error
+}
+
+var (
+	_ DB = (*Resolver)(nil)
+	_ DB = (*piSQL.DB)(nil)
+)
+
 // statistics holds atomic counters for various operations.
 type statistics struct {
 	primaryReads     atomic.Uint64
@@ -46,24 +72,39 @@ type statistics struct {
 
 // Replica wrapper with circuit breaker.
 type replicaWrapper struct {
-	db      infra.DB
+	db      DB
 	breaker *circuitBreaker
 	index   int
 }
 
-// Resolver is the main struct that implements the infra.DB interface.
+// Resolver routes read queries to replicas with circuit-breaking fallback and writes/transactions to primary.
 type Resolver struct {
-	primary      infra.DB
+	mu sync.RWMutex
+
+	primary      DB
 	replicas     []*replicaWrapper
 	strategy     Strategy
 	readFallback bool
 
-	logger  Logger
-	metrics Metrics
-	tracer  trace.Tracer
+	maxFailures    int32
+	breakerTimeout time.Duration
+
+	logger         Logger
+	metrics        Metrics
+	tracer         trace.Tracer
+	tracerProvider trace.TracerProvider
 
 	primaryRoutes   map[string]bool
 	primaryPrefixes []string
+
+	// Optional deferred replica initialization for zero-I/O construction (NewManaged).
+	lazyCfg    *Config
+	lazyAppCfg config.Config
+	started    bool
+	closed     bool
+
+	metricsInit bool
+	bgStarted   bool
 
 	stats *statistics
 
@@ -73,46 +114,34 @@ type Resolver struct {
 	once     sync.Once
 }
 
-// NewResolver creates a new Resolver instance with the provided primary and replicas.
-func NewResolver(primary infra.DB, replicas []infra.DB, logger Logger, metrics Metrics, opts ...Option) infra.DB {
-	// Wrap replicas with circuit breakers
-	replicaWrappers := make([]*replicaWrapper, len(replicas))
-	for i, replica := range replicas {
-		replicaWrappers[i] = &replicaWrapper{
-			db:      replica,
-			breaker: newCircuitBreaker(defaultMaxFailures, time.Duration(defaultTimeoutSec)*time.Second),
-			index:   i,
-		}
-	}
-
+// NewResolver creates a new Resolver instance with pre-opened primary and replica connections.
+func NewResolver(primary DB, replicas []DB, logger Logger, metrics Metrics, opts ...Option) DB {
 	r := &Resolver{
-		primary:       primary,
-		replicas:      replicaWrappers,
-		readFallback:  true, // Default to true
-		logger:        logger,
-		metrics:       metrics,
-		stats:         &statistics{},
-		primaryRoutes: make(map[string]bool),
-		stopChan:      make(chan struct{}),
+		primary:        primary,
+		readFallback:   true,
+		maxFailures:    defaultMaxFailures,
+		breakerTimeout: time.Duration(defaultTimeoutSec) * time.Second,
+		logger:         logger,
+		metrics:        metrics,
+		stats:          &statistics{},
+		primaryRoutes:  make(map[string]bool),
+		stopChan:       make(chan struct{}),
+		started:        true,
 	}
 
-	// Default strategy
 	if len(replicas) > 0 {
 		r.strategy = NewRoundRobinStrategy()
 	}
 
-	// Apply options
 	for _, opt := range opts {
-		opt(r)
-	}
-
-	for route := range r.primaryRoutes {
-		if strings.HasSuffix(route, "*") {
-			r.primaryPrefixes = append(r.primaryPrefixes, strings.TrimSuffix(route, "*"))
+		if opt != nil {
+			opt(r)
 		}
 	}
 
-	// Initialize metrics and start background tasks.
+	r.compilePrimaryPrefixes()
+	r.replicas = r.wrapReplicas(replicas)
+
 	r.initializeMetrics()
 	r.startBackgroundTasks()
 
@@ -123,17 +152,310 @@ func NewResolver(primary infra.DB, replicas []infra.DB, logger Logger, metrics M
 	return r
 }
 
-// initializeMetrics sets up metrics following Pi patterns.
-func (r *Resolver) initializeMetrics() {
-	if r.metrics == nil {
-		return
+// NewManaged creates a zero-I/O Resolver that opens replicas during Start(ctx).
+// It is designed for pi.Build(pi.WithSQL(resolver, pi.Owned)).
+func NewManaged(primary DB, cfg *Config, appCfg config.Config, opts ...Option) *Resolver {
+	var cfgCopy Config
+	if cfg != nil {
+		cfgCopy = *cfg
+		if len(cfg.PrimaryRoutes) > 0 {
+			cfgCopy.PrimaryRoutes = append([]string(nil), cfg.PrimaryRoutes...)
+		}
+		if len(cfg.Replicas) > 0 {
+			cfgCopy.Replicas = append([]ReplicaCredential(nil), cfg.Replicas...)
+		}
 	}
 
-	// Histogram for query response times
+	routes := make(map[string]bool, len(cfgCopy.PrimaryRoutes))
+	for _, route := range cfgCopy.PrimaryRoutes {
+		routes[route] = true
+	}
+
+	maxFailures := int32(defaultMaxFailures)
+	if cfgCopy.MaxFailures > 0 {
+		maxFailures = int32(cfgCopy.MaxFailures)
+	}
+	timeout := time.Duration(defaultTimeoutSec) * time.Second
+	if cfgCopy.TimeoutSec > 0 {
+		timeout = time.Duration(cfgCopy.TimeoutSec) * time.Second
+	}
+
+	r := &Resolver{
+		primary:        primary,
+		strategy:       getStrategy(cfgCopy.Strategy),
+		readFallback:   cfg == nil || cfgCopy.ReadFallback,
+		maxFailures:    maxFailures,
+		breakerTimeout: timeout,
+		primaryRoutes:  routes,
+		lazyCfg:        &cfgCopy,
+		lazyAppCfg:     appCfg,
+		stats:          &statistics{},
+		stopChan:       make(chan struct{}),
+	}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(r)
+		}
+	}
+
+	r.compilePrimaryPrefixes()
+
+	return r
+}
+
+func (r *Resolver) compilePrimaryPrefixes() {
+	r.primaryPrefixes = nil
+	for route := range r.primaryRoutes {
+		if strings.HasSuffix(route, "*") {
+			r.primaryPrefixes = append(r.primaryPrefixes, strings.TrimSuffix(route, "*"))
+		}
+	}
+}
+
+func (r *Resolver) wrapReplicas(replicas []DB) []*replicaWrapper {
+	maxFailures := r.maxFailures
+	if maxFailures <= 0 {
+		maxFailures = defaultMaxFailures
+	}
+	timeout := r.breakerTimeout
+	if timeout <= 0 {
+		timeout = time.Duration(defaultTimeoutSec) * time.Second
+	}
+
+	wrappers := make([]*replicaWrapper, len(replicas))
+	for i, replica := range replicas {
+		wrappers[i] = &replicaWrapper{
+			db:      replica,
+			breaker: newCircuitBreaker(maxFailures, timeout),
+			index:   i,
+		}
+	}
+	return wrappers
+}
+
+// UseLogger injects a runtime logger before or during initialization.
+func (r *Resolver) UseLogger(logger any) {
+	if r == nil {
+		return
+	}
+	if l, ok := logger.(Logger); ok && l != nil {
+		r.mu.Lock()
+		r.logger = l
+		primary := r.primary
+		r.mu.Unlock()
+		if ul, ok := primary.(interface{ UseLogger(any) }); ok {
+			ul.UseLogger(logger)
+		}
+	}
+}
+
+// UseMetrics injects runtime metrics and registers resolver collectors once.
+func (r *Resolver) UseMetrics(metrics any) {
+	if r == nil {
+		return
+	}
+	if m, ok := metrics.(Metrics); ok && m != nil {
+		r.mu.Lock()
+		r.metrics = m
+		r.initializeMetrics()
+		primary := r.primary
+		r.mu.Unlock()
+		if um, ok := primary.(interface{ UseMetrics(any) }); ok {
+			um.UseMetrics(metrics)
+		}
+	}
+}
+
+// UseTracerProvider injects an OpenTelemetry TracerProvider.
+func (r *Resolver) UseTracerProvider(tp trace.TracerProvider) {
+	if r == nil || tp == nil {
+		return
+	}
+	r.mu.Lock()
+	r.tracerProvider = tp
+	r.tracer = tp.Tracer("pi-dbresolver")
+	primary := r.primary
+	r.mu.Unlock()
+	if utp, ok := primary.(interface{ UseTracerProvider(trace.TracerProvider) }); ok {
+		utp.UseTracerProvider(tp)
+	}
+}
+
+// UseTracer injects an OpenTelemetry Tracer or TracerProvider.
+func (r *Resolver) UseTracer(tracer any) {
+	if r == nil {
+		return
+	}
+	switch t := tracer.(type) {
+	case trace.TracerProvider:
+		r.UseTracerProvider(t)
+	case trace.Tracer:
+		r.mu.Lock()
+		r.tracer = t
+		primary := r.primary
+		r.mu.Unlock()
+		if ut, ok := primary.(interface{ UseTracer(any) }); ok {
+			ut.UseTracer(t)
+		}
+	}
+}
+
+// IsStarted reports whether the resolver has started.
+func (r *Resolver) IsStarted() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return !r.closed && r.started
+}
+
+// HasActiveResource reports whether the resolver or its underlying primary holds open connections.
+func (r *Resolver) HasActiveResource() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	closed := r.closed
+	started := r.started
+	primary := r.primary
+	hasReplicas := len(r.replicas) > 0
+	r.mu.RUnlock()
+	if closed {
+		return false
+	}
+	if started || hasReplicas {
+		return true
+	}
+	if primary == nil {
+		return false
+	}
+	if sp, ok := primary.(interface{ IsStarted() bool }); ok {
+		return sp.IsStarted()
+	}
+	if _, isLazy := primary.(interface{ Start(context.Context) error }); isLazy {
+		return false
+	}
+	return true
+}
+
+// UnwrapSQL exposes the wrapped primary SQL client so App.SetSQL can transfer ownership cleanly.
+func (r *Resolver) UnwrapSQL() any {
+	if r == nil {
+		return nil
+	}
+	return r.primary
+}
+
+// Start initializes primary (if lazy) and any deferred replica connections.
+// Calling Start on an already-started Resolver is an idempotent no-op.
+func (r *Resolver) Start(ctx context.Context) error {
+	if r == nil || r.primary == nil {
+		return errPrimaryNil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.RLock()
+	if r.closed {
+		r.mu.RUnlock()
+		return sql.ErrConnDone
+	}
+	if r.started {
+		r.mu.RUnlock()
+		return nil
+	}
+	r.mu.RUnlock()
+
+	primaryStartedHere := false
+	if starter, ok := r.primary.(interface{ Start(context.Context) error }); ok {
+		wasStarted := false
+		if sp, ok := r.primary.(interface{ IsStarted() bool }); ok {
+			wasStarted = sp.IsStarted()
+		}
+		if err := starter.Start(ctx); err != nil {
+			return err
+		}
+		primaryStartedHere = !wasStarted
+	}
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		if primaryStartedHere {
+			_ = r.primary.Close()
+		}
+		return sql.ErrConnDone
+	}
+	if r.started {
+		r.mu.Unlock()
+		return nil
+	}
+	lazyCfg := r.lazyCfg
+	lazyAppCfg := r.lazyAppCfg
+	logger := r.logger
+	metrics := r.metrics
+	tp := r.tracerProvider
+	r.mu.Unlock()
+
+	var replicas []DB
+	if lazyCfg != nil && len(lazyCfg.Replicas) > 0 {
+		var err error
+		replicas, err = OpenReplicasContext(ctx, lazyCfg, lazyAppCfg, logger, metrics, tp)
+		if err != nil {
+			if primaryStartedHere {
+				_ = r.primary.Close()
+			}
+			return err
+		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		closeOpenedReplicas(replicas)
+		if primaryStartedHere {
+			_ = r.primary.Close()
+		}
+		return sql.ErrConnDone
+	}
+	if r.started {
+		closeOpenedReplicas(replicas)
+		return nil
+	}
+
+	r.replicas = r.wrapReplicas(replicas)
+	if len(replicas) == 0 {
+		r.strategy = nil
+	} else if r.strategy == nil {
+		r.strategy = NewRoundRobinStrategy()
+	}
+	r.initializeMetrics()
+	r.startBackgroundTasks()
+	r.started = true
+
+	if r.logger != nil {
+		r.logger.Logf("DB Resolver initialized with %d replicas using circuit breakers", len(replicas))
+	}
+
+	return nil
+}
+
+// initializeMetrics sets up metrics following Pi patterns. Caller holds r.mu or is in constructor.
+func (r *Resolver) initializeMetrics() {
+	if r.metrics == nil || r.metricsInit {
+		return
+	}
+	r.metricsInit = true
+
 	buckets := []float64{0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0}
 	r.metrics.NewHistogram("dbresolver_query_duration", "Response time of DB resolver operations in microseconds", buckets...)
 
-	// Gauges for operation tracking
 	r.metrics.NewGauge("dbresolver_primary_reads", "Total reads routed to primary")
 	r.metrics.NewGauge("dbresolver_primary_writes", "Total writes routed to primary")
 	r.metrics.NewGauge("dbresolver_replica_reads", "Total reads routed to replicas")
@@ -141,8 +463,12 @@ func (r *Resolver) initializeMetrics() {
 	r.metrics.NewGauge("dbresolver_failures", "Total replica failures")
 }
 
-// startBackgroundTasks starts minimal background processing.
+// startBackgroundTasks starts minimal background processing once. Caller holds r.mu or is in constructor.
 func (r *Resolver) startBackgroundTasks() {
+	if r.bgStarted {
+		return
+	}
+	r.bgStarted = true
 	r.wg.Add(1)
 
 	go r.backgroundProcessor()
@@ -167,34 +493,51 @@ func (r *Resolver) backgroundProcessor() {
 
 // updateMetrics updates gauge metrics.
 func (r *Resolver) updateMetrics() {
-	if r.metrics == nil {
+	r.mu.RLock()
+	metrics := r.metrics
+	r.mu.RUnlock()
+
+	if metrics == nil {
 		return
 	}
 
-	r.metrics.SetGauge("dbresolver_primary_reads", float64(r.stats.primaryReads.Load()))
-	r.metrics.SetGauge("dbresolver_primary_writes", float64(r.stats.primaryWrites.Load()))
-	r.metrics.SetGauge("dbresolver_replica_reads", float64(r.stats.replicaReads.Load()))
-	r.metrics.SetGauge("dbresolver_fallbacks", float64(r.stats.primaryFallbacks.Load()))
-	r.metrics.SetGauge("dbresolver_failures", float64(r.stats.replicaFailures.Load()))
+	metrics.SetGauge("dbresolver_primary_reads", float64(r.stats.primaryReads.Load()))
+	metrics.SetGauge("dbresolver_primary_writes", float64(r.stats.primaryWrites.Load()))
+	metrics.SetGauge("dbresolver_replica_reads", float64(r.stats.replicaReads.Load()))
+	metrics.SetGauge("dbresolver_fallbacks", float64(r.stats.primaryFallbacks.Load()))
+	metrics.SetGauge("dbresolver_failures", float64(r.stats.replicaFailures.Load()))
+}
+
+func (r *Resolver) snapshotState() ([]*replicaWrapper, Strategy, Logger, Metrics, trace.Tracer) {
+	r.mu.RLock()
+	replicas := r.replicas
+	strategy := r.strategy
+	logger := r.logger
+	metrics := r.metrics
+	tracer := r.tracer
+	r.mu.RUnlock()
+	return replicas, strategy, logger, metrics, tracer
 }
 
 // shouldUseReplica determines routing based on HTTP method and path.
 func (r *Resolver) shouldUseReplica(ctx context.Context) bool {
-	if len(r.replicas) == 0 {
+	r.mu.RLock()
+	hasReplicas := len(r.replicas) > 0
+	r.mu.RUnlock()
+
+	if !hasReplicas {
 		return false
 	}
 
-	// Check if path requires primary.
 	if path, ok := ctx.Value(contextKeyRequestPath).(string); ok {
 		if r.isPrimaryRoute(path) {
 			return false
 		}
 	}
 
-	// Check HTTP method.
 	method, ok := ctx.Value(contextKeyHTTPMethod).(string)
 	if !ok {
-		return false // Default to primary for safety.
+		return false
 	}
 
 	return method == "GET"
@@ -206,7 +549,6 @@ func (r *Resolver) isPrimaryRoute(path string) bool {
 		return true
 	}
 
-	// Prefix match (precompiled patterns)
 	for _, prefix := range r.primaryPrefixes {
 		if strings.HasPrefix(path, prefix) {
 			return true
@@ -218,45 +560,45 @@ func (r *Resolver) isPrimaryRoute(path string) bool {
 
 // selectHealthyReplica chooses an available replica using circuit breaker.
 func (r *Resolver) selectHealthyReplica() *replicaWrapper {
-	if len(r.replicas) == 0 {
+	replicas, strategy, logger, _, _ := r.snapshotState()
+	if len(replicas) == 0 || strategy == nil {
 		return nil
 	}
 
-	// Build list of healthy replica indices
 	var healthyIndices []int
-
-	for i, wrapper := range r.replicas {
+	for i, wrapper := range replicas {
 		if wrapper.breaker.allowRequest() {
 			healthyIndices = append(healthyIndices, i)
 		}
 	}
 
 	if len(healthyIndices) == 0 {
-		if r.logger != nil {
-			r.logger.Warn("All replicas are unavailable (circuit breakers open), falling back to primary")
+		if logger != nil {
+			logger.Warn("All replicas are unavailable (circuit breakers open), falling back to primary")
 		}
-
 		return nil
 	}
 
-	// Strategy picks index from healthy replicas
-	idx := r.strategy.Next(len(healthyIndices))
+	idx := strategy.Next(len(healthyIndices))
 	if idx < 0 || idx >= len(healthyIndices) {
 		return nil
 	}
 
 	originalIdx := healthyIndices[idx]
-
-	return r.replicas[originalIdx]
+	return replicas[originalIdx]
 }
 
 // addTrace adds tracing information to the context and returns a span.
 func (r *Resolver) addTrace(ctx context.Context, method, query string) (context.Context, trace.Span) {
-	if r.tracer == nil {
+	r.mu.RLock()
+	tracer := r.tracer
+	r.mu.RUnlock()
+
+	if tracer == nil {
 		return ctx, nil
 	}
 
-	tracedCtx, span := r.tracer.Start(ctx, fmt.Sprintf("dbresolver-%s", method))
+	tracedCtx, span := tracer.Start(ctx, fmt.Sprintf("dbresolver-%s", method))
 	if span != nil {
 		span.SetAttributes(
 			attribute.String("dbresolver.query", query),
@@ -271,7 +613,6 @@ func (r *Resolver) addTrace(ctx context.Context, method, query string) (context.
 func (r *Resolver) recordStats(start time.Time, method, target string, span trace.Span, isRead bool, replicaIndex *int) {
 	duration := time.Since(start).Microseconds()
 
-	// Update trace if available.
 	if span != nil {
 		defer span.End()
 
@@ -281,7 +622,6 @@ func (r *Resolver) recordStats(start time.Time, method, target string, span trac
 			attribute.Bool("dbresolver.is_read", isRead),
 		}
 
-		// Add replica index if available
 		if replicaIndex != nil {
 			attrs = append(attrs, attribute.Int("dbresolver.replica_index", *replicaIndex))
 		}
@@ -289,12 +629,21 @@ func (r *Resolver) recordStats(start time.Time, method, target string, span trac
 		span.SetAttributes(attrs...)
 	}
 
-	// Record metrics histogram only if metrics are enabled.
-	if r.metrics != nil {
-		r.metrics.RecordHistogram(context.Background(), "dbresolver_query_duration",
+	r.mu.RLock()
+	metrics := r.metrics
+	r.mu.RUnlock()
+
+	if metrics != nil {
+		metrics.RecordHistogram(context.Background(), "dbresolver_query_duration",
 			float64(duration), "method", method, "target", target)
 	}
 }
+
+type resolverErrConnector struct{ err error }
+
+func (c resolverErrConnector) Connect(context.Context) (driver.Conn, error) { return nil, c.err }
+func (c resolverErrConnector) Driver() driver.Driver                        { return c }
+func (c resolverErrConnector) Open(string) (driver.Conn, error)             { return nil, c.err }
 
 // Query routes to replica for reads, primary for writes.
 func (r *Resolver) Query(query string, args ...any) (*sql.Rows, error) {
@@ -303,6 +652,9 @@ func (r *Resolver) Query(query string, args ...any) (*sql.Rows, error) {
 
 // QueryContext routes queries with optimized path.
 func (r *Resolver) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if r == nil || r.primary == nil {
+		return nil, errPrimaryNil
+	}
 	start := time.Now()
 
 	r.stats.totalQueries.Add(1)
@@ -310,11 +662,10 @@ func (r *Resolver) QueryContext(ctx context.Context, query string, args ...any) 
 	tracedCtx, span := r.addTrace(ctx, "query", query)
 	useReplica := r.shouldUseReplica(ctx)
 
-	if useReplica && len(r.replicas) > 0 {
+	if useReplica {
 		return r.executeReplicaQuery(tracedCtx, span, start, query, args...)
 	}
 
-	// Non-GET requests or no replicas - use primary.
 	r.stats.primaryWrites.Add(1)
 	rows, err := r.primary.QueryContext(tracedCtx, query, args...)
 
@@ -342,12 +693,15 @@ func (r *Resolver) executeReplicaQuery(ctx context.Context, span trace.Span, sta
 		return rows, nil
 	}
 
-	// Record failure.
 	wrapper.breaker.recordFailure()
 	r.stats.replicaFailures.Add(1)
 
-	if r.logger != nil {
-		r.logger.Errorf("Replica #%d failed, circuit breaker triggered: %v", wrapper.index+1, err)
+	r.mu.RLock()
+	logger := r.logger
+	r.mu.RUnlock()
+
+	if logger != nil {
+		logger.Errorf("Replica #%d failed, circuit breaker triggered: %v", wrapper.index+1, err)
 	}
 
 	return r.fallbackToPrimary(ctx, span, start, query, "Falling back to primary for read operation", args...)
@@ -365,8 +719,12 @@ func (r *Resolver) fallbackToPrimary(ctx context.Context, span trace.Span, start
 	r.stats.primaryFallbacks.Add(1)
 	r.stats.primaryReads.Add(1)
 
-	if r.logger != nil && warningMsg != "" {
-		r.logger.Warn(warningMsg)
+	r.mu.RLock()
+	logger := r.logger
+	r.mu.RUnlock()
+
+	if logger != nil && warningMsg != "" {
+		logger.Warn(warningMsg)
 	}
 
 	rows, err := r.primary.QueryContext(ctx, query, args...)
@@ -382,6 +740,15 @@ func (r *Resolver) QueryRow(query string, args ...any) *sql.Row {
 
 // QueryRowContext routes queries with circuit breaker.
 func (r *Resolver) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	if r == nil || r.primary == nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		db := sql.OpenDB(resolverErrConnector{errPrimaryNil})
+		row := db.QueryRowContext(ctx, query, args...)
+		_ = db.Close()
+		return row
+	}
 	start := time.Now()
 
 	r.stats.totalQueries.Add(1)
@@ -390,7 +757,7 @@ func (r *Resolver) QueryRowContext(ctx context.Context, query string, args ...an
 
 	tracedCtx, span := r.addTrace(ctx, "query-row", query)
 
-	if useReplica && len(r.replicas) > 0 {
+	if useReplica {
 		wrapper := r.selectHealthyReplica()
 		if wrapper != nil {
 			r.stats.replicaReads.Add(1)
@@ -418,6 +785,9 @@ func (r *Resolver) Exec(query string, args ...any) (sql.Result, error) {
 
 // ExecContext always routes to primary (write operation).
 func (r *Resolver) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if r == nil || r.primary == nil {
+		return nil, errPrimaryNil
+	}
 	start := time.Now()
 
 	r.stats.primaryWrites.Add(1)
@@ -431,6 +801,9 @@ func (r *Resolver) ExecContext(ctx context.Context, query string, args ...any) (
 
 // Select routes to replica for reads, primary for writes.
 func (r *Resolver) Select(ctx context.Context, data any, query string, args ...any) error {
+	if r == nil || r.primary == nil {
+		return errPrimaryNil
+	}
 	start := time.Now()
 
 	r.stats.totalQueries.Add(1)
@@ -439,7 +812,7 @@ func (r *Resolver) Select(ctx context.Context, data any, query string, args ...a
 
 	useReplica := r.shouldUseReplica(ctx)
 
-	if useReplica && len(r.replicas) > 0 {
+	if useReplica {
 		wrapper := r.selectHealthyReplica()
 
 		if wrapper != nil {
@@ -472,6 +845,9 @@ func (r *Resolver) Select(ctx context.Context, data any, query string, args ...a
 
 // Prepare always routes to primary (consistency).
 func (r *Resolver) Prepare(query string) (*sql.Stmt, error) {
+	if r == nil || r.primary == nil {
+		return nil, errPrimaryNil
+	}
 	r.stats.totalQueries.Add(1)
 
 	return r.primary.Prepare(query)
@@ -479,22 +855,78 @@ func (r *Resolver) Prepare(query string) (*sql.Stmt, error) {
 
 // Begin always routes to primary (transactions).
 func (r *Resolver) Begin() (*piSQL.Tx, error) {
+	if r == nil || r.primary == nil {
+		return nil, errPrimaryNil
+	}
 	r.stats.totalQueries.Add(1)
 
 	return r.primary.Begin()
 }
 
+// BeginTxContext starts a context-aware transaction on primary with optional TxOptions.
+func (r *Resolver) BeginTxContext(ctx context.Context, opts *sql.TxOptions) (*piSQL.Tx, error) {
+	if r == nil || r.primary == nil {
+		return nil, errPrimaryNil
+	}
+	r.stats.totalQueries.Add(1)
+
+	return r.primary.BeginTxContext(ctx, opts)
+}
+
+// Owns reports whether tx was opened against this resolver's primary database.
+func (r *Resolver) Owns(tx *piSQL.Tx) bool {
+	if r == nil || r.primary == nil || tx == nil {
+		return false
+	}
+	return r.primary.Owns(tx)
+}
+
 // Dialect returns the database dialect.
 func (r *Resolver) Dialect() string {
+	if r == nil || r.primary == nil {
+		return ""
+	}
 	return r.primary.Dialect()
 }
 
 // HealthCheck returns comprehensive health information.
 func (r *Resolver) HealthCheck() *datasource.Health {
-	primaryHealth := r.primary.HealthCheck()
+	if r == nil || r.primary == nil {
+		return &datasource.Health{
+			Status:  datasource.StatusDown,
+			Details: map[string]any{"error": errPrimaryNil.Error()},
+		}
+	}
+	return r.buildHealth(r.primary.HealthCheck(), func(db DB) *datasource.Health {
+		return db.HealthCheck()
+	})
+}
+
+// HealthCheckContext returns context-bounded health information for primary and all replicas.
+func (r *Resolver) HealthCheckContext(ctx context.Context) *datasource.Health {
+	if r == nil || r.primary == nil {
+		return &datasource.Health{
+			Status:  datasource.StatusDown,
+			Details: map[string]any{"error": errPrimaryNil.Error()},
+		}
+	}
+	return r.buildHealth(r.primary.HealthCheckContext(ctx), func(db DB) *datasource.Health {
+		return db.HealthCheckContext(ctx)
+	})
+}
+
+func (r *Resolver) buildHealth(primaryHealth *datasource.Health, replicaHealthFn func(DB) *datasource.Health) *datasource.Health {
+	status := datasource.StatusDown
+	if primaryHealth != nil && primaryHealth.Status != "" {
+		status = primaryHealth.Status
+	}
+
+	r.mu.RLock()
+	replicas := r.replicas
+	r.mu.RUnlock()
 
 	health := &datasource.Health{
-		Status: primaryHealth.Status,
+		Status: status,
 		Details: map[string]any{
 			"primary": primaryHealth,
 			"stats": map[string]any{
@@ -508,22 +940,21 @@ func (r *Resolver) HealthCheck() *datasource.Health {
 		},
 	}
 
-	// Check replica health with circuit breaker status
-	replicaDetails := make([]any, len(r.replicas))
-
-	for i, wrapper := range r.replicas {
-		replicaHealth := wrapper.db.HealthCheck()
+	replicaDetails := make([]any, len(replicas))
+	for i, wrapper := range replicas {
+		replicaHealth := replicaHealthFn(wrapper.db)
 		state := wrapper.breaker.state.Load()
 
 		var stateStr string
-
-		switch *state {
-		case circuitStateClosed:
-			stateStr = "CLOSED"
-		case circuitStateOpen:
-			stateStr = "OPEN"
-		case circuitStateHalfOpen:
-			stateStr = "HALF_OPEN"
+		if state != nil {
+			switch *state {
+			case circuitStateClosed:
+				stateStr = "CLOSED"
+			case circuitStateOpen:
+				stateStr = "OPEN"
+			case circuitStateHalfOpen:
+				stateStr = "HALF_OPEN"
+			}
 		}
 
 		replicaDetails[i] = map[string]any{
@@ -539,29 +970,49 @@ func (r *Resolver) HealthCheck() *datasource.Health {
 	return health
 }
 
-// Close cleans up resources properly.
+// Close cleans up resources properly and idempotently.
 func (r *Resolver) Close() error {
-	var err error
+	if r == nil {
+		return nil
+	}
 
-	// Stop background tasks only once
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	replicas := r.replicas
+	r.replicas = nil
+	r.started = false
+	primary := r.primary
+	r.mu.Unlock()
+
 	r.once.Do(func() {
 		close(r.stopChan)
 		r.wg.Wait()
 	})
 
-	// Close primary
-	if closeErr := r.primary.Close(); closeErr != nil {
-		err = closeErr
-	}
-
-	// Close replicas
-	for _, wrapper := range r.replicas {
-		if closeErr := wrapper.db.Close(); closeErr != nil {
-			err = closeErr
+	var errs []error
+	if primary != nil {
+		if closeErr := primary.Close(); closeErr != nil {
+			errs = append(errs, closeErr)
 		}
 	}
 
-	return err
+	for _, wrapper := range replicas {
+		if wrapper != nil && wrapper.db != nil {
+			if closeErr := wrapper.db.Close(); closeErr != nil {
+				errs = append(errs, closeErr)
+			}
+		}
+	}
+
+	if len(errs) == 1 {
+		return errs[0]
+	}
+
+	return errors.Join(errs...)
 }
 
 // WithHTTPMethod adds HTTP method to context for routing decisions.

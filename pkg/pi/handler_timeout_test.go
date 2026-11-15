@@ -20,7 +20,6 @@ import (
 
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/response"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 )
 
@@ -71,7 +70,7 @@ func TestHandlerSnapshotSurvivesTimeoutAndRouterReuse(t *testing.T) {
 		err          error
 	}
 	got := make(chan outcome, 1)
-	h := handler{container: &infra.Container{Logger: logging.NewLogger(logging.FATAL)}, requestTimeout: 5 * time.Millisecond, function: func(c *Context) (any, error) {
+	h := handler{rt: newTestKernel(logging.NewLogger(logging.FATAL)), requestTimeout: 5 * time.Millisecond, function: func(c *Context) (any, error) {
 		close(entered)
 		<-release
 		var body struct {
@@ -123,7 +122,7 @@ func TestHandlerOwnsPreparsedMultipartAfterTimeout(t *testing.T) {
 		err  error
 	}
 	got := make(chan outcome, 1)
-	h := handler{container: &infra.Container{Logger: logging.NewLogger(logging.FATAL)}, requestTimeout: 5 * time.Millisecond, function: func(c *Context) (any, error) {
+	h := handler{rt: newTestKernel(logging.NewLogger(logging.FATAL)), requestTimeout: 5 * time.Millisecond, function: func(c *Context) (any, error) {
 		close(entered)
 		<-release
 		var form struct {
@@ -193,7 +192,7 @@ func TestHandler_ServeHTTP_LateCompletion(t *testing.T) {
 					Logger: logging.NewLogger(logging.FATAL), errors: make(chan any, 1),
 				}
 				h := handler{
-					container: &infra.Container{Logger: logger},
+					rt: newTestKernel(logger),
 					function: func(*Context) (any, error) {
 						defer close(returned)
 						close(started)
@@ -265,7 +264,7 @@ func TestHandler_ServeHTTP_ContextReplacement(t *testing.T) {
 	unblock := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(unblock)
 	h := handler{
-		container: &infra.Container{Logger: logging.NewLogger(logging.FATAL)},
+		rt: newTestKernel(logging.NewLogger(logging.FATAL)),
 		function: func(c *Context) (any, error) {
 			// Trace mutates the public Context field. Replacing it must not change
 			// the cancellation source or classification used by ServeHTTP.
@@ -293,7 +292,7 @@ func TestHandler_ServeHTTP_CancelCompletionRace(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		gate, responded := make(chan struct{}), make(chan struct{})
 		h := handler{
-			container: &infra.Container{Logger: logging.NewLogger(logging.FATAL)},
+			rt: newTestKernel(logging.NewLogger(logging.FATAL)),
 			function: func(*Context) (any, error) {
 				<-gate
 
@@ -331,7 +330,7 @@ func TestHandler_ServeHTTP_CancelCompletionRace(t *testing.T) {
 func TestHandler_ServeHTTP_WebSocketTimeoutExemption(t *testing.T) {
 	h := handler{
 		requestTimeout: time.Nanosecond,
-		container:      &infra.Container{Logger: logging.NewLogger(logging.FATAL)},
+		rt:             newTestKernel(logging.NewLogger(logging.FATAL)),
 		function: func(c *Context) (any, error) {
 			if _, hasDeadline := c.Deadline(); hasDeadline {
 				return nil, errors.New("WebSocket unexpectedly received an HTTP deadline")
@@ -351,7 +350,7 @@ func TestHandler_ServeHTTP_WebSocketTimeoutExemption(t *testing.T) {
 func TestHandler_ExplicitStreamPanicKeepsCommittedResponse(t *testing.T) {
 	var logs bytes.Buffer
 	h := handler{
-		container: &infra.Container{Logger: logging.NewWriterLogger(logging.ERROR, &logs, &logs)},
+		rt: newTestKernel(logging.NewWriterLogger(logging.ERROR, &logs, &logs)),
 		function: func(*Context) (any, error) {
 			return response.Accepted(response.Stream{Run: func(_ context.Context, w io.Writer) error {
 				_, _ = io.WriteString(w, "partial")

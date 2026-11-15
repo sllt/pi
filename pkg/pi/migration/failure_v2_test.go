@@ -7,18 +7,17 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
-	"github.com/sllt/pi/pkg/pi/infra"
-	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
+
+	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
+	"github.com/sllt/pi/pkg/pi/logging"
 )
 
 func TestMigrationSQLFailureStages(t *testing.T) {
 	for _, stage := range []string{"begin", "up", "commit", "rollback"} {
 		t.Run(stage, func(t *testing.T) {
 			db, mock, _ := piSQL.NewSQLMocksWithConfig(t, &piSQL.DBConfig{Dialect: "mysql"})
-			c := &infra.Container{SQL: db, Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard)}
+			deps := Deps{SQL: db, Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard)}
 			cause := errors.New(stage + " failure")
 			rollbackCause := errors.New("cleanup failure")
 			mock.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(sqlmock.NewResult(0, 0))
@@ -42,7 +41,7 @@ func TestMigrationSQLFailureStages(t *testing.T) {
 					return cause
 				}
 				return nil
-			}}}, c)
+			}}}, deps)
 			require.ErrorIs(t, err, cause)
 			require.ErrorIs(t, err, ErrMigrationFailed)
 			if stage == "rollback" {
@@ -66,13 +65,16 @@ func TestMigrationSQLFailureStages(t *testing.T) {
 
 func TestMigrationNestedBeginRollsBackSQL(t *testing.T) {
 	db, mock, _ := piSQL.NewSQLMocksWithConfig(t, &piSQL.DBConfig{Dialect: "mysql"})
-	c := &infra.Container{SQL: db, Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard)}
-	nested := NewMockmigrator(gomock.NewController(t))
+	deps := &Deps{SQL: db, Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard)}
 	cause := errors.New("nested begin")
+	nested := &fakeMigrator{
+		beginFn: func(context.Context, *Deps) (transactionData, error) {
+			return transactionData{}, cause
+		},
+	}
 	mock.ExpectBegin()
 	mock.ExpectRollback()
-	nested.EXPECT().beginTransaction(gomock.Any(), c).Return(transactionData{}, cause)
-	_, err := (sqlMigrator{migrator: nested}).beginTransaction(t.Context(), c)
+	_, err := (sqlMigrator{migrator: nested}).beginTransaction(t.Context(), deps)
 	require.ErrorIs(t, err, cause)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -80,23 +82,23 @@ func TestMigrationNestedBeginRollsBackSQL(t *testing.T) {
 func TestMigrationRollbackSurvivesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	nested := NewMockmigrator(gomock.NewController(t))
-	nested.EXPECT().rollback(gomock.Any(), nil, transactionData{}).DoAndReturn(func(ctx context.Context, _ *infra.Container, _ transactionData) error {
-		require.NoError(t, ctx.Err())
-		_, ok := ctx.Deadline()
-		require.True(t, ok)
-		return nil
-	})
+	nested := &fakeMigrator{
+		rollbackFn: func(ctx context.Context, _ *Deps, _ transactionData) error {
+			require.NoError(t, ctx.Err())
+			_, ok := ctx.Deadline()
+			require.True(t, ok)
+			return nil
+		},
+	}
 	require.NoError(t, rollbackMigration(ctx, nested, nil, transactionData{}))
 }
 
 func TestMigrationLockDoesNotMaskBackendFailure(t *testing.T) {
-	c, mocks := newSQLOnlyMockContainer(t)
+	deps, _, mock := newTestSQLDeps(t, "mysql")
 	cause := errors.New("insert permission denied")
-	mocks.SQL.ExpectDialect().WillReturnString("mysql")
-	mocks.SQL.ExpectExec(createSQLMigrationLocksTable).WillReturnResult(mocks.SQL.NewResult(0, 0))
-	mocks.SQL.ExpectExec(insertSQLMigrationLockMySQL).WillReturnError(cause)
-	_, err := acquireMigrationLock(t.Context(), c, applyOptions([]Option{WithLock()}))
+	mock.ExpectExec(createSQLMigrationLocksTable).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(insertSQLMigrationLockMySQL).WillReturnError(cause)
+	_, err := acquireMigrationLock(t.Context(), deps, applyOptions([]Option{WithLock()}))
 	require.ErrorIs(t, err, ErrMigrationLockUnavailable)
 	require.ErrorIs(t, err, cause)
 	require.NotErrorIs(t, err, ErrMigrationLocked)

@@ -312,9 +312,11 @@ func (s *wsClientSlot) removeAndCloseConn(conn *websocket.Connection) {
 	if conn == nil {
 		return
 	}
-	if s.app != nil && s.app.container != nil && s.app.container.WSManager != nil {
-		if s.app.container.WSManager.CloseConnectionIfMatch(s.serviceName, conn) {
-			return
+	if s.app != nil {
+		if hub := s.app.WebSocketHub(); hub != nil {
+			if hub.CloseConnectionIfMatch(s.serviceName, conn) {
+				return
+			}
 		}
 	}
 	if conn.Conn != nil {
@@ -924,15 +926,17 @@ func (w *wsClientActor) reconcile() error {
 		wsConn.ConfigureClient(writeTimeout, func(connErr error) {
 			s.onConnectionError(gen, wsConn, connErr)
 		})
-		if w.app.container != nil {
-			w.app.container.AddConnection(s.serviceName, wsConn)
+		if w.app != nil && w.app.kernel != nil {
+			w.app.kernel.addWSConnection(s.serviceName, wsConn)
 		}
 
 		s.mu.Lock()
 		if s.terminal || w.app.isIntakeClosed() || s.generation != gen {
 			s.mu.Unlock()
-			if w.app.container != nil {
-				w.app.container.RemoveConnection(s.serviceName)
+			if w.app != nil {
+				if hub := w.app.WebSocketHub(); hub != nil {
+					hub.CloseConnectionIfMatch(s.serviceName, wsConn)
+				}
 			}
 			_ = wsConn.ForceClose()
 			return
@@ -1055,8 +1059,8 @@ func (c *compatWSService) attachConnected(rawConn *gWebsocket.Conn) *websocket.C
 	if old != nil && old != wsConn {
 		c.removeConn(old)
 	}
-	if c.app != nil && c.app.container != nil {
-		c.app.container.AddConnection(c.serviceName, wsConn)
+	if c.app != nil && c.app.kernel != nil {
+		c.app.kernel.addWSConnection(c.serviceName, wsConn)
 	}
 	return wsConn
 }
@@ -1065,9 +1069,11 @@ func (c *compatWSService) removeConn(conn *websocket.Connection) {
 	if conn == nil {
 		return
 	}
-	if c.app != nil && c.app.container != nil && c.app.container.WSManager != nil {
-		if c.app.container.WSManager.CloseConnectionIfMatch(c.serviceName, conn) {
-			return
+	if c.app != nil {
+		if hub := c.app.WebSocketHub(); hub != nil {
+			if hub.CloseConnectionIfMatch(c.serviceName, conn) {
+				return
+			}
 		}
 	}
 	if conn.Conn != nil {

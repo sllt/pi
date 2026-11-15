@@ -13,6 +13,7 @@ import (
 	gcPubSub "cloud.google.com/go/pubsub"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/api/iterator"
 
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
@@ -118,6 +119,64 @@ func New(conf Config, logger pubsub.Logger, metrics Metrics) *googleClient {
 	return &client
 }
 
+// OpenContext opens and verifies a Google Cloud Pub/Sub client bounded by ctx without spawning retryConnect goroutines.
+// SubscriptionName may be empty for publisher-only clients; Subscribe/Query enforce non-empty SubscriptionName on use.
+func OpenContext(ctx context.Context, conf Config, logger pubsub.Logger, metrics Metrics, tp trace.TracerProvider) (pubsub.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(conf.ProjectID) == "" {
+		return nil, errProjectIDNotProvided
+	}
+	if logger == nil {
+		logger = nopGoogleLogger{}
+	}
+	if metrics == nil {
+		metrics = nopGoogleMetrics{}
+	}
+	var tracer trace.Tracer
+	if tp != nil {
+		tracer = tp.Tracer("pi")
+	} else {
+		tracer = noop.NewTracerProvider().Tracer("pi")
+	}
+
+	gClient, err := connectWithContext(ctx, conf, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	subCtx, subCancel := context.WithCancel(context.Background())
+	return &googleClient{
+		Config:      conf,
+		client:      gClient,
+		logger:      logger,
+		metrics:     metrics,
+		receiveChan: make(map[string]chan *pubsub.Message),
+		subStarted:  make(map[string]struct{}),
+		subCtx:      subCtx,
+		subCancel:   subCancel,
+		stopCh:      make(chan struct{}),
+		tracer:      tracer,
+	}, nil
+}
+
+type nopGoogleLogger struct{}
+
+func (nopGoogleLogger) Debugf(string, ...any) {}
+func (nopGoogleLogger) Debug(...any)          {}
+func (nopGoogleLogger) Logf(string, ...any)   {}
+func (nopGoogleLogger) Log(...any)            {}
+func (nopGoogleLogger) Errorf(string, ...any) {}
+func (nopGoogleLogger) Error(...any)          {}
+
+type nopGoogleMetrics struct{}
+
+func (nopGoogleMetrics) IncrementCounter(context.Context, string, ...string) {}
+
 func connect(conf Config, logger pubsub.Logger) (*gcPubSub.Client, error) {
 	return connectWithContext(context.Background(), conf, logger)
 }
@@ -218,6 +277,9 @@ func (g *googleClient) Subscribe(ctx context.Context, topic string) (*pubsub.Mes
 	}
 	if isClosed {
 		return nil, errClientNotConnected
+	}
+	if strings.TrimSpace(g.SubscriptionName) == "" {
+		return nil, errSubscriptionNotProvided
 	}
 
 	if !g.isConnected() {
@@ -406,7 +468,7 @@ func (g *googleClient) getSubscription(ctx context.Context, topic *gcPubSub.Topi
 	subscription := g.client.Subscription(g.SubscriptionName + "-" + topic.ID())
 
 	// check if subscription already exists or not
-	ok, err := subscription.Exists(context.Background())
+	ok, err := subscription.Exists(ctx)
 	if err != nil {
 		g.logger.Errorf("unable to check the existence of subscription, error: %v", err.Error())
 

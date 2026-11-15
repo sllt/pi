@@ -4,17 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
-
 	goRedis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
-	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
 )
 
 func TestRunReturnsInvalidMigrationError(t *testing.T) {
@@ -34,17 +34,24 @@ func TestRunReturnsNoDatasourceError(t *testing.T) {
 }
 
 func TestRunReturnsResultOnUserMigrationFailure(t *testing.T) {
-	mockClickHouse, mockContainer := initializeClickHouseRunMocks(t)
-
-	mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(nil)
-	mockClickHouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).Return(nil)
-	mockClickHouse.EXPECT().Exec(gomock.Any(), "SELECT * FROM users").Return(sql.ErrConnDone)
+	ps := &fakePubSub{
+		createTopicFn: func(_ context.Context, name string) error {
+			if name == "users" {
+				return sql.ErrConnDone
+			}
+			return nil
+		},
+	}
+	deps := Deps{
+		Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard),
+		PubSub: ps,
+	}
 
 	result, err := Run(t.Context(), map[int64]Migrate{
 		1: {Name: "fail_users", UP: func(d Datasource) error {
-			return d.Clickhouse.Exec(t.Context(), "SELECT * FROM users")
+			return d.PubSub.CreateTopic(t.Context(), "users")
 		}},
-	}, mockContainer)
+	}, deps)
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrMigrationFailed))
@@ -56,10 +63,10 @@ func TestRunReturnsResultOnUserMigrationFailure(t *testing.T) {
 }
 
 func TestRunDryRunDoesNotExecuteMigration(t *testing.T) {
-	mockClickHouse, mockContainer := initializeClickHouseRunMocks(t)
-
-	mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(nil)
-	mockClickHouse.EXPECT().Select(gomock.Any(), gomock.Any(), getLastChPiMigration).Return(nil)
+	deps := Deps{
+		Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard),
+		PubSub: &fakePubSub{},
+	}
 
 	executed := false
 	result, err := Run(t.Context(), map[int64]Migrate{
@@ -67,7 +74,7 @@ func TestRunDryRunDoesNotExecuteMigration(t *testing.T) {
 			executed = true
 			return nil
 		}},
-	}, mockContainer, WithDryRun())
+	}, deps, WithDryRun())
 
 	require.NoError(t, err)
 	assert.False(t, executed)
@@ -86,11 +93,12 @@ func TestRunHonorsCanceledContextBeforeDatasourceWork(t *testing.T) {
 }
 
 func TestRunWithLockRequiresSupportedLockBackend(t *testing.T) {
-	mockClickHouse, mockContainer := initializeClickHouseRunMocks(t)
+	deps := Deps{
+		Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard),
+		PubSub: &fakePubSub{},
+	}
 
-	mockClickHouse.EXPECT().Exec(gomock.Any(), CheckAndCreateChMigrationTable).Return(nil)
-
-	_, err := Run(t.Context(), map[int64]Migrate{1: {UP: func(Datasource) error { return nil }}}, mockContainer, WithLock())
+	_, err := Run(t.Context(), map[int64]Migrate{1: {UP: func(Datasource) error { return nil }}}, deps, WithLock())
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrMigrationLockUnavailable))
@@ -98,29 +106,44 @@ func TestRunWithLockRequiresSupportedLockBackend(t *testing.T) {
 }
 
 func TestAcquireMigrationLockUsesRedisWhenSQLMissing(t *testing.T) {
-	mockContainer, mocks := newRedisOnlyMockContainer(t)
+	var setCalled, evalCalled bool
+	deps := &Deps{
+		Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard),
+		Redis: &fakeRedis{
+			setNXFn: func(_ context.Context, key string, _ any, ttl time.Duration) *goRedis.BoolCmd {
+				assert.Equal(t, migrationRedisKey, key)
+				assert.Equal(t, migrationLockTTL, ttl)
+				setCalled = true
+				return goRedis.NewBoolResult(true, nil)
+			},
+			evalFn: func(_ context.Context, script string, keys []string, _ ...any) *goRedis.Cmd {
+				assert.Equal(t, releaseRedisMigrationLockScript, script)
+				assert.Equal(t, []string{migrationRedisKey}, keys)
+				evalCalled = true
+				return goRedis.NewCmdResult(int64(1), nil)
+			},
+		},
+	}
 
-	mocks.Redis.EXPECT().
-		SetNX(gomock.Any(), migrationRedisKey, gomock.Any(), migrationLockTTL).
-		Return(goRedis.NewBoolResult(true, nil))
-	mocks.Redis.EXPECT().
-		Eval(gomock.Any(), releaseRedisMigrationLockScript, []string{migrationRedisKey}, gomock.Any()).
-		Return(goRedis.NewCmdResult(int64(1), nil))
-
-	release, err := acquireMigrationLock(t.Context(), mockContainer, applyOptions([]Option{WithLock()}))
+	release, err := acquireMigrationLock(t.Context(), deps, applyOptions([]Option{WithLock()}))
 	require.NoError(t, err)
 	require.NotNil(t, release)
 	require.NoError(t, release(t.Context()))
+	assert.True(t, setCalled)
+	assert.True(t, evalCalled)
 }
 
 func TestAcquireMigrationLockReturnsLockedWhenRedisSetNXFails(t *testing.T) {
-	mockContainer, mocks := newRedisOnlyMockContainer(t)
+	deps := &Deps{
+		Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard),
+		Redis: &fakeRedis{
+			setNXFn: func(context.Context, string, any, time.Duration) *goRedis.BoolCmd {
+				return goRedis.NewBoolResult(false, nil)
+			},
+		},
+	}
 
-	mocks.Redis.EXPECT().
-		SetNX(gomock.Any(), migrationRedisKey, gomock.Any(), migrationLockTTL).
-		Return(goRedis.NewBoolResult(false, nil))
-
-	release, err := acquireMigrationLock(t.Context(), mockContainer, applyOptions([]Option{WithLock()}))
+	release, err := acquireMigrationLock(t.Context(), deps, applyOptions([]Option{WithLock()}))
 
 	require.Error(t, err)
 	assert.Nil(t, release)
@@ -128,32 +151,31 @@ func TestAcquireMigrationLockReturnsLockedWhenRedisSetNXFails(t *testing.T) {
 }
 
 func TestAcquireMigrationLockCanStealExpiredSQLLock(t *testing.T) {
-	mockContainer, mocks := newSQLOnlyMockContainer(t)
+	deps, _, mock := newTestSQLDeps(t, "mysql")
 
-	mocks.SQL.ExpectExec(createSQLMigrationLocksTable).WillReturnResult(mocks.SQL.NewResult(1, 1))
-	mocks.SQL.ExpectDialect().WillReturnString("mysql")
-	mocks.SQL.ExpectExec(insertSQLMigrationLockMySQL).WillReturnError(&mysql.MySQLError{Number: 1062})
-	mocks.SQL.ExpectExec(updateSQLMigrationLockMySQL).WillReturnResult(mocks.SQL.NewResult(0, 1))
-	mocks.SQL.ExpectExec(deleteSQLMigrationLockMySQL).WillReturnResult(mocks.SQL.NewResult(0, 1))
+	mock.ExpectExec(createSQLMigrationLocksTable).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(insertSQLMigrationLockMySQL).WillReturnError(&mysql.MySQLError{Number: 1062})
+	mock.ExpectExec(updateSQLMigrationLockMySQL).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(deleteSQLMigrationLockMySQL).WillReturnResult(sqlmock.NewResult(0, 1))
 
-	release, err := acquireMigrationLock(t.Context(), mockContainer, applyOptions([]Option{WithLock()}))
+	release, err := acquireMigrationLock(t.Context(), deps, applyOptions([]Option{WithLock()}))
 	require.NoError(t, err)
 	require.NotNil(t, release)
 	require.NoError(t, release(t.Context()))
 }
 
 func TestPlanReturnsApplyAndSkipActions(t *testing.T) {
-	mockContainer, mocks := newSQLOnlyMockContainer(t)
+	deps, _, mock := newTestSQLDeps(t, "mysql")
 
-	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(mocks.SQL.NewResult(1, 1))
-	mocks.SQL.ExpectQuery(listSQLPiMigrations).
-		WillReturnRows(mocks.SQL.NewRows([]string{"version", "method", "start_time", "duration"}).
+	mock.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(listSQLPiMigrations).
+		WillReturnRows(mock.NewRows([]string{"version", "method", "start_time", "duration"}).
 			AddRow(1, "UP", time.Now(), nil))
 
 	plan, err := Plan(t.Context(), map[int64]Migrate{
 		1: {Name: "already", UP: func(Datasource) error { return nil }},
 		2: {Name: "pending", UP: func(Datasource) error { return nil }},
-	}, mockContainer)
+	}, *deps)
 
 	require.NoError(t, err)
 	assert.Equal(t, StateSourceSQL, plan.StateSource)
@@ -164,11 +186,11 @@ func TestPlanReturnsApplyAndSkipActions(t *testing.T) {
 }
 
 func TestStatusDetectsSQLAppliedGaps(t *testing.T) {
-	mockContainer, mocks := newSQLOnlyMockContainer(t)
+	deps, _, mock := newTestSQLDeps(t, "mysql")
 
-	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(mocks.SQL.NewResult(1, 1))
-	mocks.SQL.ExpectQuery(listSQLPiMigrations).
-		WillReturnRows(mocks.SQL.NewRows([]string{"version", "method", "start_time", "duration"}).
+	mock.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(listSQLPiMigrations).
+		WillReturnRows(mock.NewRows([]string{"version", "method", "start_time", "duration"}).
 			AddRow(1, "UP", time.Now(), 10).
 			AddRow(3, "UP", time.Now(), 20))
 
@@ -176,7 +198,7 @@ func TestStatusDetectsSQLAppliedGaps(t *testing.T) {
 		1: {Name: "one", UP: func(Datasource) error { return nil }},
 		2: {Name: "two", UP: func(Datasource) error { return nil }},
 		3: {Name: "three", UP: func(Datasource) error { return nil }},
-	}, mockContainer)
+	}, *deps)
 
 	require.NoError(t, err)
 	assert.Equal(t, StateSourceSQL, status.StateSource)
@@ -187,20 +209,25 @@ func TestStatusDetectsSQLAppliedGaps(t *testing.T) {
 }
 
 func TestStatusDetectsRedisAppliedGaps(t *testing.T) {
-	mockContainer, mocks := newRedisOnlyMockContainer(t)
 	applied := map[string]string{
 		"1": `{"method":"UP","startTime":"2026-05-01T00:00:00Z","duration":10}`,
 		"3": `{"method":"UP","startTime":"2026-05-01T00:00:01Z","duration":20}`,
 	}
-
-	mocks.Redis.EXPECT().HGetAll(gomock.Any(), "kite_migrations").
-		Return(goRedis.NewMapStringStringResult(applied, nil))
+	deps := Deps{
+		Logger: logging.NewWriterLogger(logging.INFO, io.Discard, io.Discard),
+		Redis: &fakeRedis{
+			hgetAllFn: func(_ context.Context, key string) *goRedis.MapStringStringCmd {
+				assert.Equal(t, "kite_migrations", key)
+				return goRedis.NewMapStringStringResult(applied, nil)
+			},
+		},
+	}
 
 	status, err := Status(t.Context(), map[int64]Migrate{
 		1: {Name: "one", UP: func(Datasource) error { return nil }},
 		2: {Name: "two", UP: func(Datasource) error { return nil }},
 		3: {Name: "three", UP: func(Datasource) error { return nil }},
-	}, mockContainer)
+	}, deps)
 
 	require.NoError(t, err)
 	assert.Equal(t, StateSourceRedis, status.StateSource)
@@ -211,11 +238,11 @@ func TestStatusDetectsRedisAppliedGaps(t *testing.T) {
 }
 
 func TestRunReturnsGapErrorBeforeExecutingMissingSQLMigration(t *testing.T) {
-	mockContainer, mocks := newSQLOnlyMockContainer(t)
+	deps, _, mock := newTestSQLDeps(t, "mysql")
 
-	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(mocks.SQL.NewResult(1, 1))
-	mocks.SQL.ExpectQuery(listSQLPiMigrations).
-		WillReturnRows(mocks.SQL.NewRows([]string{"version", "method", "start_time", "duration"}).
+	mock.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(listSQLPiMigrations).
+		WillReturnRows(mock.NewRows([]string{"version", "method", "start_time", "duration"}).
 			AddRow(1, "UP", time.Now(), 10).
 			AddRow(3, "UP", time.Now(), 20))
 
@@ -227,7 +254,7 @@ func TestRunReturnsGapErrorBeforeExecutingMissingSQLMigration(t *testing.T) {
 			return nil
 		}},
 		3: {Name: "three", UP: func(Datasource) error { return nil }},
-	}, mockContainer)
+	}, *deps)
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrMigrationGap))
@@ -235,18 +262,23 @@ func TestRunReturnsGapErrorBeforeExecutingMissingSQLMigration(t *testing.T) {
 }
 
 func TestStatusPrefersSQLStateWhenRedisIsAlsoConfigured(t *testing.T) {
-	mockContainer, mocks := newSQLOnlyMockContainer(t)
-	mockContainer.Redis = mocks.Redis
+	deps, _, mock := newTestSQLDeps(t, "mysql")
+	deps.Redis = &fakeRedis{
+		hgetAllFn: func(context.Context, string) *goRedis.MapStringStringCmd {
+			t.Fatal("Redis state should not be queried when SQL is configured")
+			return nil
+		},
+	}
 
-	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(mocks.SQL.NewResult(1, 1))
-	mocks.SQL.ExpectQuery(listSQLPiMigrations).
-		WillReturnRows(mocks.SQL.NewRows([]string{"version", "method", "start_time", "duration"}).
+	mock.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(listSQLPiMigrations).
+		WillReturnRows(mock.NewRows([]string{"version", "method", "start_time", "duration"}).
 			AddRow(1, "UP", time.Now(), 0))
 
 	status, err := Status(t.Context(), map[int64]Migrate{
 		1: {UP: func(Datasource) error { return nil }},
 		2: {UP: func(Datasource) error { return nil }},
-	}, mockContainer)
+	}, *deps)
 
 	require.NoError(t, err)
 	assert.Equal(t, StateSourceSQL, status.StateSource)
@@ -256,16 +288,21 @@ func TestStatusPrefersSQLStateWhenRedisIsAlsoConfigured(t *testing.T) {
 }
 
 func TestPlanOnlyInitializesAuthoritativeStateStore(t *testing.T) {
-	mockContainer, mocks := newSQLOnlyMockContainer(t)
-	mockContainer.Clickhouse = mocks.Clickhouse
+	deps, _, mock := newTestSQLDeps(t, "mysql")
+	deps.PubSub = &fakePubSub{
+		createTopicFn: func(context.Context, string) error {
+			t.Fatal("PubSub topic should not be created during Plan when SQL is authoritative")
+			return nil
+		},
+	}
 
-	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(mocks.SQL.NewResult(1, 1))
-	mocks.SQL.ExpectQuery(listSQLPiMigrations).
-		WillReturnRows(mocks.SQL.NewRows([]string{"version", "method", "start_time", "duration"}))
+	mock.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(listSQLPiMigrations).
+		WillReturnRows(mock.NewRows([]string{"version", "method", "start_time", "duration"}))
 
 	plan, err := Plan(t.Context(), map[int64]Migrate{
 		1: {UP: func(Datasource) error { return nil }},
-	}, mockContainer)
+	}, *deps)
 
 	require.NoError(t, err)
 	assert.Equal(t, StateSourceSQL, plan.StateSource)
@@ -288,46 +325,6 @@ func TestSQLMigrationQueriesSupportPostgresCompatibleDialects(t *testing.T) {
 			assert.Equal(t, deleteSQLMigrationLockPostgres, lockDelete)
 		})
 	}
-}
-
-func newSQLOnlyMockContainer(t *testing.T) (*infra.Container, *infra.Mocks) {
-	t.Helper()
-
-	mockContainer, mocks := infra.NewMockContainer(t)
-	mockContainer.Redis = nil
-	mockContainer.Mongo = nil
-	mockContainer.Cassandra = nil
-	mockContainer.PubSub = nil
-	mockContainer.ArangoDB = nil
-	mockContainer.SurrealDB = nil
-	mockContainer.DGraph = nil
-	mockContainer.Elasticsearch = nil
-	mockContainer.OpenTSDB = nil
-	mockContainer.ScyllaDB = nil
-	mockContainer.Oracle = nil
-	mockContainer.Clickhouse = nil
-
-	return mockContainer, mocks
-}
-
-func newRedisOnlyMockContainer(t *testing.T) (*infra.Container, *infra.Mocks) {
-	t.Helper()
-
-	mockContainer, mocks := infra.NewMockContainer(t)
-	mockContainer.SQL = nil
-	mockContainer.Mongo = nil
-	mockContainer.Cassandra = nil
-	mockContainer.PubSub = nil
-	mockContainer.ArangoDB = nil
-	mockContainer.SurrealDB = nil
-	mockContainer.DGraph = nil
-	mockContainer.Elasticsearch = nil
-	mockContainer.OpenTSDB = nil
-	mockContainer.ScyllaDB = nil
-	mockContainer.Oracle = nil
-	mockContainer.Clickhouse = nil
-
-	return mockContainer, mocks
 }
 
 func versionsFromResults(results []VersionResult) []int64 {

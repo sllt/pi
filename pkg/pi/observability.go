@@ -10,19 +10,19 @@ import (
 	"github.com/sllt/tao/actor"
 
 	"github.com/sllt/pi/pkg/pi/config"
-	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/metrics"
 )
 
 const (
-	metricWorkerRestartsTotal   = "pi_worker_restarts_total"
-	metricActorRestartsTotal    = "pi_actor_restarts_total"
-	metricWorkerBackoffSeconds  = "pi_worker_backoff_seconds"
-	metricCronRunsTotal         = "pi_cron_runs_total"
-	metricCronSkippedTotal      = "pi_cron_skipped_total"
-	metricCronDurationSeconds   = "pi_cron_duration_seconds"
-	metricPubSubFailuresTotal   = "pi_pubsub_failures_total"
-	metricWSDroppedMessages     = "pi_ws_dropped_messages_total"
-	metricWSWriteErrors         = "pi_ws_write_errors_total"
+	metricWorkerRestartsTotal  = "pi_worker_restarts_total"
+	metricActorRestartsTotal   = "pi_actor_restarts_total"
+	metricWorkerBackoffSeconds = "pi_worker_backoff_seconds"
+	metricCronRunsTotal        = "pi_cron_runs_total"
+	metricCronSkippedTotal     = "pi_cron_skipped_total"
+	metricCronDurationSeconds  = "pi_cron_duration_seconds"
+	metricPubSubFailuresTotal  = "pi_pubsub_failures_total"
+	metricWSDroppedMessages    = "pi_ws_dropped_messages_total"
+	metricWSWriteErrors        = "pi_ws_write_errors_total"
 )
 
 var supervisionDurationBuckets = []float64{
@@ -30,14 +30,14 @@ var supervisionDurationBuckets = []float64{
 }
 
 func (a *App) ensureSupervisionMetrics() {
-	if a == nil || a.container == nil {
+	if a == nil || a.kernel == nil {
 		return
 	}
-	m := a.container.Metrics()
+	m := a.kernel.getMetrics()
 	if m == nil {
 		return
 	}
-	if _, isStrictMock := m.(*infra.MockMetrics); isStrictMock {
+	if sm, ok := m.(metrics.StrictMock); ok && sm.IsStrictMock() {
 		return
 	}
 	a.supMetricsOnce.Do(func() {
@@ -55,47 +55,70 @@ func (a *App) ensureSupervisionMetrics() {
 }
 
 func (a *App) recordWorkerRestartMetric(component, kind string) {
-	if a == nil || !a.supMetricsReady.Load() || a.container == nil || a.container.Metrics() == nil {
+	if a == nil || !a.supMetricsReady.Load() {
 		return
 	}
-	a.container.Metrics().IncrementCounter(context.Background(), metricWorkerRestartsTotal, "component", component, "kind", kind)
+	m := a.Metrics()
+	if m == nil {
+		return
+	}
+	m.IncrementCounter(context.Background(), metricWorkerRestartsTotal, "component", component, "kind", kind)
 }
 
 func (a *App) recordActorRestartMetric(component, kind string) {
-	if a == nil || !a.supMetricsReady.Load() || a.container == nil || a.container.Metrics() == nil {
+	if a == nil || !a.supMetricsReady.Load() {
 		return
 	}
-	a.container.Metrics().IncrementCounter(context.Background(), metricActorRestartsTotal, "component", component, "kind", kind)
+	m := a.Metrics()
+	if m == nil {
+		return
+	}
+	m.IncrementCounter(context.Background(), metricActorRestartsTotal, "component", component, "kind", kind)
 }
 
 func (a *App) recordWorkerBackoffMetric(component, kind string, delay time.Duration) {
-	if a == nil || !a.supMetricsReady.Load() || a.container == nil || a.container.Metrics() == nil {
+	if a == nil || !a.supMetricsReady.Load() {
 		return
 	}
-	a.container.Metrics().RecordHistogram(context.Background(), metricWorkerBackoffSeconds, delay.Seconds(), "component", component, "kind", kind)
+	m := a.Metrics()
+	if m == nil {
+		return
+	}
+	m.RecordHistogram(context.Background(), metricWorkerBackoffSeconds, delay.Seconds(), "component", component, "kind", kind)
 }
 
 func (a *App) recordCronRunMetric(jobName, status string, dur time.Duration) {
-	if a == nil || !a.supMetricsReady.Load() || a.container == nil || a.container.Metrics() == nil {
+	if a == nil || !a.supMetricsReady.Load() {
 		return
 	}
-	m := a.container.Metrics()
+	m := a.Metrics()
+	if m == nil {
+		return
+	}
 	m.IncrementCounter(context.Background(), metricCronRunsTotal, "job", jobName, "status", status)
 	m.RecordHistogram(context.Background(), metricCronDurationSeconds, dur.Seconds(), "job", jobName)
 }
 
 func (a *App) recordCronSkippedMetric(jobName, reason string) {
-	if a == nil || !a.supMetricsReady.Load() || a.container == nil || a.container.Metrics() == nil {
+	if a == nil || !a.supMetricsReady.Load() {
 		return
 	}
-	a.container.Metrics().IncrementCounter(context.Background(), metricCronSkippedTotal, "job", jobName, "reason", reason)
+	m := a.Metrics()
+	if m == nil {
+		return
+	}
+	m.IncrementCounter(context.Background(), metricCronSkippedTotal, "job", jobName, "reason", reason)
 }
 
 func (a *App) recordPubSubFailureMetric(topic, stage string) {
-	if a == nil || !a.supMetricsReady.Load() || a.container == nil || a.container.Metrics() == nil {
+	if a == nil || !a.supMetricsReady.Load() {
 		return
 	}
-	a.container.Metrics().IncrementCounter(context.Background(), metricPubSubFailuresTotal, "topic", topic, "stage", stage)
+	m := a.Metrics()
+	if m == nil {
+		return
+	}
+	m.IncrementCounter(context.Background(), metricPubSubFailuresTotal, "topic", topic, "stage", stage)
 }
 
 func (a *App) recordWSSlowDropMetric() {
@@ -103,10 +126,14 @@ func (a *App) recordWSSlowDropMetric() {
 		return
 	}
 	a.wsServerDroppedTotal.Add(1)
-	if !a.supMetricsReady.Load() || a.container == nil || a.container.Metrics() == nil {
+	if !a.supMetricsReady.Load() {
 		return
 	}
-	a.container.Metrics().IncrementCounter(context.Background(), metricWSDroppedMessages)
+	m := a.Metrics()
+	if m == nil {
+		return
+	}
+	m.IncrementCounter(context.Background(), metricWSDroppedMessages)
 }
 
 func (a *App) recordWSWriteErrorMetric() {
@@ -114,10 +141,14 @@ func (a *App) recordWSWriteErrorMetric() {
 		return
 	}
 	a.wsServerWriteErrTotal.Add(1)
-	if !a.supMetricsReady.Load() || a.container == nil || a.container.Metrics() == nil {
+	if !a.supMetricsReady.Load() {
 		return
 	}
-	a.container.Metrics().IncrementCounter(context.Background(), metricWSWriteErrors)
+	m := a.Metrics()
+	if m == nil {
+		return
+	}
+	m.IncrementCounter(context.Background(), metricWSWriteErrors)
 }
 
 // RuntimeSnapshot provides a point-in-time, redacted, read-only diagnostic view of an App instance
@@ -130,6 +161,7 @@ type RuntimeSnapshot struct {
 	IntakeClosed bool                        `json:"intakeClosed"`
 	FatalError   string                      `json:"fatalError,omitempty"`
 	Config       map[string]string           `json:"config"`
+	Resources    []ResourceRuntimeSnapshot   `json:"resources,omitempty"`
 	ActorTree    *actor.NodeSnapshot         `json:"actorTree,omitempty"`
 	Workers      []WorkerRuntimeSnapshot     `json:"workers,omitempty"`
 	CronJobs     []CronJobRuntimeSnapshot    `json:"cronJobs,omitempty"`
@@ -183,24 +215,24 @@ type SubscriberRuntimeSnapshot struct {
 	Required            bool                   `json:"required"`
 	Shutdown            SubscriberShutdownMode `json:"shutdown"`
 	Ready               bool                   `json:"ready"`
-	InFlightTickets     int                 `json:"inFlightTickets"`
-	FrozenPartitions    []int               `json:"frozenPartitions,omitempty"`
-	ProcessedTotal      uint64              `json:"processedTotal"`
-	CommittedTotal      uint64              `json:"committedTotal"`
-	FailuresTotal       uint64              `json:"failuresTotal"`
-	PanicsTotal         uint64              `json:"panicsTotal"`
-	HandlerRetriesTotal uint64              `json:"handlerRetriesTotal"`
-	SendRejectedTotal   uint64              `json:"sendRejectedTotal"`
-	CommitFailuresTotal uint64              `json:"commitFailuresTotal"`
-	CommitUnknownTotal  uint64              `json:"commitUnknownTotal"`
-	DLQSentTotal        uint64              `json:"dlqSentTotal"`
-	DLQSkippedTotal     uint64              `json:"dlqSkippedTotal"`
-	DLQFailuresTotal    uint64              `json:"dlqFailuresTotal"`
-	AbandonedTotal      uint64              `json:"abandonedTotal"`
-	CoordRestarts       uint64              `json:"coordRestarts"`
-	WorkerRestarts      uint64              `json:"workerRestarts"`
-	LastRecoveryAction  string              `json:"lastRecoveryAction,omitempty"`
-	LastError           string              `json:"lastError,omitempty"`
+	InFlightTickets     int                    `json:"inFlightTickets"`
+	FrozenPartitions    []int                  `json:"frozenPartitions,omitempty"`
+	ProcessedTotal      uint64                 `json:"processedTotal"`
+	CommittedTotal      uint64                 `json:"committedTotal"`
+	FailuresTotal       uint64                 `json:"failuresTotal"`
+	PanicsTotal         uint64                 `json:"panicsTotal"`
+	HandlerRetriesTotal uint64                 `json:"handlerRetriesTotal"`
+	SendRejectedTotal   uint64                 `json:"sendRejectedTotal"`
+	CommitFailuresTotal uint64                 `json:"commitFailuresTotal"`
+	CommitUnknownTotal  uint64                 `json:"commitUnknownTotal"`
+	DLQSentTotal        uint64                 `json:"dlqSentTotal"`
+	DLQSkippedTotal     uint64                 `json:"dlqSkippedTotal"`
+	DLQFailuresTotal    uint64                 `json:"dlqFailuresTotal"`
+	AbandonedTotal      uint64                 `json:"abandonedTotal"`
+	CoordRestarts       uint64                 `json:"coordRestarts"`
+	WorkerRestarts      uint64                 `json:"workerRestarts"`
+	LastRecoveryAction  string                 `json:"lastRecoveryAction,omitempty"`
+	LastError           string                 `json:"lastError,omitempty"`
 }
 
 // WSClientRuntimeSnapshot summarizes a supervised outbound WebSocket client.
@@ -245,8 +277,9 @@ func (s lifecycleState) String() string {
 
 var (
 	embeddedURLPattern = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
-	mysqlDSNPattern    = regexp.MustCompile(`([^\s:/'"]+):([^\s@'"]+)@tcp\(`)
-	kvSecretPattern    = regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth[_-]?key|private[_-]?key)\s*(=|:)\s*([^\s&;,)'"]+)`)
+	mysqlDSNPattern    = regexp.MustCompile(`([^\s:/'"]+):(.+?)@tcp\(`)
+	jsonSecretPattern  = regexp.MustCompile(`(?i)"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth[_-]?key|private[_-]?key)"(\s*:\s*)"[^"]*"`)
+	kvSecretPattern    = regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth[_-]?key|private[_-]?key)(\s*(?:=|:)\s*)(?:'[^']*'|"[^"]*"|[^\s&;,)'"]+)`)
 )
 
 func errString(err error) string {
@@ -266,6 +299,7 @@ func redactErrorString(raw string) string {
 		return redactEndpointURL(trimmed) + suffix
 	})
 	s = mysqlDSNPattern.ReplaceAllString(s, "[redacted]:[redacted]@tcp(")
+	s = jsonSecretPattern.ReplaceAllString(s, `"${1}"${2}"[redacted]"`)
 	s = kvSecretPattern.ReplaceAllString(s, "${1}${2}[redacted]")
 	return s
 }
@@ -311,16 +345,24 @@ func (a *App) redactedConfigSnapshot() map[string]string {
 	if a == nil || a.Config == nil {
 		return map[string]string{}
 	}
+	var out map[string]string
 	if snap, ok := a.Config.(*config.Snapshot); ok {
-		return snap.Redacted()
+		out = snap.Redacted()
+	} else {
+		collected := make(map[string]string)
+		for _, k := range knownLegacyConfigKeys {
+			if v := a.Config.Get(k); v != "" {
+				collected[k] = v
+			}
+		}
+		out = config.RedactMap(collected)
 	}
-	collected := make(map[string]string)
-	for _, k := range knownLegacyConfigKeys {
-		if v := a.Config.Get(k); v != "" {
-			collected[k] = v
+	for k, v := range out {
+		if v != "[redacted]" {
+			out[k] = redactErrorString(v)
 		}
 	}
-	return config.RedactMap(collected)
+	return out
 }
 
 // RuntimeSnapshot returns an in-process, secret-redacted snapshot of runtime state,
@@ -347,6 +389,10 @@ func (a *App) RuntimeSnapshot() RuntimeSnapshot {
 		IntakeClosed: a.isIntakeClosed(),
 		FatalError:   errString(a.fatalRuntimeCause()),
 		Config:       a.redactedConfigSnapshot(),
+	}
+
+	if a.kernel != nil {
+		out.Resources = a.kernel.snapshotResources()
 	}
 
 	if rt != nil && rt.node != nil {

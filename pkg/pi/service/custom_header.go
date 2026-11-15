@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"net/http"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 type DefaultHeaders struct {
@@ -90,4 +92,32 @@ func setCustomHeader(headers, customHeader map[string]string) map[string]string 
 	}
 
 	return headers
+}
+
+func (a *customHeader) UseServiceName(name string) {
+	if a == nil {
+		return
+	}
+	propagateServiceName(a.HTTP, name)
+}
+
+func (a *customHeader) UseLogger(logger any) {
+	if a == nil {
+		return
+	}
+	propagateLogger(a.HTTP, logger)
+}
+
+func (a *customHeader) UseMetrics(metrics any) {
+	if a == nil {
+		return
+	}
+	propagateMetrics(a.HTTP, metrics)
+}
+
+func (a *customHeader) UseTracerProvider(tp trace.TracerProvider) {
+	if a == nil {
+		return
+	}
+	propagateTracerProvider(a.HTTP, tp)
 }

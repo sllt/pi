@@ -1,15 +1,14 @@
 package migration
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
-
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 var errCreateTable = errors.New("create table error")
@@ -17,7 +16,6 @@ var errCreateTable = errors.New("create table error")
 func TestQuery(t *testing.T) {
 	t.Run("successful query", func(t *testing.T) {
 		var id int
-
 		var name string
 
 		expectedResult := []struct {
@@ -28,62 +26,47 @@ func TestQuery(t *testing.T) {
 			{2, "John"},
 		}
 
-		mockContainer, mocks := infra.NewMockContainer(t)
+		_, db, mock := newTestSQLDeps(t, "mysql")
 
-		expectedRows := mocks.SQL.NewRows([]string{"id", "name"}).
+		expectedRows := mock.NewRows([]string{"id", "name"}).
 			AddRow(expectedResult[0].id, expectedResult[0].name).
 			AddRow(expectedResult[1].id, expectedResult[1].name)
 
-		mocks.SQL.ExpectQuery("SELECT * FROM users").WithoutArgs().WillReturnRows(expectedRows)
+		mock.ExpectQuery("SELECT * FROM users").WithoutArgs().WillReturnRows(expectedRows)
 
-		rows, err := mockContainer.SQL.Query("SELECT * FROM users")
-
-		require.NoError(t, err, "TestQuery : error executing mock query")
+		rows, err := db.Query("SELECT * FROM users")
+		require.NoError(t, err)
+		defer rows.Close()
 
 		i := 0
-
 		for rows.Next() {
-			require.NoError(t, rows.Err(), "TestQuery: row error")
-
+			require.NoError(t, rows.Err())
 			err = rows.Scan(&id, &name)
-
-			require.NoError(t, err, "TestQuery: row scan error")
-
-			require.Equal(t, expectedResult[i].id, id, "TestQuery: resultant ID & expected ID are not same")
-
-			require.Equal(t, expectedResult[i].name, name, "TestQuery: resultant name & expected name are not same")
-
+			require.NoError(t, err)
+			require.Equal(t, expectedResult[i].id, id)
+			require.Equal(t, expectedResult[i].name, name)
 			i++
 		}
 	})
 
 	t.Run("query error", func(t *testing.T) {
 		var id int
-
 		var name string
 
-		mockContainer, mocks := infra.NewMockContainer(t)
-
+		_, db, mock := newTestSQLDeps(t, "mysql")
 		expectedErr := sql.ErrNoRows
+		expectedRows := mock.NewRows([]string{"id", "name"})
+		mock.ExpectQuery("SELECT * FROM unknown_table").WithoutArgs().WillReturnRows(expectedRows)
 
-		expectedRows := mocks.SQL.NewRows([]string{"id", "name"})
-
-		mocks.SQL.ExpectQuery("SELECT * FROM unknown_table").WithoutArgs().WillReturnRows(expectedRows)
-
-		sqlMockDB := mockContainer.SQL
-
-		rows, err := sqlMockDB.Query("SELECT * FROM unknown_table")
-
-		require.NoError(t, err, "TestQuery : error executing mock query")
+		rows, err := db.Query("SELECT * FROM unknown_table")
+		require.NoError(t, err)
+		defer rows.Close()
 
 		for rows.Next() {
-			require.NoError(t, rows.Err(), "TestQuery: row error")
-
+			require.NoError(t, rows.Err())
 			err = rows.Scan(&id, &name)
-
-			require.Error(t, err, "TestQuery: row scan error")
-
-			require.Equal(t, expectedErr, err, "TestQuery: expected error is not equal to resultant error")
+			require.Error(t, err)
+			require.Equal(t, expectedErr, err)
 		}
 	})
 }
@@ -91,24 +74,16 @@ func TestQuery(t *testing.T) {
 func TestQueryRow(t *testing.T) {
 	t.Run("successful query row", func(t *testing.T) {
 		var name string
-
 		var id int
 
-		mockContainer, mocks := infra.NewMockContainer(t)
+		_, db, mock := newTestSQLDeps(t, "mysql")
+		expectedRows := mock.NewRows([]string{"id", "name"}).AddRow(1, "Alex")
+		mock.ExpectQuery("SELECT * FROM users WHERE id = ?").WithArgs(1).WillReturnRows(expectedRows)
 
-		expectedRows := mocks.SQL.NewRows([]string{"id", "name"}).AddRow(1, "Alex")
-
-		mocks.SQL.ExpectQuery("SELECT * FROM users WHERE id = ?").WithArgs(1).WillReturnRows(expectedRows)
-
-		sqlMockDB := mockContainer.SQL
-
-		err := sqlMockDB.QueryRow("SELECT * FROM users WHERE id = ?", 1).Scan(&id, &name)
-
-		require.NoError(t, err, "TestQueryRow: row scan error")
-
-		require.Equal(t, 1, id, "TestQueryRow: expected id to be equal to 1")
-
-		require.Equal(t, "Alex", name, "TestQueryRow: expected name to be equal to 'Alex'")
+		err := db.QueryRow("SELECT * FROM users WHERE id = ?", 1).Scan(&id, &name)
+		require.NoError(t, err)
+		require.Equal(t, 1, id)
+		require.Equal(t, "Alex", name)
 	})
 }
 
@@ -117,76 +92,49 @@ func TestQueryRowContext(t *testing.T) {
 
 	t.Run("successful query row context", func(t *testing.T) {
 		var id int
-
 		var name string
 
-		mockContainer, mocks := infra.NewMockContainer(t)
+		_, db, mock := newTestSQLDeps(t, "mysql")
+		expectedRows := mock.NewRows([]string{"id", "name"}).AddRow(1, "Alex")
+		mock.ExpectQuery("SELECT * FROM users WHERE id = ?").WithArgs(1).WillReturnRows(expectedRows)
 
-		expectedRows := mocks.SQL.NewRows([]string{"id", "name"}).AddRow(1, "Alex")
-
-		mocks.SQL.ExpectQuery("SELECT * FROM users WHERE id = ?").WithArgs(1).WillReturnRows(expectedRows)
-
-		sqlMockDB := mockContainer.SQL
-
-		err := sqlMockDB.QueryRowContext(ctx, "SELECT * FROM users WHERE id = ?", 1).Scan(&id, &name)
-
-		require.NoError(t, err, "TestQueryRowContext: Error while scanning row")
-
-		require.Equal(t, 1, id, "TestQueryRowContext: expected id to be equal to 1")
-
-		require.Equal(t, "Alex", name, "TestQueryRowContext: expected name to be equal to 'Alex'")
+		err := db.QueryRowContext(ctx, "SELECT * FROM users WHERE id = ?", 1).Scan(&id, &name)
+		require.NoError(t, err)
+		require.Equal(t, 1, id)
+		require.Equal(t, "Alex", name)
 	})
 }
 
 func TestExec(t *testing.T) {
 	t.Run("successful exec", func(t *testing.T) {
-		mockContainer, mocks := infra.NewMockContainer(t)
+		_, db, mock := newTestSQLDeps(t, "mysql")
+		expectedResult := sqlmock.NewResult(10, 1)
+		mock.ExpectExec("DELETE FROM users WHERE id = ?").WithArgs(1).WillReturnResult(expectedResult)
 
-		expectedResult := mocks.SQL.NewResult(10, 1)
-
-		mocks.SQL.ExpectExec("DELETE FROM users WHERE id = ?").WithArgs(1).WillReturnResult(expectedResult)
-
-		sqlDB := mockContainer.SQL
-
-		result, err := sqlDB.Exec("DELETE FROM users WHERE id = ?", 1)
-
-		require.NoError(t, err, "TestExec: error while executing mock query")
+		result, err := db.Exec("DELETE FROM users WHERE id = ?", 1)
+		require.NoError(t, err)
 
 		expectedLastInserted, err := expectedResult.LastInsertId()
-
-		require.NoError(t, err, "TestExec: error while retrieving last inserted id from expected sqlresult")
-
+		require.NoError(t, err)
 		resultLastInserted, err := result.LastInsertId()
-
-		require.NoError(t, err, "TestExec: error while retrieving last inserted id from mock sqlresult")
-
+		require.NoError(t, err)
 		expectedRowsAffected, err := expectedResult.RowsAffected()
-
-		require.NoError(t, err, "TestExec: error while retrieving rows affected from expected sqlresult")
-
+		require.NoError(t, err)
 		resultRowsAffected, err := result.RowsAffected()
+		require.NoError(t, err)
 
-		require.NoError(t, err, "TestExec: error while retrieving rows affected from mock sqlresult")
-
-		require.Equal(t, expectedLastInserted, resultLastInserted, "TestExec: expected last inserted id to be equal to 10")
-
-		require.Equal(t, expectedRowsAffected, resultRowsAffected, "TestExec: expected rows affected to be equal to 1")
+		require.Equal(t, expectedLastInserted, resultLastInserted)
+		require.Equal(t, expectedRowsAffected, resultRowsAffected)
 	})
 
 	t.Run("exec error", func(t *testing.T) {
-		mockContainer, mocks := infra.NewMockContainer(t)
-
+		_, db, mock := newTestSQLDeps(t, "mysql")
 		expectedErr := sql.ErrNoRows
+		mock.ExpectExec("UPDATE unknown_table SET name = ?").WithArgs("John").WillReturnError(expectedErr)
 
-		mocks.SQL.ExpectExec("UPDATE unknown_table SET name = ?").WithArgs("John").WillReturnError(expectedErr)
-
-		sqlMockDB := mockContainer.SQL
-
-		_, err := sqlMockDB.Exec("UPDATE unknown_table SET name = ?", "John")
-
-		require.Error(t, err, "TestExec: expected error while executing mock query")
-
-		require.Equal(t, expectedErr, err, "TestExec: Exec should return the expected error, got: %v", err)
+		_, err := db.Exec("UPDATE unknown_table SET name = ?", "John")
+		require.Error(t, err)
+		require.Equal(t, expectedErr, err)
 	})
 }
 
@@ -194,215 +142,170 @@ func TestExecContext(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("successful exec context", func(t *testing.T) {
-		mockContainer, mocks := infra.NewMockContainer(t)
+		_, db, mock := newTestSQLDeps(t, "mysql")
+		expectedResult := sqlmock.NewResult(10, 1)
+		mock.ExpectExec("DELETE FROM users WHERE id = ?").WithArgs(1).WillReturnResult(expectedResult)
 
-		expectedResult := mocks.SQL.NewResult(10, 1)
-
-		mocks.SQL.ExpectExec("DELETE FROM users WHERE id = ?").WithArgs(1).WillReturnResult(expectedResult)
-
-		sqlMockDB := mockContainer.SQL
-
-		result, err := sqlMockDB.ExecContext(ctx, "DELETE FROM users WHERE id = ?", 1)
-
-		require.NoError(t, err, "TestExecContext: error while executing mock query")
+		result, err := db.ExecContext(ctx, "DELETE FROM users WHERE id = ?", 1)
+		require.NoError(t, err)
 
 		expectedLastInserted, err := expectedResult.LastInsertId()
-
-		require.NoError(t, err, "TestExecContext: error while retrieving last inserted id from expected sqlresult")
-
+		require.NoError(t, err)
 		resultLastInserted, err := result.LastInsertId()
-
-		require.NoError(t, err, "TestExecContext: error while retrieving last inserted id from mock sqlresult")
-
+		require.NoError(t, err)
 		expectedRowsAffected, err := expectedResult.RowsAffected()
-
-		require.NoError(t, err, "TestExecContext: error while retrieving rows affected from expected sqlresult")
-
+		require.NoError(t, err)
 		resultRowsAffected, err := result.RowsAffected()
+		require.NoError(t, err)
 
-		require.NoError(t, err, "TestExecContext: error while retrieving rows affected from mock sqlresult")
-
-		require.Equal(t, expectedLastInserted, resultLastInserted, "TestExecContext: expected last inserted id to be equal to 10")
-
-		require.Equal(t, expectedRowsAffected, resultRowsAffected, "TestExecContext: expected rows affected to be equal to 1")
+		require.Equal(t, expectedLastInserted, resultLastInserted)
+		require.Equal(t, expectedRowsAffected, resultRowsAffected)
 	})
 }
 
 func TestCheckAndCreateMigrationTableSuccess(t *testing.T) {
-	ctrl := gomock.NewController(t)
-
-	mockMigrator := NewMockmigrator(ctrl)
-
-	mockContainer, mocks := infra.NewMockContainer(t)
-
-	mockMigrator.EXPECT().checkAndCreateMigrationTable(gomock.Any(), mockContainer)
-
-	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(mocks.SQL.NewResult(1, 1))
-
-	migrator := sqlMigrator{
-		SQL:      mockContainer.SQL,
-		migrator: mockMigrator,
+	deps, db, mock := newTestSQLDeps(t, "mysql")
+	called := false
+	next := &fakeMigrator{
+		checkTableFn: func(_ context.Context, got *Deps) error {
+			assert.Same(t, deps, got)
+			called = true
+			return nil
+		},
 	}
 
-	err := migrator.checkAndCreateMigrationTable(t.Context(), mockContainer)
+	mock.ExpectExec(createSQLPiMigrationsTable).WillReturnResult(sqlmock.NewResult(1, 1))
 
-	require.NoError(t, err, "TestCheckAndCreateMigrationTable: error while executing mock query")
+	m := sqlMigrator{
+		SQL:      db,
+		migrator: next,
+	}
+
+	err := m.checkAndCreateMigrationTable(t.Context(), deps)
+	require.NoError(t, err)
+	require.True(t, called)
 }
 
 func TestCheckAndCreateMigrationTableExecError(t *testing.T) {
-	ctrl := gomock.NewController(t)
-
-	mockMigrator := NewMockmigrator(ctrl)
-
-	mockContainer, mocks := infra.NewMockContainer(t)
-
+	deps, db, mock := newTestSQLDeps(t, "mysql")
 	expectedErr := sql.ErrNoRows
+	mock.ExpectExec(createSQLPiMigrationsTable).WillReturnError(expectedErr)
 
-	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnError(expectedErr)
-
-	migrator := sqlMigrator{
-		SQL:      mockContainer.SQL,
-		migrator: mockMigrator,
+	m := sqlMigrator{
+		SQL:      db,
+		migrator: &fakeMigrator{},
 	}
 
-	err := migrator.checkAndCreateMigrationTable(t.Context(), mockContainer)
-
-	require.Error(t, err, "TestCheckAndCreateMigrationTable: expected an error while executing mock query")
-
-	require.Equal(t, expectedErr, err, "TestCheckAndCreateMigrationTable: resultant error is not eual to expected error")
+	err := m.checkAndCreateMigrationTable(t.Context(), deps)
+	require.ErrorIs(t, err, expectedErr)
 }
 
 func TestBeginTransactionSuccess(t *testing.T) {
-	ctrl := gomock.NewController(t)
+	deps, db, mock := newTestSQLDeps(t, "mysql")
+	mock.ExpectBegin()
 
-	mockMigrator := NewMockmigrator(ctrl)
-
-	mockContainer, mocks := infra.NewMockContainer(t)
-
-	mocks.SQL.ExpectBegin()
-
-	mockMigrator.EXPECT().beginTransaction(gomock.Any(), mockContainer)
-
-	migrator := sqlMigrator{
-		SQL:      mockContainer.SQL,
-		migrator: mockMigrator,
+	m := sqlMigrator{
+		SQL:      db,
+		migrator: &fakeMigrator{},
 	}
 
-	data, err := migrator.beginTransaction(t.Context(), mockContainer)
+	data, err := m.beginTransaction(t.Context(), deps)
 	require.NoError(t, err)
-
-	require.NotNil(t, data.SQLTx.Tx, "TestBeginTransaction: SQLTX.tx should not be nil")
+	require.NotNil(t, data.SQLTx.Tx)
 }
 
-var (
-	errBeginTx = errors.New("failed to begin transaction")
-)
+var errBeginTx = errors.New("failed to begin transaction")
 
 func TestBeginTransactionDBError(t *testing.T) {
-	ctrl := gomock.NewController(t)
+	deps, db, mock := newTestSQLDeps(t, "mysql")
+	mock.ExpectBegin().WillReturnError(errBeginTx)
 
-	mockMigrator := NewMockmigrator(ctrl)
-
-	mockContainer, mocks := infra.NewMockContainer(t)
-
-	mocks.SQL.ExpectBegin().WillReturnError(errBeginTx)
-
-	migrator := sqlMigrator{
-		SQL:      mockContainer.SQL,
-		migrator: mockMigrator,
+	m := sqlMigrator{
+		SQL:      db,
+		migrator: &fakeMigrator{},
 	}
 
-	data, err := migrator.beginTransaction(t.Context(), mockContainer)
+	data, err := m.beginTransaction(t.Context(), deps)
 	require.Error(t, err)
-
-	require.Nil(t, data.SQLTx, "TestBeginTransaction: beginTransaction should not return a transaction on DB error")
+	require.Nil(t, data.SQLTx)
 }
 
 func TestRollbackNoTransaction(t *testing.T) {
-	mockContainer, _ := infra.NewMockContainer(t)
-
-	migrator := sqlMigrator{}
-
-	migrator.rollback(t.Context(), mockContainer, transactionData{})
+	deps, _, _ := newTestSQLDeps(t, "mysql")
+	m := sqlMigrator{}
+	require.NoError(t, m.rollback(t.Context(), deps, transactionData{}))
 }
 
 func TestApply(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mockMigrator := NewMockmigrator(ctrl)
-	mockContainer, _ := infra.NewMockContainer(t)
+	_, db, _ := newTestSQLDeps(t, "mysql")
+	next := &fakeMigrator{}
 
-	ds := &sqlDS{SQL: mockContainer.SQL}
-	result := ds.apply(mockMigrator)
+	ds := &sqlDS{SQL: db}
+	result := ds.apply(next)
 
 	sqlMig, ok := result.(sqlMigrator)
-	require.True(t, ok, "Result should be an sqlMigrator")
-	require.Equal(t, mockContainer.SQL, sqlMig.SQL, "SQL field should match")
-	require.Equal(t, mockMigrator, sqlMig.migrator, "Migrator field should match")
+	require.True(t, ok)
+	require.Equal(t, db, sqlMig.SQL)
+	require.Equal(t, next, sqlMig.migrator)
 }
 
 func TestGetLastMigration_UseMigratorFallback(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mockMigrator := NewMockmigrator(ctrl)
-	mockContainer, mocks := infra.NewMockContainer(t)
+	deps, db, mock := newTestSQLDeps(t, "mysql")
+	mock.ExpectQuery(getLastSQLPiMigration).
+		WillReturnRows(mock.NewRows([]string{"version"}).AddRow(2))
 
-	mocks.SQL.ExpectQuery(getLastSQLPiMigration).
-		WillReturnRows(mocks.SQL.NewRows([]string{"version"}).AddRow(2))
+	next := &fakeMigrator{
+		lastFn: func(context.Context, *Deps) (int64, error) {
+			return 5, nil
+		},
+	}
 
-	mockMigrator.EXPECT().getLastMigration(gomock.Any(), mockContainer).Return(int64(5), nil)
-
-	migrator := sqlMigrator{SQL: mockContainer.SQL, migrator: mockMigrator}
-
-	last, err := migrator.getLastMigration(t.Context(), mockContainer)
+	m := sqlMigrator{SQL: db, migrator: next}
+	last, err := m.getLastMigration(t.Context(), deps)
 	require.NoError(t, err)
-	require.Equal(t, int64(5), last, "Expected getLastMigration to return higher value from embedded migrator")
+	require.Equal(t, int64(5), last)
 }
 
 func TestGetLastMigration_MigratorReturnsLesser(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mockMigrator := NewMockmigrator(ctrl)
-	mockContainer, mocks := infra.NewMockContainer(t)
+	deps, db, mock := newTestSQLDeps(t, "mysql")
+	mock.ExpectQuery(getLastSQLPiMigration).
+		WillReturnRows(mock.NewRows([]string{"version"}).AddRow(7))
 
-	mocks.SQL.ExpectQuery(getLastSQLPiMigration).
-		WillReturnRows(mocks.SQL.NewRows([]string{"version"}).AddRow(7))
+	next := &fakeMigrator{
+		lastFn: func(context.Context, *Deps) (int64, error) {
+			return 5, nil
+		},
+	}
 
-	mockMigrator.EXPECT().getLastMigration(gomock.Any(), mockContainer).Return(int64(5), nil)
-
-	migrator := sqlMigrator{SQL: mockContainer.SQL, migrator: mockMigrator}
-
-	last, err := migrator.getLastMigration(t.Context(), mockContainer)
+	m := sqlMigrator{SQL: db, migrator: next}
+	last, err := m.getLastMigration(t.Context(), deps)
 	require.NoError(t, err)
-	require.Equal(t, int64(7), last, "Should return SQL migration value as it's higher")
+	require.Equal(t, int64(7), last)
 }
 
 func TestBeginTransaction_ReplaceSQLTx(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mockMigrator := NewMockmigrator(ctrl)
-	mockContainer, mocks := infra.NewMockContainer(t)
+	deps, db, mock := newTestSQLDeps(t, "mysql")
+	mock.ExpectBegin()
 
-	mocks.SQL.ExpectBegin() // this returns a usable SQLTx
+	next := &fakeMigrator{
+		beginFn: func(context.Context, *Deps) (transactionData, error) {
+			return transactionData{MigrationNumber: 123}, nil
+		},
+	}
 
-	mockMigrator.EXPECT().beginTransaction(gomock.Any(), mockContainer).Return(transactionData{
-		MigrationNumber: 123,
-	}, nil)
-
-	migrator := sqlMigrator{SQL: mockContainer.SQL, migrator: mockMigrator}
-
-	data, err := migrator.beginTransaction(t.Context(), mockContainer)
+	m := sqlMigrator{SQL: db, migrator: next}
+	data, err := m.beginTransaction(t.Context(), deps)
 	require.NoError(t, err)
-
-	require.NotNil(t, data.SQLTx, "SQLTx should not be nil")
-	require.Equal(t, int64(123), data.MigrationNumber, "Expected migration number from embedded migrator")
+	require.NotNil(t, data.SQLTx)
+	require.Equal(t, int64(123), data.MigrationNumber)
 }
 
 func TestCheckAndCreateMigrationTable_ErrorCreatingTable(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	t.Cleanup(ctrl.Finish)
-
-	mockContainer, mocks := infra.NewMockContainer(t)
-	mocks.SQL.ExpectExec(createSQLPiMigrationsTable).WillReturnError(errCreateTable)
+	deps, _, mock := newTestSQLDeps(t, "mysql")
+	mock.ExpectExec(createSQLPiMigrationsTable).WillReturnError(errCreateTable)
 
 	m := sqlMigrator{}
-	err := m.checkAndCreateMigrationTable(t.Context(), mockContainer)
+	err := m.checkAndCreateMigrationTable(t.Context(), deps)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "create table error")
 }

@@ -12,7 +12,6 @@ import (
 	"github.com/sllt/tao/actor"
 	"go.opentelemetry.io/otel"
 
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/version"
 )
 
@@ -139,7 +138,7 @@ func normalizeCronJobOptions(opts ...CronJobOptions) (CronJobOptions, error) {
 type Crontab struct {
 	ticker         *time.Ticker
 	jobs           []*job
-	container      *infra.Container
+	rt             *runtimeKernel
 	app            *App
 	done           chan struct{}
 	nextSeq        uint64
@@ -171,21 +170,21 @@ type tick struct {
 	dayOfWeek int
 }
 
-// NewCron initializes and returns an inert Crontab without starting background goroutines.
-func NewCron(cntnr *infra.Container) *Crontab {
+// newCron initializes and returns an inert Crontab without starting background goroutines.
+func newCron(rt *runtimeKernel) *Crontab {
 	return &Crontab{
-		container: cntnr,
-		jobs:      make([]*job, 0),
-		done:      make(chan struct{}),
+		rt:   rt,
+		jobs: make([]*job, 0),
+		done: make(chan struct{}),
 	}
 }
 
 func newAppCron(app *App) *Crontab {
-	var cntnr *infra.Container
+	var rt *runtimeKernel
 	if app != nil {
-		cntnr = app.container
+		rt = app.kernel
 	}
-	c := NewCron(cntnr)
+	c := newCron(rt)
 	c.app = app
 	return c
 }
@@ -295,9 +294,9 @@ func (c *Crontab) runScheduled(t time.Time) {
 	c.mu.RLock()
 	jb := make([]*job, len(c.jobs))
 	copy(jb, c.jobs)
-	cntnr := c.container
-	if c.app != nil && c.app.container != nil {
-		cntnr = c.app.container
+	rt := c.rt
+	if c.app != nil && c.app.kernel != nil {
+		rt = c.app.kernel
 	}
 	c.mu.RUnlock()
 
@@ -307,31 +306,31 @@ func (c *Crontab) runScheduled(t time.Time) {
 			loc = j.slot.opts.Location
 		}
 		if j.tick(getTick(t.In(loc))) {
-			go j.run(cntnr)
+			go j.run(rt)
 		}
 	}
 }
 
-func (j *job) run(cntnr *infra.Container) {
+func (j *job) run(rt *runtimeKernel) {
 	tp := otel.GetTracerProvider()
-	if cntnr != nil {
-		tp = cntnr.GetTracerProvider()
+	if rt != nil {
+		tp = rt.getTracerProvider()
 	}
 	ctx, span := tp.Tracer("pi-"+version.Framework).
 		Start(context.Background(), j.name)
 	defer span.End()
 
-	c := newContext(nil, noopRequest{ctx: ctx}, cntnr)
-	if cntnr != nil && cntnr.Logger != nil {
+	c := newContext(nil, noopRequest{ctx: ctx}, rt)
+	if rt != nil && rt.logger != nil {
 		c.Infof("Starting cron job: %s", j.name)
 	}
 
 	start := time.Now()
 	defer func() {
-		if r := recover(); r != nil && cntnr != nil && cntnr.Logger != nil {
+		if r := recover(); r != nil && rt != nil && rt.logger != nil {
 			c.Errorf("Panic in cron job %s: %v", j.name, r)
 		}
-		if cntnr != nil && cntnr.Logger != nil {
+		if rt != nil && rt.logger != nil {
 			c.Infof("Finished cron job: %s in %s", j.name, time.Since(start))
 		}
 	}()
@@ -697,22 +696,22 @@ func (s *cronJobSlot) runExecution() {
 		defer runCancel()
 	}
 
-	var cntnr *infra.Container
-	if s.app != nil && s.app.container != nil {
-		cntnr = s.app.container
+	var rt *runtimeKernel
+	if s.app != nil && s.app.kernel != nil {
+		rt = s.app.kernel
 	} else if s.crontab != nil {
-		cntnr = s.crontab.container
+		rt = s.crontab.rt
 	}
 
 	tp := otel.GetTracerProvider()
-	if cntnr != nil {
-		tp = cntnr.GetTracerProvider()
+	if rt != nil {
+		tp = rt.getTracerProvider()
 	}
 	spanCtx, span := tp.Tracer("pi-"+version.Framework).
 		Start(runCtx, s.name)
 	defer span.End()
 
-	piCtx := newContext(nil, noopRequest{ctx: spanCtx}, cntnr)
+	piCtx := newContext(nil, noopRequest{ctx: spanCtx}, rt)
 
 	if l := s.app.safeLogger(); l != nil {
 		l.Debugf("Starting cron job: %s", s.name)

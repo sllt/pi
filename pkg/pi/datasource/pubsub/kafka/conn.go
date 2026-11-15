@@ -65,18 +65,43 @@ func (k *kafkaClient) getNewReader(topic string) Reader {
 	return reader
 }
 
+func (k *kafkaClient) getConn() *multiConn {
+	if k == nil {
+		return nil
+	}
+	if k.mu != nil {
+		k.mu.RLock()
+		conn := k.conn
+		k.mu.RUnlock()
+		return conn
+	}
+	return k.conn
+}
+
 func (k *kafkaClient) DeleteTopic(_ context.Context, name string) error {
-	return k.conn.DeleteTopics(name)
+	conn := k.getConn()
+	if conn == nil {
+		return errNoActiveConnections
+	}
+	return conn.DeleteTopics(name)
 }
 
 func (k *kafkaClient) Controller() (broker kafka.Broker, err error) {
-	return k.conn.Controller()
+	conn := k.getConn()
+	if conn == nil {
+		return kafka.Broker{}, errNoActiveConnections
+	}
+	return conn.Controller()
 }
 
 func (k *kafkaClient) CreateTopic(_ context.Context, name string) error {
+	conn := k.getConn()
+	if conn == nil {
+		return errNoActiveConnections
+	}
 	topics := kafka.TopicConfig{Topic: name, NumPartitions: 1, ReplicationFactor: 1}
 
-	return k.conn.CreateTopics(topics)
+	return conn.CreateTopics(topics)
 }
 
 type multiConn struct {
@@ -86,6 +111,9 @@ type multiConn struct {
 }
 
 func (m *multiConn) Controller() (kafka.Broker, error) {
+	if m == nil {
+		return kafka.Broker{}, errNoActiveConnections
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -192,6 +220,9 @@ func (m *multiConn) DeleteTopics(topics ...string) error {
 }
 
 func (m *multiConn) Close() error {
+	if m == nil {
+		return nil
+	}
 	var err error
 
 	m.mu.Lock()

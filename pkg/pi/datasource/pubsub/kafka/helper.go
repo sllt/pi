@@ -144,6 +144,9 @@ func setupDialer(conf *Config) (*kafka.Dialer, error) {
 
 // connectToBrokers connects to Kafka brokers with context support.
 func connectToBrokers(ctx context.Context, brokers []string, dialer *kafka.Dialer, logger pubsub.Logger) ([]Connection, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	conns := make([]Connection, 0)
 
 	if len(brokers) == 0 {
@@ -151,9 +154,28 @@ func connectToBrokers(ctx context.Context, brokers []string, dialer *kafka.Diale
 	}
 
 	for _, broker := range brokers {
+		if err := ctx.Err(); err != nil {
+			for _, c := range conns {
+				if c != nil {
+					_ = c.Close()
+				}
+			}
+			return nil, err
+		}
+
 		conn, err := dialer.DialContext(ctx, "tcp", broker)
 		if err != nil {
-			logger.Errorf("failed to connect to broker %s: %v", broker, err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				for _, c := range conns {
+					if c != nil {
+						_ = c.Close()
+					}
+				}
+				return nil, ctxErr
+			}
+			if logger != nil {
+				logger.Errorf("failed to connect to broker %s: %v", broker, err)
+			}
 			continue
 		}
 
@@ -161,6 +183,9 @@ func connectToBrokers(ctx context.Context, brokers []string, dialer *kafka.Diale
 	}
 
 	if len(conns) == 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return nil, errFailedToConnectBrokers
 	}
 

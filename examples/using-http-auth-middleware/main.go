@@ -2,20 +2,19 @@ package main
 
 import (
 	"github.com/sllt/pi/pkg/pi"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 func main() {
 	a := pi.New()
 
-	//For Basic Auth
-	//setupBasicAuth(a)
+	// For Basic Auth
+	// setupBasicAuth(a)
 
 	// For APIKey Auth
 	setupAPIKeyAuth(a)
 
-	//For OAuth
-	//a.EnableOAuth("<JWKS-Endpoint>", 10)
+	// For OAuth
+	// a.EnableOAuth("<JWKS-Endpoint>", 10)
 
 	a.GET("/test-auth", testHandler)
 	a.Run()
@@ -26,31 +25,17 @@ func testHandler(_ *pi.Context) (any, error) {
 }
 
 func setupBasicAuth(a *pi.App) {
-	a.EnableBasicAuthWithValidator(func(c *infra.Container, username, password string) bool {
-		if username == "username" && password == "password" {
-			return true
-		}
-		return false
-		// Alternatively, get the expected username/password from any storage and validate
-		//expectedPassword, err := c.KVStore.Get(context.Background(), username)
-		//if err != nil || expectedPassword != password {
-		//	return false
-		//}
-		//return true
-
+	a.EnableBasicAuthWithValidator(func(ctx *pi.Context, username, password string) bool {
+		return username == "username" && password == "password"
+		// Alternatively, read headers/datasources/adapters via ctx:
+		// tenant := ctx.Header("X-Tenant-ID")
+		// expectedPassword, err := ctx.Redis().Get(ctx, username).Result()
 	})
 }
 
 func setupAPIKeyAuth(a *pi.App) {
-	a.EnableAPIKeyAuthWithValidator(func(c *infra.Container, apiKey string) bool {
+	a.EnableAPIKeyAuthWithValidator(func(ctx *pi.Context, apiKey string) bool {
 		// basic validation based on fixed set of credentials
 		return apiKey == "valid-api-key"
-
-		// Alternatively, get the expected APIKey from any storage and validate
-		//data, err := c.KVStore.Get(context.Background(), apiKey)
-		//if err != nil || data == "" {
-		//	return false
-		//}
-		//return true
 	})
 }

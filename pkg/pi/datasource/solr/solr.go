@@ -4,15 +4,24 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+)
+
+var (
+	errInvalidConfig    = errors.New("solr: host and port are required")
+	errSolrNotConnected = errors.New("solr: client not connected")
 )
 
 type Config struct {
@@ -21,11 +30,14 @@ type Config struct {
 }
 
 type Client struct {
-	url     string
-	logger  Logger
-	metrics Metrics
-	tracer  trace.Tracer
-	client  *http.Client
+	mu        sync.RWMutex
+	config    Config
+	url       string
+	logger    Logger
+	metrics   Metrics
+	tracer    trace.Tracer
+	client    *http.Client
+	connected bool
 }
 
 // New initializes Solr driver with the provided configuration.
@@ -36,7 +48,7 @@ type Client struct {
 // client.UseMetrics(metricsInstance)
 // client.Connect().
 func New(conf Config) *Client {
-	s := &Client{}
+	s := &Client{config: conf}
 	s.url = "http://" + conf.Host + ":" + conf.Port + "/solr"
 	s.client = &http.Client{}
 
@@ -64,23 +76,170 @@ func (c *Client) UseTracer(tracer any) {
 	}
 }
 
+// FromEnv constructs an unstarted Solr client from an environment lookup function.
+func FromEnv(get func(string) string) (*Client, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
+
+	host := strings.TrimSpace(get("SOLR_HOST"))
+	if host == "" {
+		return nil, errInvalidConfig
+	}
+
+	port := strings.TrimSpace(get("SOLR_PORT"))
+	if port == "" {
+		port = "8983"
+	} else {
+		parsed, err := strconv.Atoi(port)
+		if err != nil || parsed <= 0 || parsed > 65535 {
+			return nil, fmt.Errorf("solr: invalid SOLR_PORT %q", port)
+		}
+	}
+
+	return &Client{
+		config: Config{Host: host, Port: port},
+		url:    "http://" + host + ":" + port + "/solr",
+	}, nil
+}
+
+func (c *Client) httpClient() *http.Client {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	hc := c.client
+	c.mu.RUnlock()
+	return hc
+}
+
+// ConnectContext verifies connectivity to Solr within ctx and returns any error.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if c == nil || strings.TrimSpace(c.config.Host) == "" || strings.TrimSpace(c.config.Port) == "" {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	if c.connected && c.client != nil {
+		c.mu.Unlock()
+		return nil
+	}
+	allocatedClient := false
+	if c.client == nil {
+		c.client = &http.Client{}
+		allocatedClient = true
+	}
+	c.mu.Unlock()
+
+	rollbackClient := func() {
+		if !allocatedClient {
+			return
+		}
+		c.mu.Lock()
+		if !c.connected {
+			if c.client != nil {
+				c.client.CloseIdleConnections()
+			}
+			c.client = nil
+		}
+		c.mu.Unlock()
+	}
+
+	if c.logger != nil {
+		c.logger.Debugf("connecting to Solr at %v", c.url)
+	}
+
+	if c.metrics != nil {
+		solrBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_solr_stats", "Response time of Solr operations in milliseconds.", solrBuckets...)
+	}
+
+	res, err := c.HealthCheck(ctx)
+	if err != nil {
+		rollbackClient()
+		return err
+	}
+	if r, ok := res.(Response); ok && r.Code >= http.StatusBadRequest {
+		rollbackClient()
+		return fmt.Errorf("solr: health check returned HTTP %d", r.Code)
+	}
+
+	c.mu.Lock()
+	c.connected = true
+	c.mu.Unlock()
+
+	if c.logger != nil {
+		c.logger.Infof("connected to Solr at %v", c.url)
+	}
+
+	return nil
+}
+
+// Close closes idle HTTP connections and marks the Solr client disconnected idempotently.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	hc := c.client
+	c.client = nil
+	c.connected = false
+	c.mu.Unlock()
+
+	if hc != nil {
+		hc.CloseIdleConnections()
+	}
+	return nil
+}
+
 // Connect establishes a connection to Solr and registers metrics using the provided configuration when the client was Created.
 func (c *Client) Connect() {
-	c.logger.Debugf("connecting to Solr at %v", c.url)
+	if c.logger != nil {
+		c.logger.Debugf("connecting to Solr at %v", c.url)
+	}
 
-	solrBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
-	c.metrics.NewHistogram("app_solr_stats", "Response time of Solr operations in milliseconds.", solrBuckets...)
+	c.mu.Lock()
+	if c.client == nil {
+		c.client = &http.Client{}
+	}
+	c.mu.Unlock()
+
+	if c.metrics != nil {
+		solrBuckets := []float64{.05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
+		c.metrics.NewHistogram("app_solr_stats", "Response time of Solr operations in milliseconds.", solrBuckets...)
+	}
 
 	_, err := c.HealthCheck(context.Background())
 	if err != nil {
-		c.logger.Errorf("error while connecting to Solr: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("error while connecting to Solr: %v", err)
+		}
 		return
 	}
 
-	c.logger.Infof("connected to Solr at %v", c.url)
+	c.mu.Lock()
+	c.connected = true
+	c.mu.Unlock()
+
+	if c.logger != nil {
+		c.logger.Infof("connected to Solr at %v", c.url)
+	}
 }
 
 func (c *Client) HealthCheck(ctx context.Context) (any, error) {
+	if c == nil || c.httpClient() == nil || strings.TrimSpace(c.url) == "" {
+		return nil, errSolrNotConnected
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	url := c.url + "/admin/info/system?wt=json"
 
 	startTime := time.Now()
@@ -89,7 +248,14 @@ func (c *Client) HealthCheck(ctx context.Context) (any, error) {
 
 	defer c.sendOperationStats(ctx, &QueryLog{Type: "HealthCheck", URL: url}, startTime, "healthcheck", span)
 
-	return resp, err
+	if err != nil {
+		return resp, err
+	}
+	if r, ok := resp.(Response); ok && r.Code >= http.StatusBadRequest {
+		return resp, fmt.Errorf("solr: health check returned HTTP %d", r.Code)
+	}
+
+	return resp, nil
 }
 
 // Search searches documents in the given collections based on the parameters specified.
@@ -214,6 +380,10 @@ type Response struct {
 
 // call forms the http request and makes a call to solr and populates the solr response.
 func (c *Client) call(ctx context.Context, method, url string, params map[string]any, body io.Reader) (any, trace.Span, error) {
+	if c == nil {
+		return nil, nil, errSolrNotConnected
+	}
+
 	var span trace.Span
 
 	if c.tracer != nil {
@@ -228,12 +398,17 @@ func (c *Client) call(ctx context.Context, method, url string, params map[string
 
 	req, err := c.createRequest(ctx, method, url, params, body)
 	if err != nil {
-		return nil, nil, err
+		return nil, span, err
 	}
 
-	resp, err := c.client.Do(req)
+	hc := c.httpClient()
+	if hc == nil {
+		return nil, span, errSolrNotConnected
+	}
+
+	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, span, err
 	}
 	defer resp.Body.Close()
 
@@ -241,12 +416,12 @@ func (c *Client) call(ctx context.Context, method, url string, params map[string
 
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, span, err
 	}
 
 	err = json.Unmarshal(b, &respBody)
 	if err != nil {
-		return nil, nil, err
+		return nil, span, err
 	}
 
 	if span != nil {
@@ -291,10 +466,14 @@ func (c *Client) sendOperationStats(ctx context.Context, ql *QueryLog, startTime
 
 	ql.Duration = duration
 
-	c.logger.Debug(ql)
+	if c.logger != nil {
+		c.logger.Debug(ql)
+	}
 
-	c.metrics.RecordHistogram(ctx, "app_solr_stats", float64(duration),
-		"type", ql.Type)
+	if c.metrics != nil {
+		c.metrics.RecordHistogram(ctx, "app_solr_stats", float64(duration),
+			"type", ql.Type)
+	}
 
 	if span != nil {
 		defer span.End()

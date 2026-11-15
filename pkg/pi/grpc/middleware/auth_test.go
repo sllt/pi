@@ -15,7 +15,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	auth "github.com/sllt/pi/pkg/pi/http/middleware"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 type mockKeyProvider struct {
@@ -142,13 +141,15 @@ func TestBasicAuthUnaryInterceptor_Validator(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("Validator with Datasources Success", func(t *testing.T) {
-		validateFunc := func(_ *infra.Container, username, password string) bool {
-			return username == "validator" && password == "pass"
+	t.Run("Validator with Context Success", func(t *testing.T) {
+		validateFunc := func(ctx context.Context, username, password string) bool {
+			vals := metadata.ValueFromIncomingContext(ctx, "x-tenant-id")
+			return len(vals) == 1 && vals[0] == "tenant-1" && username == "validator" && password == "pass"
 		}
-		interceptor := BasicAuthUnaryInterceptor(BasicAuthProvider{ValidateFuncWithDatasources: validateFunc})
+		interceptor := BasicAuthUnaryInterceptor(BasicAuthProvider{ValidateFuncWithContext: validateFunc})
 		ctx := metadata.NewIncomingContext(context.Background(), metadata.MD{
 			"authorization": []string{"Basic " + base64.StdEncoding.EncodeToString([]byte("validator:pass"))},
+			"x-tenant-id":   []string{"tenant-1"},
 		})
 
 		_, err := interceptor(ctx, nil, nil, func(ctx context.Context, _ any) (any, error) {
@@ -230,13 +231,15 @@ func TestAPIKeyAuthUnaryInterceptor_Validator(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("Validator with Datasources Success", func(t *testing.T) {
-		validateFunc := func(_ *infra.Container, apiKey string) bool {
-			return apiKey == "validator-key"
+	t.Run("Validator with Context Success", func(t *testing.T) {
+		validateFunc := func(ctx context.Context, apiKey string) bool {
+			vals := metadata.ValueFromIncomingContext(ctx, "x-tenant-id")
+			return len(vals) == 1 && vals[0] == "tenant-2" && apiKey == "validator-key"
 		}
-		interceptor := APIKeyAuthUnaryInterceptor(APIKeyAuthProvider{ValidateFuncWithDatasources: validateFunc})
+		interceptor := APIKeyAuthUnaryInterceptor(APIKeyAuthProvider{ValidateFuncWithContext: validateFunc})
 		ctx := metadata.NewIncomingContext(context.Background(), metadata.MD{
-			"x-api-key": []string{"validator-key"},
+			"x-api-key":   []string{"validator-key"},
+			"x-tenant-id": []string{"tenant-2"},
 		})
 
 		_, err := interceptor(ctx, nil, nil, func(ctx context.Context, _ any) (any, error) {

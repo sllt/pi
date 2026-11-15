@@ -69,6 +69,7 @@ func (a *App) WebSocket(route string, handler Handler) {
 
 		ctx.Request = conn
 		ctx.Context = execCtx
+		ctx.ContextLogger.UpdateContext(execCtx)
 
 		a.serveWebSocketLoop(ctx, conn, handler)
 
@@ -140,10 +141,12 @@ func (a *App) AddWSService(serviceName, url string, headers http.Header, enableR
 	}
 
 	wsConn := &websocket.Connection{Conn: conn}
-	a.container.AddConnection(serviceName, wsConn)
+	if a.kernel != nil {
+		a.kernel.addWSConnection(serviceName, wsConn)
+	}
 	if a.isIntakeClosed() {
-		if a.container.WSManager != nil {
-			a.container.WSManager.CloseConnectionIfMatch(serviceName, wsConn)
+		if hub := a.WebSocketHub(); hub != nil {
+			hub.CloseConnectionIfMatch(serviceName, wsConn)
 		} else {
 			_ = wsConn.Close()
 		}

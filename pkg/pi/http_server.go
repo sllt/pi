@@ -13,7 +13,6 @@ import (
 
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/middleware"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/websocket"
 )
 
@@ -48,23 +47,26 @@ var (
 	errInvalidKeyFile         = errors.New("invalid key file")
 )
 
-func newHTTPServer(c *infra.Container, port int, middlewareConfigs middleware.Config) *httpServer {
+func newHTTPServer(rt *runtimeKernel, port int, middlewareConfigs middleware.Config) *httpServer {
 	r := piHTTP.NewRouter()
-	if c != nil {
-		r.SetTelemetry(c.GetTracerProvider, c.IsIsolated())
-	}
-	wsManager := c.WSManager
-	if wsManager == nil {
+	var wsManager *websocket.Manager
+	if rt != nil {
+		r.SetTelemetry(rt.getTracerProvider, rt.isolated)
+		wsManager = rt.wsManager
+		if wsManager == nil {
+			wsManager = websocket.New()
+			rt.wsManager = wsManager
+		}
+	} else {
 		wsManager = websocket.New()
-		c.WSManager = wsManager
 	}
 
 	r.Use(
-		middleware.TracerWithProvider(c.GetTracerProvider),
-		middleware.Logging(middlewareConfigs.LogProbes, c.Logger),
+		middleware.TracerWithProvider(rt.getTracerProvider),
+		middleware.Logging(middlewareConfigs.LogProbes, rt.getLogger()),
 		middleware.CORS(middlewareConfigs.CorsHeaders, r.RegisteredRoutes),
-		middleware.Metrics(c.Metrics()),
-		middleware.WSHandlerUpgrade(c, wsManager),
+		middleware.Metrics(rt.getMetrics()),
+		middleware.WSHandlerUpgrade(rt.getLogger(), wsManager),
 	)
 
 	return &httpServer{
@@ -76,24 +78,25 @@ func newHTTPServer(c *infra.Container, port int, middlewareConfigs middleware.Co
 	}
 }
 
-func (s *httpServer) run(c *infra.Container) error {
-	err := s.start(c, func(err error) {
-		c.Errorf("error while listening to http server, err: %v", err)
+func (s *httpServer) run(rt *runtimeKernel) error {
+	err := s.start(rt, func(err error) {
+		rt.getLogger().Errorf("error while listening to http server, err: %v", err)
 	})
 	if err != nil {
-		c.Errorf("error while starting http server, err: %v", err)
+		rt.getLogger().Errorf("error while starting http server, err: %v", err)
 	}
 
 	return err
 }
 
-func (s *httpServer) start(c *infra.Container, onError func(error)) error {
+func (s *httpServer) start(rt *runtimeKernel, onError func(error)) error {
+	logger := rt.getLogger()
 	if s.srv != nil {
-		c.Logf("Server already running on port: %d", s.port)
+		logger.Logf("Server already running on port: %d", s.port)
 		return nil
 	}
 
-	c.Logf("Starting server on port: %d", s.port)
+	logger.Logf("Starting server on port: %d", s.port)
 
 	tlsConfig, err := serverTLS(s.certFile, s.keyFile)
 	if err != nil {
@@ -114,7 +117,7 @@ func (s *httpServer) start(c *infra.Container, onError func(error)) error {
 	s.listener.Store(listener)
 
 	s.boundTo(listener.Addr())
-	c.Infof("HTTP server listening on %s", listener.Addr())
+	logger.Infof("HTTP server listening on %s", listener.Addr())
 	if tlsConfig != nil {
 		go func() {
 			if err := s.srv.ServeTLS(listener, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {

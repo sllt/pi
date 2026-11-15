@@ -789,3 +789,33 @@ func TestAzureFileSystem_startRetryConnect_ExitsOnDisable(t *testing.T) {
 	_ = fs.Close()
 	<-retryExited
 }
+
+func TestAzureFileSystem_ConnectContext_And_FromEnv(t *testing.T) {
+	_, err := FromEnv(func(string) string { return "" })
+	require.ErrorIs(t, err, errInvalidConfig)
+
+	fsProvider, err := FromEnv(func(key string) string {
+		switch key {
+		case "AZURE_STORAGE_ACCOUNT":
+			return "acct"
+		case "AZURE_STORAGE_KEY":
+			return "dGVzdGtleQ=="
+		case "AZURE_STORAGE_SHARE":
+			return "share1"
+		case "AZURE_STORAGE_ENDPOINT":
+			return "http://127.0.0.1:1"
+		default:
+			return ""
+		}
+	})
+	require.NoError(t, err)
+	require.NotNil(t, fsProvider)
+
+	azFS := fsProvider.(*azureFileSystem)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, azFS.ConnectContext(ctx), context.Canceled)
+	assert.Nil(t, azFS.retryDone)
+
+	require.NoError(t, azFS.Close())
+}

@@ -1,6 +1,7 @@
 package dbresolver
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -11,10 +12,10 @@ import (
 
 	"github.com/sllt/pi/pkg/pi/datasource"
 	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/mock/gomock"
 )
 
@@ -29,7 +30,7 @@ const (
 type Mocks struct {
 	Ctrl         *gomock.Controller
 	Primary      *MockDB
-	Replicas     []infra.DB
+	Replicas     []DB
 	MockReplicas []*MockDB
 	Strategy     *MockStrategy
 	Logger       MockLogger
@@ -50,7 +51,7 @@ func setupMocks(t *testing.T) *Mocks {
 	// Create both typed and interface versions of replicas.
 	typedMockReplicas := []*MockDB{mockReplica1, mockReplica2}
 
-	mockReplicas := make([]infra.DB, len(typedMockReplicas))
+	mockReplicas := make([]DB, len(typedMockReplicas))
 	for i, r := range typedMockReplicas {
 		mockReplicas[i] = r
 	}
@@ -520,7 +521,7 @@ func TestResolver_AddTrace(t *testing.T) {
 
 // setupNewResolverTest creates a test setup for NewResolver tests.
 func setupNewResolverTest(t *testing.T, replicaCount int, expectLogger bool) (*gomock.Controller, *MockDB,
-	[]infra.DB, *MockLogger, *MockMetrics) {
+	[]DB, *MockLogger, *MockMetrics) {
 	t.Helper()
 
 	ctrl := gomock.NewController(t)
@@ -529,7 +530,7 @@ func setupNewResolverTest(t *testing.T, replicaCount int, expectLogger bool) (*g
 	mockMetrics := NewMockMetrics(ctrl)
 
 	// Create replicas
-	replicas := make([]infra.DB, replicaCount)
+	replicas := make([]DB, replicaCount)
 	for i := 0; i < replicaCount; i++ {
 		replicas[i] = NewMockDB(ctrl)
 	}
@@ -620,7 +621,7 @@ func TestNewResolver_NoMetrics(t *testing.T) {
 
 	mockLogger.EXPECT().Logf(gomock.Any(), gomock.Any()).Times(1)
 
-	resolver := NewResolver(mockPrimary, []infra.DB{mockReplica}, mockLogger, nil)
+	resolver := NewResolver(mockPrimary, []DB{mockReplica}, mockLogger, nil)
 
 	dbResolver, ok := resolver.(*Resolver)
 	require.True(t, ok)
@@ -766,7 +767,7 @@ func TestResolver_UpdateMetrics_NoMetrics(t *testing.T) {
 
 	mockLogger.EXPECT().Logf(gomock.Any(), gomock.Any()).Times(1)
 
-	resolver := NewResolver(mockPrimary, []infra.DB{mockReplica}, mockLogger, nil)
+	resolver := NewResolver(mockPrimary, []DB{mockReplica}, mockLogger, nil)
 
 	dbResolver, ok := resolver.(*Resolver)
 	require.True(t, ok)
@@ -854,4 +855,66 @@ func TestClean(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestResolver_BeginTxContext_Owns_UnwrapSQL_HealthCheckContext(t *testing.T) {
+	mocks := setupMocks(t)
+	defer mocks.Ctrl.Finish()
+	defer func() {
+		mocks.Primary.EXPECT().Close().Return(nil)
+		for _, r := range mocks.MockReplicas {
+			r.EXPECT().Close().Return(nil)
+		}
+		require.NoError(t, mocks.Resolver.Close())
+	}()
+
+	ctx := context.Background()
+	opts := &sql.TxOptions{Isolation: sql.LevelSerializable, ReadOnly: true}
+	expectedTx := &piSQL.Tx{}
+
+	mocks.Primary.EXPECT().BeginTxContext(ctx, opts).Return(expectedTx, nil)
+	tx, err := mocks.Resolver.BeginTxContext(ctx, opts)
+	require.NoError(t, err)
+	assert.Same(t, expectedTx, tx)
+
+	mocks.Primary.EXPECT().Owns(expectedTx).Return(true)
+	assert.True(t, mocks.Resolver.Owns(expectedTx))
+	assert.False(t, mocks.Resolver.Owns(nil))
+	assert.Same(t, mocks.Primary, mocks.Resolver.UnwrapSQL())
+
+	primaryHealth := &datasource.Health{Status: healthStatusUP}
+	replicaHealth := &datasource.Health{Status: healthStatusUP}
+	mocks.Primary.EXPECT().HealthCheckContext(ctx).Return(primaryHealth)
+	mocks.MockReplicas[0].EXPECT().HealthCheckContext(ctx).Return(replicaHealth)
+	mocks.MockReplicas[1].EXPECT().HealthCheckContext(ctx).Return(replicaHealth)
+
+	hc := mocks.Resolver.HealthCheckContext(ctx)
+	require.NotNil(t, hc)
+	assert.Equal(t, healthStatusUP, hc.Status)
+}
+
+func TestNewManaged_StartAndTelemetryInjection(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockPrimary := NewMockDB(ctrl)
+	mockLogger := NewMockLogger(ctrl)
+	mockMetrics := NewMockMetrics(ctrl)
+
+	mockMetrics.EXPECT().NewHistogram(gomock.Any(), gomock.Any(), gomock.Any()).Times(1)
+	mockMetrics.EXPECT().NewGauge(gomock.Any(), gomock.Any()).Times(5)
+	mockLogger.EXPECT().Logf(gomock.Any(), gomock.Any()).Times(1)
+
+	tp := noop.NewTracerProvider()
+	r := NewManaged(mockPrimary, &Config{Strategy: StrategyRoundRobin, ReadFallback: true}, nil, WithTracerProvider(tp))
+	r.UseLogger(mockLogger)
+	r.UseMetrics(mockMetrics)
+	r.UseTracer(tp)
+
+	require.NoError(t, r.Start(context.Background()))
+	// Second Start is idempotent.
+	require.NoError(t, r.Start(context.Background()))
+
+	mockPrimary.EXPECT().Close().Return(nil)
+	require.NoError(t, r.Close())
 }

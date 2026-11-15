@@ -17,11 +17,11 @@ func WSHandler(ctx *pi.Context) (any, error) {
 
 	err := ctx.Bind(&message)
 	if err != nil {
-		ctx.Logger.Errorf("Error binding message: %v", err)
+		ctx.Errorf("Error binding message: %v", err)
 		return nil, err
 	}
 
-	ctx.Logger.Infof("Received message: %s", message)
+	ctx.Infof("Received message: %s", message)
 
 	err = ctx.WriteMessageToSocket("Hello! Pi")
 	if err != nil {

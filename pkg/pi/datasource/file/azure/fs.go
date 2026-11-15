@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +68,46 @@ func New(config *Config) (file.FileSystemProvider, error) {
 	}
 
 	return fs, nil
+}
+
+// FromEnv constructs an unstarted Azure File Storage provider from an environment lookup function.
+func FromEnv(get func(string) string) (file.FileSystemProvider, error) {
+	if get == nil {
+		return nil, errInvalidConfig
+	}
+
+	firstNonEmpty := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(get(k)); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	return New(&Config{
+		AccountName: firstNonEmpty("AZURE_STORAGE_ACCOUNT", "AZURE_ACCOUNT_NAME"),
+		AccountKey:  firstNonEmpty("AZURE_STORAGE_KEY", "AZURE_ACCOUNT_KEY"),
+		ShareName:   firstNonEmpty("AZURE_STORAGE_SHARE", "AZURE_SHARE_NAME"),
+		Endpoint:    firstNonEmpty("AZURE_STORAGE_ENDPOINT", "AZURE_ENDPOINT"),
+	})
+}
+
+// ConnectContext initializes the Azure File Share connection within ctx and fails fast without background retries.
+func (f *azureFileSystem) ConnectContext(ctx context.Context) error {
+	if f == nil || f.CommonFileSystem == nil {
+		return errInvalidConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if f.CommonFileSystem.IsConnected() {
+		return nil
+	}
+	return f.CommonFileSystem.Connect(ctx)
 }
 
 // Connect tries a single immediate connect via provider; on failure it starts a background retry.
@@ -146,10 +187,6 @@ func (f *azureFileSystem) Close() error {
 		return nil
 	}
 
-	if f.CommonFileSystem != nil {
-		f.CommonFileSystem.SetDisableRetry(true)
-	}
-
 	f.retryMu.Lock()
 	if !f.closed {
 		f.closed = true
@@ -163,6 +200,11 @@ func (f *azureFileSystem) Close() error {
 
 	if done != nil {
 		<-done
+	}
+
+	if f.CommonFileSystem != nil {
+		f.CommonFileSystem.SetDisableRetry(true)
+		f.CommonFileSystem.SetConnected(false)
 	}
 
 	if f.CommonFileSystem != nil && f.CommonFileSystem.Provider != nil {

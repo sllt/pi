@@ -4,6 +4,9 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sync"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 type RetryConfig struct {
@@ -17,14 +20,17 @@ func (r *RetryConfig) AddOption(h HTTP) HTTP {
 	}
 
 	if httpSvc := extractHTTPService(h); httpSvc != nil {
+		httpSvc.mu.RLock()
 		rp.metrics = httpSvc.Metrics
 		rp.serviceName = httpSvc.name
+		httpSvc.mu.RUnlock()
 	}
 
 	return rp
 }
 
 type retryProvider struct {
+	mu          sync.RWMutex
 	maxRetries  int
 	metrics     Metrics
 	serviceName string
@@ -113,8 +119,14 @@ func (rp *retryProvider) doWithRetry(reqFunc func() (*http.Response, error)) (*h
 			return resp, nil
 		}
 
-		if i > 0 && rp.metrics != nil {
-			rp.metrics.IncrementCounter(context.Background(), "app_http_retry_count", "service", rp.serviceName)
+		if i > 0 {
+			rp.mu.RLock()
+			m := rp.metrics
+			svcName := rp.serviceName
+			rp.mu.RUnlock()
+			if !isNilServiceAny(m) {
+				m.IncrementCounter(context.Background(), "app_http_retry_count", "service", svcName)
+			}
 		}
 
 		if i < rp.maxRetries && resp != nil && resp.Body != nil {
@@ -124,4 +136,46 @@ func (rp *retryProvider) doWithRetry(reqFunc func() (*http.Response, error)) (*h
 	}
 
 	return resp, err
+}
+
+func (rp *retryProvider) UseServiceName(name string) {
+	if rp == nil || name == "" {
+		return
+	}
+	rp.mu.Lock()
+	if rp.serviceName == "" {
+		rp.serviceName = name
+	}
+	rp.mu.Unlock()
+	propagateServiceName(rp.HTTP, name)
+}
+
+func (rp *retryProvider) UseLogger(logger any) {
+	if rp == nil {
+		return
+	}
+	propagateLogger(rp.HTTP, logger)
+}
+
+func (rp *retryProvider) UseMetrics(metrics any) {
+	if rp == nil {
+		return
+	}
+	propagateMetrics(rp.HTTP, metrics)
+	m, ok := metrics.(Metrics)
+	if !ok || isNilServiceAny(m) {
+		return
+	}
+	rp.mu.Lock()
+	if isNilServiceAny(rp.metrics) {
+		rp.metrics = m
+	}
+	rp.mu.Unlock()
+}
+
+func (rp *retryProvider) UseTracerProvider(tp trace.TracerProvider) {
+	if rp == nil {
+		return
+	}
+	propagateTracerProvider(rp.HTTP, tp)
 }

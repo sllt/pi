@@ -8,6 +8,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jlaffaye/ftp"
@@ -45,46 +46,103 @@ type Config struct {
 
 // storageAdapter adapts FTP client to implement file.StorageProvider.
 type storageAdapter struct {
+	mu   sync.Mutex
 	cfg  *Config
 	conn *ftp.ServerConn
 }
 
 // Connect initializes the FTP client and logs in to the server.
-func (s *storageAdapter) Connect(_ context.Context) error {
-	// fast-path: already connected
+func (s *storageAdapter) Connect(ctx context.Context) error {
+	if s == nil {
+		return errFTPConfigNil
+	}
+	s.mu.Lock()
 	if s.conn != nil {
+		s.mu.Unlock()
 		return nil
 	}
+	cfg := s.cfg
+	s.mu.Unlock()
 
-	if s.cfg == nil {
+	if cfg == nil {
 		return errFTPConfigNil
 	}
 
-	if s.cfg.Host == "" || s.cfg.Port <= 0 {
+	if cfg.Host == "" || cfg.Port <= 0 || cfg.Port > 65535 || cfg.DialTimeout < 0 {
 		return errFTPConfigInvalid
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Set default timeout if not specified
-	dialTimeout := s.cfg.DialTimeout
+	dialTimeout := cfg.DialTimeout
 	if dialTimeout == 0 {
 		dialTimeout = 5 * time.Second
 	}
 
-	ftpServer := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
+	ftpServer := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 
-	conn, err := ftp.Dial(ftpServer, ftp.DialWithTimeout(dialTimeout))
+	conn, err := ftp.Dial(ftpServer, ftp.DialWithTimeout(dialTimeout), ftp.DialWithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("failed to dial FTP server %q: %w", ftpServer, err)
 	}
 
-	if err := conn.Login(s.cfg.User, s.cfg.Password); err != nil {
+	if err := conn.Login(cfg.User, cfg.Password); err != nil {
 		_ = conn.Quit()
-		return fmt.Errorf("FTP login failed for user %q: %w", s.cfg.User, err)
+		return fmt.Errorf("FTP login failed for user %q: %w", cfg.User, err)
 	}
 
+	s.mu.Lock()
+	if s.conn != nil {
+		s.mu.Unlock()
+		_ = conn.Quit()
+		return nil
+	}
 	s.conn = conn
+	s.mu.Unlock()
 
 	return nil
+}
+
+// Health probes the FTP connection with a NOOP command.
+func (s *storageAdapter) Health(ctx context.Context) error {
+	if s == nil {
+		return errFTPClientNotInitialized
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conn == nil {
+		return errFTPClientNotInitialized
+	}
+	if err := s.conn.NoOp(); err != nil {
+		return fmt.Errorf("FTP health check failed: %w", err)
+	}
+	return nil
+}
+
+// Close closes the active FTP server connection idempotently.
+func (s *storageAdapter) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	conn := s.conn
+	s.conn = nil
+	s.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.Quit()
 }
 
 // NewReader creates a reader for the given object.
@@ -92,6 +150,12 @@ func (s *storageAdapter) NewReader(_ context.Context, name string) (io.ReadClose
 	if name == "" {
 		return nil, errEmptyObjectName
 	}
+	if s == nil {
+		return nil, errFTPClientNotInitialized
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.conn == nil {
 		return nil, errFTPClientNotInitialized
@@ -108,7 +172,16 @@ func (s *storageAdapter) NewReader(_ context.Context, name string) (io.ReadClose
 		return nil, fmt.Errorf("%w for %q: %w", errFailedToCreateReader, name, err)
 	}
 
-	return reader, nil
+	data, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("%w for %q: %w", errFailedToCreateReader, name, readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("%w for %q: %w", errFailedToCreateReader, name, closeErr)
+	}
+
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 // NewRangeReader creates a range reader for the given object.
@@ -120,6 +193,12 @@ func (s *storageAdapter) NewRangeReader(_ context.Context, name string, offset, 
 	if offset < 0 {
 		return nil, fmt.Errorf("%w (got: %d)", errInvalidOffset, offset)
 	}
+	if s == nil {
+		return nil, errFTPClientNotInitialized
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.conn == nil {
 		return nil, errFTPClientNotInitialized
@@ -136,15 +215,21 @@ func (s *storageAdapter) NewRangeReader(_ context.Context, name string, offset, 
 		return nil, fmt.Errorf("%w for %q at offset %d: %w", errFailedToCreateReader, name, offset, err)
 	}
 
-	// FTP doesn't support length limit in RetrFrom, so wrap in LimitReader
+	var src io.Reader = reader
 	if length > 0 {
-		return &limitedReadCloser{
-			Reader: io.LimitReader(reader, length),
-			Closer: reader,
-		}, nil
+		src = io.LimitReader(reader, length)
+	}
+	data, readErr := io.ReadAll(src)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("%w for %q at offset %d: %w", errFailedToCreateReader, name, offset, readErr)
+	}
+	// When length > 0, closing early on a partial range read may abort the remaining transfer; only fail if length <= 0.
+	if length <= 0 && closeErr != nil {
+		return nil, fmt.Errorf("%w for %q at offset %d: %w", errFailedToCreateReader, name, offset, closeErr)
 	}
 
-	return reader, nil
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 // limitedReadCloser combines io.LimitReader with Close capability.
@@ -158,15 +243,25 @@ func (s *storageAdapter) NewWriter(_ context.Context, name string) io.WriteClose
 	if name == "" {
 		return &failWriter{err: errEmptyObjectName}
 	}
-
-	if s.conn == nil {
+	if s == nil {
 		return &failWriter{err: errFTPClientNotInitialized}
 	}
 
-	objectPath := s.buildPath(name)
+	s.mu.Lock()
+	conn := s.conn
+	var objectPath string
+	if conn != nil {
+		objectPath = s.buildPath(name)
+	}
+	s.mu.Unlock()
+
+	if conn == nil {
+		return &failWriter{err: errFTPClientNotInitialized}
+	}
 
 	return &ftpWriter{
-		conn:       s.conn,
+		adapter:    s,
+		conn:       conn,
 		objectPath: objectPath,
 		buffer:     &bytes.Buffer{},
 	}
@@ -174,6 +269,7 @@ func (s *storageAdapter) NewWriter(_ context.Context, name string) io.WriteClose
 
 // ftpWriter buffers writes and uploads on Close.
 type ftpWriter struct {
+	adapter    *storageAdapter
 	conn       *ftp.ServerConn
 	objectPath string
 	buffer     *bytes.Buffer
@@ -195,7 +291,17 @@ func (fw *ftpWriter) Close() error {
 
 	fw.closed = true
 
-	if err := fw.conn.Stor(fw.objectPath, fw.buffer); err != nil {
+	conn := fw.conn
+	if fw.adapter != nil {
+		fw.adapter.mu.Lock()
+		defer fw.adapter.mu.Unlock()
+		conn = fw.adapter.conn
+	}
+	if conn == nil {
+		return errFTPClientNotInitialized
+	}
+
+	if err := conn.Stor(fw.objectPath, fw.buffer); err != nil {
 		return fmt.Errorf("%w for %q: %w", errFailedToCreateWriter, fw.objectPath, err)
 	}
 
@@ -220,6 +326,12 @@ func (s *storageAdapter) DeleteObject(_ context.Context, name string) error {
 	if name == "" {
 		return errEmptyObjectName
 	}
+	if s == nil {
+		return errFTPClientNotInitialized
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.conn == nil {
 		return errFTPClientNotInitialized
@@ -247,6 +359,12 @@ func (s *storageAdapter) CopyObject(_ context.Context, source, dest string) erro
 	if source == dest {
 		return errSameSourceAndDest
 	}
+	if s == nil {
+		return errFTPClientNotInitialized
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.conn == nil {
 		return errFTPClientNotInitialized
@@ -291,6 +409,12 @@ func (s *storageAdapter) StatObject(_ context.Context, name string) (*file.Objec
 	if name == "" {
 		return nil, errEmptyObjectName
 	}
+	if s == nil {
+		return nil, errFTPClientNotInitialized
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.conn == nil {
 		return nil, errFTPClientNotInitialized
@@ -324,6 +448,13 @@ func (s *storageAdapter) StatObject(_ context.Context, name string) (*file.Objec
 
 // ListObjects lists all objects with the given prefix.
 func (s *storageAdapter) ListObjects(_ context.Context, prefix string) ([]string, error) {
+	if s == nil {
+		return nil, errFTPClientNotInitialized
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.conn == nil {
 		return nil, errFTPClientNotInitialized
 	}
@@ -363,6 +494,13 @@ func (s *storageAdapter) ListObjects(_ context.Context, prefix string) ([]string
 
 // ListDir lists objects and prefixes (directories) under the given prefix.
 func (s *storageAdapter) ListDir(_ context.Context, prefix string) ([]file.ObjectInfo, []string, error) {
+	if s == nil {
+		return nil, nil, errFTPClientNotInitialized
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.conn == nil {
 		return nil, nil, errFTPClientNotInitialized
 	}

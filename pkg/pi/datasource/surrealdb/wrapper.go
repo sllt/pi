@@ -37,3 +37,13 @@ func (w *DBWrapper) Info(ctx context.Context) (any, error) {
 func (w *DBWrapper) GetDB() *surrealdb.DB {
 	return w.db
 }
+
+// Close closes the underlying *surrealdb.DB connection idempotently.
+func (w *DBWrapper) Close(ctx context.Context) error {
+	if w == nil || w.db == nil {
+		return nil
+	}
+	db := w.db
+	w.db = nil
+	return db.Close(ctx)
+}

@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"time"
@@ -9,8 +10,8 @@ import (
 	"google.golang.org/grpc"
 
 	grpcMiddleware "github.com/sllt/pi/pkg/pi/grpc/middleware"
+	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/middleware"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 // EnableBasicAuth enables basic authentication for the application.
@@ -18,13 +19,16 @@ import (
 // It takes a variable number of credentials as alternating username and password strings.
 // An error is logged if an odd number of arguments is provided.
 func (a *App) EnableBasicAuth(credentials ...string) {
+	if a == nil {
+		return
+	}
 	if len(credentials) == 0 {
-		a.container.Error("No credentials provided for EnableBasicAuth. Proceeding without Authentication")
+		a.Logger().Error("No credentials provided for EnableBasicAuth. Proceeding without Authentication")
 		return
 	}
 
 	if len(credentials)%2 != 0 {
-		a.container.Error("Invalid number of arguments for EnableBasicAuth. Proceeding without Authentication")
+		a.Logger().Error("Invalid number of arguments for EnableBasicAuth. Proceeding without Authentication")
 
 		return
 	}
@@ -40,26 +44,32 @@ func (a *App) EnableBasicAuth(credentials ...string) {
 		grpcMiddleware.BasicAuthUnaryInterceptor(provider), grpcMiddleware.BasicAuthStreamInterceptor(provider))
 }
 
-// EnableBasicAuthWithFunc enables basic authentication for the HTTP server with a custom validation function.
+// EnableBasicAuthWithValidator enables basic authentication for HTTP and gRPC servers with a custom validator.
 //
-// Deprecated: This method is deprecated and will be removed in future releases, users must use
-// [App.EnableBasicAuthWithValidator] as it has access to application datasources.
-func (a *App) EnableBasicAuthWithFunc(validateFunc func(username, password string) bool) {
-	provider := grpcMiddleware.BasicAuthProvider{ValidateFunc: validateFunc, Container: a.container}
+// The provided `validateFunc` is invoked for each authentication attempt with a request-scoped `*pi.Context`
+// exposing application datasources, adapters, and headers/metadata.
+func (a *App) EnableBasicAuthWithValidator(validateFunc func(ctx *Context, username, password string) bool) {
+	if a == nil {
+		return
+	}
+	if validateFunc == nil {
+		a.Logger().Error("Nil validator provided for EnableBasicAuthWithValidator. Proceeding without Authentication")
+		return
+	}
 
-	a.addAuthMiddleware(middleware.BasicAuthMiddleware(middleware.BasicAuthProvider{ValidateFunc: validateFunc, Container: a.container}),
-		grpcMiddleware.BasicAuthUnaryInterceptor(provider), grpcMiddleware.BasicAuthStreamInterceptor(provider))
-}
+	provider := grpcMiddleware.BasicAuthProvider{
+		ValidateFuncWithContext: func(rpcCtx context.Context, username, password string) bool {
+			return validateFunc(a.NewContext(rpcCtx), username, password)
+		},
+	}
 
-// EnableBasicAuthWithValidator enables basic authentication for the HTTP server with a custom validator.
-//
-// The provided `validateFunc` is invoked for each authentication attempt. It receives a container instance,
-// username, and password. The function should return `true` if the credentials are valid, `false` otherwise.
-func (a *App) EnableBasicAuthWithValidator(validateFunc func(c *infra.Container, username, password string) bool) {
-	provider := grpcMiddleware.BasicAuthProvider{ValidateFuncWithDatasources: validateFunc, Container: a.container}
+	httpProvider := middleware.BasicAuthProvider{
+		ValidateFuncWithRequest: func(r *http.Request, username, password string) bool {
+			return validateFunc(a.newAuthHTTPContext(r), username, password)
+		},
+	}
 
-	a.addAuthMiddleware(middleware.BasicAuthMiddleware(middleware.BasicAuthProvider{
-		ValidateFuncWithDatasources: validateFunc, Container: a.container}),
+	a.addAuthMiddleware(middleware.BasicAuthMiddleware(httpProvider),
 		grpcMiddleware.BasicAuthUnaryInterceptor(provider), grpcMiddleware.BasicAuthStreamInterceptor(provider))
 }
 
@@ -67,36 +77,59 @@ func (a *App) EnableBasicAuthWithValidator(validateFunc func(c *infra.Container,
 //
 // It requires at least one API key to be provided. The provided API keys will be used to authenticate requests.
 func (a *App) EnableAPIKeyAuth(apiKeys ...string) {
+	if a == nil {
+		return
+	}
 	provider := grpcMiddleware.APIKeyAuthProvider{APIKeys: apiKeys}
 
 	a.addAuthMiddleware(middleware.APIKeyAuthMiddleware(middleware.APIKeyAuthProvider{}, apiKeys...),
 		grpcMiddleware.APIKeyAuthUnaryInterceptor(provider), grpcMiddleware.APIKeyAuthStreamInterceptor(provider))
 }
 
-// EnableAPIKeyAuthWithFunc enables API key authentication for the application with a custom validation function.
+// EnableAPIKeyAuthWithValidator enables API key authentication for HTTP and gRPC servers with a custom validator.
 //
-// Deprecated: This method is deprecated and will be removed in future releases, users must use
-// [App.EnableAPIKeyAuthWithValidator] as it has access to application datasources.
-func (a *App) EnableAPIKeyAuthWithFunc(validateFunc func(apiKey string) bool) {
-	provider := grpcMiddleware.APIKeyAuthProvider{ValidateFunc: validateFunc, Container: a.container}
+// The provided `validateFunc` receives a request-scoped `*pi.Context` exposing application datasources,
+// adapters, and headers/metadata along with the API key.
+func (a *App) EnableAPIKeyAuthWithValidator(validateFunc func(ctx *Context, apiKey string) bool) {
+	if a == nil {
+		return
+	}
+	if validateFunc == nil {
+		a.Logger().Error("Nil validator provided for EnableAPIKeyAuthWithValidator. Proceeding without Authentication")
+		return
+	}
 
-	a.addAuthMiddleware(middleware.APIKeyAuthMiddleware(middleware.APIKeyAuthProvider{
-		ValidateFunc: validateFunc,
-		Container:    a.container,
-	}), grpcMiddleware.APIKeyAuthUnaryInterceptor(provider), grpcMiddleware.APIKeyAuthStreamInterceptor(provider))
+	provider := grpcMiddleware.APIKeyAuthProvider{
+		ValidateFuncWithContext: func(rpcCtx context.Context, apiKey string) bool {
+			return validateFunc(a.NewContext(rpcCtx), apiKey)
+		},
+	}
+
+	httpProvider := middleware.APIKeyAuthProvider{
+		ValidateFuncWithRequest: func(r *http.Request, apiKey string) bool {
+			return validateFunc(a.newAuthHTTPContext(r), apiKey)
+		},
+	}
+
+	a.addAuthMiddleware(middleware.APIKeyAuthMiddleware(httpProvider),
+		grpcMiddleware.APIKeyAuthUnaryInterceptor(provider), grpcMiddleware.APIKeyAuthStreamInterceptor(provider))
 }
 
-// EnableAPIKeyAuthWithValidator enables API key authentication for the application with a custom validation function.
-//
-// The provided `validateFunc` is used to determine the validity of an API key. It receives the request container
-// and the API key as arguments and should return `true` if the key is valid, `false` otherwise.
-func (a *App) EnableAPIKeyAuthWithValidator(validateFunc func(c *infra.Container, apiKey string) bool) {
-	provider := grpcMiddleware.APIKeyAuthProvider{ValidateFuncWithDatasources: validateFunc, Container: a.container}
-
-	a.addAuthMiddleware(middleware.APIKeyAuthMiddleware(middleware.APIKeyAuthProvider{
-		ValidateFuncWithDatasources: validateFunc,
-		Container:                   a.container,
-	}), grpcMiddleware.APIKeyAuthUnaryInterceptor(provider), grpcMiddleware.APIKeyAuthStreamInterceptor(provider))
+func (a *App) newAuthHTTPContext(r *http.Request) *Context {
+	var (
+		rt       *runtimeKernel
+		maxBytes int64
+		validate func(any) error
+	)
+	if a != nil && a.kernel != nil {
+		rt = a.kernel
+		maxBytes = rt.maxBodyBytes
+		validate = rt.validate
+	}
+	if r == nil {
+		return newContext(nil, nil, rt)
+	}
+	return newContext(nil, piHTTP.NewRequestWithLimit(r, maxBytes, validate), rt)
 }
 
 // EnableOAuth configures OAuth middleware for the application.
@@ -113,10 +146,13 @@ func (a *App) EnableOAuth(jwksEndpoint string,
 	refreshInterval int,
 	options ...jwt.ParserOption,
 ) {
+	if a == nil {
+		return
+	}
 	a.AddHTTPService("pi_oauth", jwksEndpoint)
 
 	oauthOption := middleware.OauthConfigs{
-		Provider:        a.container.GetHTTPService("pi_oauth"),
+		Provider:        a.HTTPService("pi_oauth"),
 		RefreshInterval: time.Second * time.Duration(refreshInterval),
 	}
 
@@ -149,7 +185,7 @@ func (a *App) addAuthMiddleware(httpMW func(http.Handler) http.Handler,
 
 	if a.grpcServer != nil {
 		if a.grpcServer.serverCreated {
-			a.container.Logger.Error("cannot add auth interceptors after gRPC server has been created - call authentication methods before RegisterService or Run")
+			a.Logger().Error("cannot add auth interceptors after gRPC server has been created - call authentication methods before RegisterService or Run")
 			return
 		}
 		a.grpcServer.addUnaryInterceptors(grpcUnary)

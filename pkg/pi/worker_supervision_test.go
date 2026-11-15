@@ -924,7 +924,7 @@ func TestWorkerSupervision_ThreePhaseContextsRacesMailboxFullAndBorrowedSurvival
 		workerRan := make(chan struct{})
 		require.NoError(t, startedApp.AddWorker("db-reader", WorkerPolicy{Mode: SuperviseFatal, Required: true}, func(c *Context) error {
 			var one int
-			if err := c.SQL.QueryRowContext(c, "SELECT 1").Scan(&one); err != nil {
+			if err := c.SQL().QueryRowContext(c, "SELECT 1").Scan(&one); err != nil {
 				return err
 			}
 			close(workerRan)

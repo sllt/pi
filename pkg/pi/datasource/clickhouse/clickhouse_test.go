@@ -12,7 +12,7 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
-func getClickHouseTestConnection(t *testing.T) (*MockConn, *MockMetrics, *MockLogger, Client) {
+func getClickHouseTestConnection(t *testing.T) (*MockConn, *MockMetrics, *MockLogger, *Client) {
 	t.Helper()
 
 	ctrl := gomock.NewController(t)
@@ -21,7 +21,7 @@ func getClickHouseTestConnection(t *testing.T) (*MockConn, *MockMetrics, *MockLo
 	mockMetric := NewMockMetrics(ctrl)
 	mockLogger := NewMockLogger(ctrl)
 
-	c := Client{conn: mockConn, config: Config{
+	c := &Client{conn: mockConn, config: Config{
 		Hosts:    "localhost",
 		Username: "user",
 		Password: "pass",

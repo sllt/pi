@@ -9,7 +9,6 @@ import (
 	"time"
 
 	piSql "github.com/sllt/pi/pkg/pi/datasource/sql"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 var errInvalidSQLTransaction = errors.New("migration: invalid SQL transaction")
@@ -50,16 +49,20 @@ type sqlMigrator struct {
 	migrator
 }
 
-func (d sqlMigrator) checkAndCreateMigrationTable(ctx context.Context, c *infra.Container) error {
-	if _, err := c.SQL.ExecContext(ctx, createSQLPiMigrationsTable); err != nil {
+func (d sqlMigrator) checkAndCreateMigrationTable(ctx context.Context, deps *Deps) error {
+	if _, err := deps.SQL.ExecContext(ctx, createSQLPiMigrationsTable); err != nil {
 		return err
 	}
 
-	return d.migrator.checkAndCreateMigrationTable(ctx, c)
+	if d.migrator == nil {
+		return nil
+	}
+
+	return d.migrator.checkAndCreateMigrationTable(ctx, deps)
 }
 
-func (d sqlMigrator) listApplied(ctx context.Context, c *infra.Container) ([]Record, error) {
-	rows, err := c.SQL.QueryContext(ctx, listSQLPiMigrations)
+func (d sqlMigrator) listApplied(ctx context.Context, deps *Deps) ([]Record, error) {
+	rows, err := deps.SQL.QueryContext(ctx, listSQLPiMigrations)
 	if err != nil {
 		return nil, fmt.Errorf("sql: %w", err)
 	}
@@ -88,7 +91,7 @@ func (d sqlMigrator) listApplied(ctx context.Context, c *infra.Container) ([]Rec
 		return records, nil
 	}
 
-	nested, err := d.migrator.listApplied(ctx, c)
+	nested, err := d.migrator.listApplied(ctx, deps)
 	if err != nil {
 		return nil, err
 	}
@@ -96,17 +99,21 @@ func (d sqlMigrator) listApplied(ctx context.Context, c *infra.Container) ([]Rec
 	return mergeAppliedRecords(records, nested), nil
 }
 
-func (d sqlMigrator) getLastMigration(ctx context.Context, c *infra.Container) (int64, error) {
+func (d sqlMigrator) getLastMigration(ctx context.Context, deps *Deps) (int64, error) {
 	var lastMigration int64
 
-	err := c.SQL.QueryRowContext(ctx, getLastSQLPiMigration).Scan(&lastMigration)
+	err := deps.SQL.QueryRowContext(ctx, getLastSQLPiMigration).Scan(&lastMigration)
 	if err != nil {
 		return -1, fmt.Errorf("sql: %w", err)
 	}
 
-	c.Debugf("SQL last migration fetched value is: %v", lastMigration)
+	deps.log().Debugf("SQL last migration fetched value is: %v", lastMigration)
 
-	lm2, err := d.migrator.getLastMigration(ctx, c)
+	if d.migrator == nil {
+		return lastMigration, nil
+	}
+
+	lm2, err := d.migrator.getLastMigration(ctx, deps)
 	if err != nil {
 		return -1, err
 	}
@@ -114,12 +121,12 @@ func (d sqlMigrator) getLastMigration(ctx context.Context, c *infra.Container) (
 	return max(lastMigration, lm2), nil
 }
 
-func (d sqlMigrator) commitMigration(ctx context.Context, c *infra.Container, data transactionData) error {
+func (d sqlMigrator) commitMigration(ctx context.Context, deps *Deps, data transactionData) error {
 	if data.SQLTx == nil {
 		return errInvalidSQLTransaction
 	}
 
-	insertQuery, err := sqlMigrationInsertQuery(c.SQL.Dialect())
+	insertQuery, err := sqlMigrationInsertQuery(deps.SQL.Dialect())
 	if err != nil {
 		return err
 	}
@@ -127,7 +134,7 @@ func (d sqlMigrator) commitMigration(ctx context.Context, c *infra.Container, da
 	if err = insertMigrationRecord(ctx, data.SQLTx, insertQuery, data.MigrationNumber, data.StartTime); err != nil {
 		return err
 	}
-	c.Debugf("inserted record for migration %v in kite_migrations table", data.MigrationNumber)
+	deps.log().Debugf("inserted record for migration %v in kite_migrations table", data.MigrationNumber)
 
 	// Commit transaction
 	if err := data.SQLTx.Commit(); err != nil {
@@ -138,7 +145,7 @@ func (d sqlMigrator) commitMigration(ctx context.Context, c *infra.Container, da
 		return nil
 	}
 
-	return d.migrator.commitMigration(ctx, c, data)
+	return d.migrator.commitMigration(ctx, deps, data)
 }
 
 func sqlMigrationInsertQuery(dialect string) (string, error) {
@@ -170,23 +177,14 @@ func insertMigrationRecord(ctx context.Context, tx *piSql.Tx, query string, vers
 	return err
 }
 
-func (d sqlMigrator) beginTransaction(ctx context.Context, c *infra.Container) (transactionData, error) {
+func (d sqlMigrator) beginTransaction(ctx context.Context, deps *Deps) (transactionData, error) {
 	if err := ctx.Err(); err != nil {
 		return transactionData{}, err
 	}
-	var sqlTx *piSql.Tx
-	var err error
-	if db, ok := c.SQL.(interface {
-		BeginTxContext(context.Context, *sql.TxOptions) (*piSql.Tx, error)
-	}); ok {
-		sqlTx, err = db.BeginTxContext(ctx, nil)
-	} else {
-		// Compatibility for custom infra.DB implementations. Their Begin call itself
-		// cannot be interrupted; new implementations should provide BeginTxContext.
-		sqlTx, err = c.SQL.Begin()
-	}
+
+	sqlTx, err := deps.SQL.BeginTxContext(ctx, nil)
 	if err != nil {
-		c.Errorf("unable to begin transaction: %v", err)
+		deps.log().Errorf("unable to begin transaction: %v", err)
 
 		return transactionData{}, err
 	}
@@ -194,28 +192,32 @@ func (d sqlMigrator) beginTransaction(ctx context.Context, c *infra.Container) (
 	if err = ctx.Err(); err != nil {
 		return transactionData{}, errorsJoin(err, sqlTx.Rollback())
 	}
-	cmt, err := d.migrator.beginTransaction(ctx, c)
-	if err != nil {
-		rollbackErr := sqlTx.Rollback()
-		if rollbackErr != nil {
-			rollbackErr = fmt.Errorf("rollback SQL transaction after nested begin failure: %w", rollbackErr)
-		}
 
-		return transactionData{}, errorsJoin(err, rollbackErr)
+	var cmt transactionData
+	if d.migrator != nil {
+		cmt, err = d.migrator.beginTransaction(ctx, deps)
+		if err != nil {
+			rollbackErr := sqlTx.Rollback()
+			if rollbackErr != nil {
+				rollbackErr = fmt.Errorf("rollback SQL transaction after nested begin failure: %w", rollbackErr)
+			}
+
+			return transactionData{}, errorsJoin(err, rollbackErr)
+		}
 	}
 
 	cmt.SQLTx = sqlTx
 
-	c.Debug("SQL Transaction begin successful")
+	deps.log().Debug("SQL Transaction begin successful")
 
 	return cmt, nil
 }
 
-func (d sqlMigrator) rollback(ctx context.Context, c *infra.Container, data transactionData) error {
+func (d sqlMigrator) rollback(ctx context.Context, deps *Deps, data transactionData) error {
 	var rollbackErr error
 	if data.SQLTx != nil {
 		if err := data.SQLTx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-			c.Errorf("unable to rollback transaction: %v", err)
+			deps.log().Errorf("unable to rollback transaction: %v", err)
 			rollbackErr = err
 		}
 	}
@@ -224,5 +226,5 @@ func (d sqlMigrator) rollback(ctx context.Context, c *infra.Container, data tran
 		return rollbackErr
 	}
 
-	return errorsJoin(rollbackErr, d.migrator.rollback(ctx, c, data))
+	return errorsJoin(rollbackErr, d.migrator.rollback(ctx, deps, data))
 }

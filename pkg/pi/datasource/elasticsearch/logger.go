@@ -31,6 +31,10 @@ type QueryLog struct {
 
 // PrettyPrint formats the QueryLog and emits a colored, structured log line.
 func (ql *QueryLog) PrettyPrint(logger Logger) {
+	if logger == nil {
+		return
+	}
+
 	var payload string
 
 	if ql.Request != nil {

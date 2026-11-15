@@ -8,25 +8,31 @@ import (
 
 	gorillaWebsocket "github.com/gorilla/websocket"
 
-	"github.com/sllt/pi/pkg/pi/infra"
+	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/websocket"
 )
 
 var anonWSConnSeq atomic.Uint64
 
 // WSHandlerUpgrade middleware upgrades the incoming http request to a websocket connection using websocket upgrader.
-func WSHandlerUpgrade(c *infra.Container, wsManager *websocket.Manager) func(inner http.Handler) http.Handler {
+func WSHandlerUpgrade(logger logging.Logger, wsManager *websocket.Manager) func(inner http.Handler) http.Handler {
 	return func(inner http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if gorillaWebsocket.IsWebSocketUpgrade(r) {
-				if wsManager != nil && wsManager.IsAdmissionClosed() {
+				if wsManager == nil || wsManager.WebSocketUpgrader == nil {
+					http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+					return
+				}
+				if wsManager.IsAdmissionClosed() {
 					http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 					return
 				}
 
 				conn, err := wsManager.WebSocketUpgrader.Upgrade(w, r, nil)
 				if err != nil {
-					c.Errorf("Failed to upgrade to WebSocket: %v", err)
+					if logger != nil {
+						logger.Errorf("Failed to upgrade to WebSocket: %v", err)
+					}
 					http.Error(w, "Could not open WebSocket connection", http.StatusBadRequest)
 
 					return

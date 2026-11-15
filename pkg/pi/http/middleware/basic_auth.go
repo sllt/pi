@@ -6,16 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 // BasicAuthProvider represents a basic authentication provider.
 type BasicAuthProvider struct {
-	Users                       map[string]string
-	ValidateFunc                func(username, password string) bool
-	ValidateFuncWithDatasources func(c *infra.Container, username, password string) bool
-	Container                   *infra.Container
+	Users                   map[string]string
+	ValidateFunc            func(username, password string) bool
+	ValidateFuncWithRequest func(r *http.Request, username, password string) bool
 }
 
 var (
@@ -32,17 +29,14 @@ func NewBasicAuthProvider(users map[string]string) (AuthProvider, error) {
 }
 
 // NewBasicAuthProviderWithValidateFunc returns an instance of type AuthProvider interface.
-func NewBasicAuthProviderWithValidateFunc(c *infra.Container,
-	validateFunc func(c *infra.Container, username, password string) bool) (AuthProvider, error) {
+func NewBasicAuthProviderWithValidateFunc(
+	validateFunc func(r *http.Request, username, password string) bool,
+) (AuthProvider, error) {
 	if validateFunc == nil {
 		return nil, errValidateFuncEmpty
 	}
 
-	if c == nil {
-		return nil, errContainerNil
-	}
-
-	return &BasicAuthProvider{ValidateFuncWithDatasources: validateFunc, Container: c}, nil
+	return &BasicAuthProvider{ValidateFuncWithRequest: validateFunc}, nil
 }
 
 // ExtractAuthHeader retrieves & returns validated value from auth header.
@@ -58,7 +52,7 @@ func (a *BasicAuthProvider) ExtractAuthHeader(r *http.Request) (any, ErrorHTTP) 
 			"credentials should be in the format base64(username:password)")
 	}
 
-	if !a.validateCredentials(userName, password) {
+	if !a.validateCredentials(r, userName, password) {
 		return nil, NewInvalidAuthorizationHeaderError(headerAuthorization)
 	}
 
@@ -82,7 +76,7 @@ func parseBasicAuth(authHeader string) (username, password string, ok bool) {
 	}
 
 	username, password, found := strings.Cut(string(payload), ":")
-	if !found { // Ensure both username and password are returned as empty if colon separator is missing
+	if !found {
 		return "", "", false
 	}
 
@@ -90,24 +84,20 @@ func parseBasicAuth(authHeader string) (username, password string, ok bool) {
 }
 
 // validateCredentials checks the provided username and password against the BasicAuthProvider.
-func (a *BasicAuthProvider) validateCredentials(username, password string) bool {
+func (a *BasicAuthProvider) validateCredentials(r *http.Request, username, password string) bool {
 	switch {
-	case a.ValidateFuncWithDatasources != nil:
-		return a.ValidateFuncWithDatasources(a.Container, username, password)
+	case a.ValidateFuncWithRequest != nil:
+		return a.ValidateFuncWithRequest(r, username, password)
 	case a.ValidateFunc != nil:
 		return a.ValidateFunc(username, password)
 	default:
 		storedPass, ok := a.Users[username]
-
 		if !ok {
-			// Use dummyValue constant
 			subtle.ConstantTimeCompare([]byte(password), []byte(dummyValue))
 
-			// Add exactly one blank line before return
 			return false
 		}
 
-		// constant time compare for password comparison
 		return subtle.ConstantTimeCompare([]byte(password), []byte(storedPass)) == 1
 	}
 }

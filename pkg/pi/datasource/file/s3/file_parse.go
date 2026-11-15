@@ -69,7 +69,9 @@ func (f *S3File) createJSONReader(location string) (file.RowReader, error) {
 
 	buffer, err := io.ReadAll(f.body)
 	if err != nil {
-		f.logger.Errorf("ReadAll Failed: Unable to read json file: %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("ReadAll Failed: Unable to read json file: %v", err)
+		}
 		return nil, err
 	}
 
@@ -82,7 +84,9 @@ func (f *S3File) createJSONReader(location string) (file.RowReader, error) {
 	// decode again if we are decoding a json object instead of array
 	token, err := decoder.Token()
 	if err != nil {
-		f.logger.Errorf("Error decoding token: %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("Error decoding token: %v", err)
+		}
 		return nil, err
 	}
 
@@ -106,7 +110,9 @@ func (f *S3File) createTextCSVReader(location string) (file.RowReader, error) {
 
 	buffer, err := io.ReadAll(f.body)
 	if err != nil {
-		f.logger.Errorf("ReadAll failed: Unable to read text file: %v", err)
+		if f.logger != nil {
+			f.logger.Errorf("ReadAll failed: Unable to read text file: %v", err)
+		}
 		return nil, err
 	}
 

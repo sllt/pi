@@ -11,7 +11,6 @@ import (
 
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/contract"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/openapi"
 )
 
@@ -225,8 +224,10 @@ func (g *RouteGroup) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGr
 	validCallbacks := make([]func(sub *RouteGroup), 0, len(fns))
 	for _, fn := range fns {
 		if fn == nil {
-			if g.app != nil && g.app.container != nil && g.app.container.Logger != nil {
-				g.app.container.Logger.Error("route group callback cannot be nil")
+			if g.app != nil {
+				if l := g.app.safeLogger(); l != nil {
+					l.Error("route group callback cannot be nil")
+				}
 			}
 			continue
 		}
@@ -275,18 +276,18 @@ func (g *RouteGroup) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGr
 // ---------- RouteRegistry: compilation to chi ----------
 
 // compile walks the GroupNode tree and registers all routes and middleware on the chi router.
-func (reg *RouteRegistry) compile(router chi.Router, container *infra.Container, defaultTimeout time.Duration) {
+func (reg *RouteRegistry) compile(router chi.Router, rt *runtimeKernel, defaultTimeout time.Duration) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	reg.compileLocked(router, container, defaultTimeout)
+	reg.compileLocked(router, rt, defaultTimeout)
 }
 
-func (reg *RouteRegistry) compileLocked(router chi.Router, container *infra.Container, defaultTimeout time.Duration) {
+func (reg *RouteRegistry) compileLocked(router chi.Router, rt *runtimeKernel, defaultTimeout time.Duration) {
 	if reg.compiled {
 		return
 	}
 	reg.compiled = true
-	reg.compileNode(reg.root, router, container, defaultTimeout, "", nil)
+	reg.compileNode(reg.root, router, rt, defaultTimeout, "", nil)
 }
 
 func collectFoldedNode(node *GroupNode) (
@@ -360,7 +361,7 @@ func joinGroupRoutePattern(fullPrefix, pattern string) string {
 func (reg *RouteRegistry) compileNode(
 	node *GroupNode,
 	router chi.Router,
-	container *infra.Container,
+	rt *runtimeKernel,
 	defaultTimeout time.Duration,
 	fullPrefix string,
 	inheritedPiMWs []PiMiddleware,
@@ -410,10 +411,10 @@ func (reg *RouteRegistry) compileNode(
 			if !groupNodeHasRoutes(child) {
 				continue
 			}
-			reg.compileNode(child, router, container, defaultTimeout, "", allPiMWs)
+			reg.compileNode(child, router, rt, defaultTimeout, "", allPiMWs)
 		}
 
-		reg.registerRoutes(router, "", nodeRoutes, nodeMetas, container, defaultTimeout, allPiMWs)
+		reg.registerRoutes(router, "", nodeRoutes, nodeMetas, rt, defaultTimeout, allPiMWs)
 		return
 	}
 
@@ -428,10 +429,10 @@ func (reg *RouteRegistry) compileNode(
 		if !groupNodeHasRoutes(child) {
 			continue
 		}
-		reg.compileNode(child, scoped, container, defaultTimeout, curPrefix, allPiMWs)
+		reg.compileNode(child, scoped, rt, defaultTimeout, curPrefix, allPiMWs)
 	}
 
-	reg.registerRoutes(scoped, curPrefix, nodeRoutes, nodeMetas, container, defaultTimeout, allPiMWs)
+	reg.registerRoutes(scoped, curPrefix, nodeRoutes, nodeMetas, rt, defaultTimeout, allPiMWs)
 }
 
 func groupNodeHasRoutes(node *GroupNode) bool {
@@ -454,7 +455,7 @@ func (reg *RouteRegistry) registerRoutes(
 	fullPrefix string,
 	routes []RouteDef,
 	metas []*routeMeta,
-	container *infra.Container,
+	rt *runtimeKernel,
 	defaultTimeout time.Duration,
 	piMWs []PiMiddleware,
 ) {
@@ -486,15 +487,15 @@ func (reg *RouteRegistry) registerRoutes(
 
 		h := handler{
 			function:       composedFn,
-			container:      container,
+			rt:             rt,
 			requestTimeout: timeout,
 		}
 
 		var providerFn func() trace.TracerProvider
 		isolateMetrics := false
-		if container != nil {
-			providerFn = container.GetTracerProvider
-			isolateMetrics = container.IsIsolated() || container.TracerProvider != nil
+		if rt != nil {
+			providerFn = rt.getTracerProvider
+			isolateMetrics = rt.shouldIsolateMetrics()
 		}
 		var routeHTTP http.Handler = piHTTP.NewRouteHTTPHandler(h, "pi-router", providerFn, isolateMetrics)
 		if meta != nil && len(meta.httpMWs) > 0 {

@@ -50,6 +50,9 @@ func parseQueryArgs(args ...any) (timeout time.Duration, limit int) {
 }
 
 func (g *googleClient) getQuerySubscription(ctx context.Context, topic *gcPubSub.Topic) (*gcPubSub.Subscription, error) {
+	if g.SubscriptionName == "" {
+		return nil, errSubscriptionNotProvided
+	}
 	subName := g.SubscriptionName + "-query-" + topic.ID()
 	subscription := g.client.Subscription(subName)
 

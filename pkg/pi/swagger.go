@@ -197,7 +197,7 @@ func SwaggerUIHandler(c *Context) (any, error) {
 
 	if fileName == "scalar.js.gz" || fileName == "files.go" {
 		err := piHTTP.ErrorInvalidRoute{}
-		if c.Container != nil && c.Logger != nil {
+		if c != nil {
 			c.Errorf("Rejected embedded UI file %s: %v", fileName, err)
 		}
 		return nil, err
@@ -206,7 +206,7 @@ func SwaggerUIHandler(c *Context) (any, error) {
 	if fileName == scalarJSAssetName {
 		file, err := serveScalarJS(c)
 		if err != nil {
-			if c.Container != nil && c.Logger != nil {
+			if c != nil {
 				c.Errorf("Failed to serve Scalar UI script from embedded file system: %v", err)
 			}
 			return nil, err
@@ -216,7 +216,7 @@ func SwaggerUIHandler(c *Context) (any, error) {
 
 	data, err := fs.ReadFile("static/" + fileName)
 	if err != nil {
-		if c.Container != nil && c.Logger != nil {
+		if c != nil {
 			c.Errorf("Failed to read UI file %s from embedded file system: %v", fileName, err)
 		}
 		return nil, err

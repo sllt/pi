@@ -15,7 +15,6 @@ import (
 	"github.com/sllt/tao/actor"
 
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 const (
@@ -31,7 +30,7 @@ var (
 	errSubscriberHandlerNil                   = errors.New("subscriber handler cannot be nil")
 	errSubscriberDuplicateTopic               = errors.New("subscriber topic already registered")
 	errSubscriberRegisterTooLate              = errors.New("cannot register subscriber after app has started")
-	errSubscriberNotInitialized               = errors.New("pubsub subscriber is not initialized in container")
+	errSubscriberNotInitialized               = errors.New("pubsub subscriber is not initialized")
 	errSubscriberInvalidShutdownMode          = errors.New("invalid subscriber shutdown mode")
 	errSubscriberInvalidConcurrency           = errors.New("subscriber Concurrency must be >= 0")
 	errSubscriberInvalidQueueSize             = errors.New("subscriber QueueSize must be >= 0")
@@ -455,12 +454,17 @@ func (a *App) AddSubscriber(topic string, policy SubscribePolicy, handler Subscr
 		return err
 	}
 
-	var sub pubsub.Subscriber
-	if a.container != nil {
-		sub = a.container.GetSubscriber()
+	if a == nil {
+		return errSubscriberNotInitialized
 	}
+	sub := a.GetSubscriber()
 	if sub == nil {
 		return errSubscriberNotInitialized
+	}
+	if mh, ok := a.PubSub().(*managedPubSubHandle); ok {
+		if err := mh.validateSubscriberConfig(); err != nil {
+			return err
+		}
 	}
 
 	sem := pubsub.ResolveAckSemantics(sub, nil)
@@ -504,10 +508,7 @@ func (a *App) materializeLegacySubscriptions() {
 		registered[s.topic] = struct{}{}
 	}
 
-	var sub pubsub.Subscriber
-	if a.container != nil {
-		sub = a.container.GetSubscriber()
-	}
+	sub := a.GetSubscriber()
 	sem := pubsub.ResolveAckSemantics(sub, nil)
 
 	topics := make([]string, 0, len(a.subscriptionManager.subscriptions))
@@ -626,16 +627,16 @@ func (s *subscriberSlot) recordAbandonedAction(action string) {
 	s.mu.Unlock()
 }
 
-func (s *subscriberSlot) container() *infra.Container {
+func (s *subscriberSlot) runtimeKernel() *runtimeKernel {
 	if s.app != nil {
-		return s.app.container
+		return s.app.kernel
 	}
 	return nil
 }
 
 func (s *subscriberSlot) subscriberBackend() pubsub.Subscriber {
-	if c := s.container(); c != nil {
-		return c.GetSubscriber()
+	if rt := s.runtimeKernel(); rt != nil {
+		return rt.getSubscriber()
 	}
 	return nil
 }
@@ -1040,8 +1041,9 @@ func (s *subscriberSlot) handleKeyExtractorPanic(
 			cancelDLQ(context.Cause(scopeCtx))
 		})
 		dlqMsgCopy := msg.WithContext(dlqHandlerCtx)
-		dlqCtx := newContext(nil, dlqMsgCopy, s.container())
+		dlqCtx := newContext(nil, dlqMsgCopy, s.runtimeKernel())
 		dlqCtx.Context = dlqHandlerCtx
+		dlqCtx.ContextLogger.UpdateContext(dlqHandlerCtx)
 
 		dlqErr := func() (dErr error) {
 			defer func() {
@@ -1699,8 +1701,9 @@ func (s *subscriberSlot) executeTicket(ticket *subMessageTicket) {
 
 		panicked = false
 		msgAttemptCopy := ticket.msg.WithContext(handlerCtx)
-		msgCtx := newContext(nil, msgAttemptCopy, s.container())
+		msgCtx := newContext(nil, msgAttemptCopy, s.runtimeKernel())
 		msgCtx.Context = handlerCtx
+		msgCtx.ContextLogger.UpdateContext(handlerCtx)
 
 		lastErr = func(c *Context) (hErr error) {
 			defer func() {
@@ -1795,8 +1798,9 @@ func (s *subscriberSlot) executeTicket(ticket *subMessageTicket) {
 
 	if s.policy.DeadLetterHandler != nil && scopeCtx.Err() == nil && handlerCtx.Err() == nil {
 		dlqMsgCopy := ticket.msg.WithContext(handlerCtx)
-		dlqCtx := newContext(nil, dlqMsgCopy, s.container())
+		dlqCtx := newContext(nil, dlqMsgCopy, s.runtimeKernel())
 		dlqCtx.Context = handlerCtx
+		dlqCtx.ContextLogger.UpdateContext(handlerCtx)
 
 		dlqErr := func() (dErr error) {
 			defer func() {

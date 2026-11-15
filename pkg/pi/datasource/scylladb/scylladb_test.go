@@ -193,12 +193,12 @@ func Test_Exec(t *testing.T) {
 	}{
 		{"success case", func() {
 			mockDeps.mockLogger.EXPECT().Debug(gomock.AssignableToTypeOf(&QueryLog{}))
-			mockDeps.mockSession.EXPECT().Query(query, nil).Return(mockDeps.mockQuery).AnyTimes()
+			mockDeps.mockSession.EXPECT().Query(query).Return(mockDeps.mockQuery).AnyTimes()
 			mockDeps.mockQuery.EXPECT().Exec().Return(nil).Times(1)
 		}, nil},
 		{"failure case", func() {
 			mockDeps.mockLogger.EXPECT().Debug(gomock.AssignableToTypeOf(&QueryLog{}))
-			mockDeps.mockSession.EXPECT().Query(query, nil).Return(mockDeps.mockQuery).AnyTimes()
+			mockDeps.mockSession.EXPECT().Query(query).Return(mockDeps.mockQuery).AnyTimes()
 			mockDeps.mockQuery.EXPECT().Exec().Return(errMock).Times(1)
 		}, errMock},
 	}

@@ -14,15 +14,22 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sllt/pi/pkg/pi/cmd/terminal"
 	"github.com/sllt/pi/pkg/pi/config"
+	"github.com/sllt/pi/pkg/pi/datasource/file"
+	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
+	piRedis "github.com/sllt/pi/pkg/pi/datasource/redis"
+	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
 	"github.com/sllt/pi/pkg/pi/http/middleware"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/metrics"
 	"github.com/sllt/pi/pkg/pi/migration"
 	"github.com/sllt/pi/pkg/pi/service"
+	"github.com/sllt/pi/pkg/pi/websocket"
 )
 
 const (
@@ -48,8 +55,8 @@ type App struct {
 	cmd  *cmd
 	cron *Crontab
 
-	// container is unexported because this is an internal implementation and applications are provided access to it via Context
-	container *infra.Container
+	// kernel is the unexported runtime microkernel managing core datasources, adapters, and telemetry.
+	kernel *runtimeKernel
 
 	grpcRegistered bool
 	httpRegistered bool
@@ -102,19 +109,20 @@ type App struct {
 	runtimeTasks        sync.WaitGroup
 	controllerStopTasks sync.WaitGroup
 
-	runtimeMu      sync.Mutex
-	runtimeState   lifecycleState
-	startupDone    chan struct{}
-	startDone      chan struct{}
-	startErr       error
-	stopDone       chan struct{}
-	stopErr        error
-	lateRuntimeErr error
-	actorRT        *actorRuntime
-	workerJitter   func(maxDelay time.Duration) time.Duration
-	cronNow        func() time.Time
+	runtimeMu        sync.Mutex
+	runtimeState     lifecycleState
+	atomicState      atomic.Uint32
+	subConfigErr     error
+	startupDone      chan struct{}
+	startDone        chan struct{}
+	startErr         error
+	stopDone         chan struct{}
+	stopErr          error
+	lateRuntimeErr   error
+	actorRT          *actorRuntime
+	workerJitter     func(maxDelay time.Duration) time.Duration
+	cronNow          func() time.Time
 	pureBuild        bool
-	resources        []managedResource
 	waitDone         chan struct{}
 	customValidate   func(any) error
 	typedBind        TypedBindConfig
@@ -125,7 +133,7 @@ type App struct {
 }
 
 func (a *App) runOnStartHooks(ctx context.Context) error {
-	piCtx := newContext(nil, noopRequest{ctx: ctx}, a.container)
+	piCtx := newContext(nil, noopRequest{ctx: ctx}, a.kernel)
 
 	a.runtimeMu.Lock()
 	hooks := append([]func(*Context) error(nil), a.onStartHooks...)
@@ -153,7 +161,7 @@ func (a *App) runOnStopHooks(ctx context.Context) error {
 	hooks := append([]func(*Context) error(nil), a.onStopHooks...)
 	a.runtimeMu.Unlock()
 
-	piCtx := newContext(nil, noopRequest{ctx: ctx}, a.container)
+	piCtx := newContext(nil, noopRequest{ctx: ctx}, a.kernel)
 	var err error
 
 	for i := len(hooks) - 1; i >= 0; i-- {
@@ -191,7 +199,7 @@ func (a *App) runShutdownOnStopHooks(callerCtx context.Context, fallbackCtx func
 			break
 		}
 
-		piCtx := newContext(nil, noopRequest{ctx: hookCtx}, a.container)
+		piCtx := newContext(nil, noopRequest{ctx: hookCtx}, a.kernel)
 		hookErr := a.runLifecycleHook("OnStop", i, hooks[i], piCtx, errStopHookPanic)
 		if hookErr != nil {
 			if l := a.safeLogger(); l != nil {
@@ -221,8 +229,8 @@ func joinShutdownErr(existing, next error) error {
 }
 
 func (a *App) safeLogger() logging.Logger {
-	if a != nil && a.container != nil {
-		return a.container.Logger
+	if a != nil && a.kernel != nil {
+		return a.kernel.getLogger()
 	}
 	return nil
 }
@@ -254,6 +262,7 @@ func (a *App) Stop(ctx context.Context) error {
 	a.runtimeMu.Lock()
 	if a.stopDone == nil {
 		a.runtimeState = lifecycleStopping
+		a.atomicState.Store(uint32(lifecycleStopping))
 		a.stopDone = make(chan struct{})
 		startupDone := a.startupDone
 		a.runtimeMu.Unlock()
@@ -265,6 +274,10 @@ func (a *App) Stop(ctx context.Context) error {
 		go a.finishStop(ctx, startupDone)
 	} else {
 		a.runtimeMu.Unlock()
+		func() {
+			defer func() { _ = recover() }()
+			a.beginStopIntake(nil)
+		}()
 	}
 
 	return a.waitForStop(ctx)
@@ -375,71 +388,51 @@ func (a *App) shutdown(ctx context.Context) error {
 		a.runtimeTasks.Wait()
 	}
 	a.controllerStopTasks.Wait()
-	if a.container != nil {
-		if waitErr := a.container.WaitHandlers(ctx); waitErr != nil {
+	if a.kernel != nil {
+		if waitErr := a.kernel.WaitHandlers(ctx); waitErr != nil {
 			err = joinShutdownErr(err, waitErr)
-			a.container.WaitHandlersAll()
+			a.kernel.WaitHandlersAll()
 		}
-		a.container.CloseHealthAdmission()
-		if waitErr := a.container.WaitHealthSamplers(ctx); waitErr != nil {
+		a.kernel.CloseHealthAdmission()
+		if waitErr := a.kernel.WaitHealthSamplers(ctx); waitErr != nil {
 			err = joinShutdownErr(err, waitErr)
-			a.container.WaitHealthSamplersAll()
+			a.kernel.WaitHealthSamplersAll()
 		}
 	}
 	err = joinShutdownErr(err, a.takeLateRuntimeError())
 
-	// Step 5: execute OnStop hooks in reverse order without silently skipping cleanup on caller timeout.
+	// Phase D: execute OnStop hooks in reverse order while core datasources & adapters remain active.
 	err = joinShutdownErr(err, a.runShutdownOnStopHooks(ctx, getCleanupFallbackCtx))
 
-	// Step 6: close middleware/service background loops, Owned resources (or legacy container), and Metrics server.
+	// Phase E: close residual WS connections, middleware loops, Owned resources/adapters/services, tracer, metrics, and owned logger.
 	cleanupCtx := ctx
 	if callerErr := ctx.Err(); callerErr != nil {
 		err = joinShutdownErr(err, callerErr)
 		cleanupCtx = getCleanupFallbackCtx()
 	}
 
-	err = joinShutdownErr(err, a.closeMiddlewareClosers())
-
-	if a.pureBuild {
-		if a.container != nil {
-			for _, svc := range a.container.Services {
-				if svc != nil {
-					err = joinShutdownErr(err, service.CloseService(svc))
-				}
-			}
-		}
-		err = joinShutdownErr(err, a.stopResources(cleanupCtx))
-		if a.container != nil && a.container.WSManager != nil {
-			for _, connID := range a.container.WSManager.ListConnections() {
-				conn := a.container.WSManager.GetConnectionByServiceName(connID)
-				a.container.WSManager.CloseConnection(connID)
-				if conn != nil {
-					_ = conn.WaitAsyncWrites(cleanupCtx)
-				}
-			}
-		}
-	} else {
-		if a.ownedTracerShutdown != nil {
-			err = joinShutdownErr(err, a.ownedTracerShutdown(cleanupCtx))
-		}
-		if a.container != nil {
-			err = joinShutdownErr(err, a.container.Close())
-		}
+	if a.kernel != nil {
+		a.kernel.closeAllWSConnections(cleanupCtx)
 	}
-
+	err = joinShutdownErr(err, a.closeMiddlewareClosers())
+	err = joinShutdownErr(err, a.stopResources(cleanupCtx))
+	if a.ownedTracerShutdown != nil {
+		err = joinShutdownErr(err, a.ownedTracerShutdown(cleanupCtx))
+	}
 	if a.metricServer != nil {
 		err = joinShutdownErr(err, a.metricServer.Shutdown(cleanupCtx))
 	}
 
-	if err != nil {
-		return err
+	if err == nil {
+		if l := a.safeLogger(); l != nil {
+			l.Info("Application shutdown complete")
+		}
+	}
+	if a.kernel != nil {
+		err = joinShutdownErr(err, a.kernel.closeOwnedLogger())
 	}
 
-	if l := a.safeLogger(); l != nil {
-		l.Info("Application shutdown complete")
-	}
-
-	return nil
+	return err
 }
 
 func isPortAvailable(port int) bool {
@@ -476,6 +469,9 @@ func (a *App) validateRoutesForStart() error {
 }
 
 func (a *App) ensureHTTPCompiled() error {
+	if a != nil && a.kernel != nil {
+		a.kernel.freeze()
+	}
 	a.httpSetupMu.Lock()
 	defer a.httpSetupMu.Unlock()
 	if a.httpSetupDone {
@@ -495,7 +491,7 @@ func (a *App) setupHTTPRoutes() error {
 	if requestTimeout != "" {
 		timeoutVal, err := strconv.Atoi(requestTimeout)
 		if err != nil || timeoutVal < 0 {
-			a.container.Error("invalid value of config REQUEST_TIMEOUT.")
+			a.Logger().Error("invalid value of config REQUEST_TIMEOUT.")
 		}
 	}
 
@@ -508,8 +504,8 @@ func (a *App) setupHTTPRoutes() error {
 	}
 
 	a.httpServer.router.NotFound(handler{
-		function:  catchAllHandler,
-		container: a.container,
+		function: catchAllHandler,
+		rt:       a.kernel,
 	})
 
 	var registeredMethods []string
@@ -546,7 +542,7 @@ func (a *App) setupAndCompileHTTPRoutes() error {
 
 	// Compile the route registry: walks the GroupNode tree and registers
 	// all routes and middleware onto the chi router.
-	reg.compileLocked(a.httpServer.router.Mux(), a.container, a.getRequestTimeout())
+	reg.compileLocked(a.httpServer.router.Mux(), a.kernel, a.getRequestTimeout())
 	return nil
 }
 
@@ -585,39 +581,39 @@ func (a *App) readConfig(isAppCMD bool) {
 	a.Config = config.NewEnvFile(location, logging.NewLogger(logging.INFO))
 }
 
-// AddHTTPService registers HTTP service in infra.
+// AddHTTPService constructs and registers an Owned downstream HTTP service client before Start.
 func (a *App) AddHTTPService(serviceName, serviceAddress string, options ...service.Options) {
-	if a.container.Services == nil {
-		a.container.Services = make(map[string]service.HTTP)
-	}
-
-	if prev, ok := a.container.Services[serviceName]; ok {
-		a.container.Debugf("Service already registered Name: %v", serviceName)
-		if prev != nil {
-			_ = service.CloseService(prev)
+	if err := a.checkMutable(); err != nil {
+		if l := a.safeLogger(); l != nil {
+			l.Errorf("failed to register HTTP service %q: %v", serviceName, err)
 		}
+		return
 	}
 
 	options = append([]service.Options{service.WithAttributes(map[string]string{"name": serviceName})}, options...)
 
-	a.container.Services[serviceName] = service.NewHTTPServiceWithTracerProvider(
+	svc := service.NewHTTPServiceWithTracerProvider(
 		serviceAddress,
-		a.container.Logger,
-		a.container.Metrics(),
-		a.container.GetTracerProvider(),
+		a.Logger(),
+		a.Metrics(),
+		a.TracerProvider(),
 		options...,
 	)
+	if err := a.setHTTPServiceInternal(serviceName, svc, Owned, true, !a.pureBuild); err != nil {
+		_ = service.CloseService(svc)
+		a.Logger().Errorf("failed to register HTTP service %q: %v", serviceName, err)
+	}
 }
 
 func (a *App) ensureRateLimitMetrics() {
-	if a == nil || a.container == nil {
+	if a == nil || a.kernel == nil {
 		return
 	}
-	m := a.container.Metrics()
+	m := a.kernel.getMetrics()
 	if m == nil {
 		return
 	}
-	if _, isStrictMock := m.(*infra.MockMetrics); isStrictMock {
+	if sm, ok := m.(metrics.StrictMock); ok && sm.IsStrictMock() {
 		return
 	}
 	a.rateLimitMetricsOnce.Do(func() {
@@ -692,26 +688,166 @@ func (a *App) closeMiddlewareClosers() error {
 	return err
 }
 
+func (a *App) runtimeKernelRef() *runtimeKernel {
+	if a == nil {
+		return nil
+	}
+	return a.kernel
+}
+
+// SQL returns the primary SQL client, or untyped nil when SQL is not configured.
+func (a *App) SQL() piSQL.Client {
+	if a == nil || a.kernel == nil {
+		return nil
+	}
+	return a.kernel.getSQL()
+}
+
+// Redis returns the primary Redis client, or untyped nil when Redis is not configured.
+func (a *App) Redis() piRedis.Client {
+	if a == nil || a.kernel == nil {
+		return nil
+	}
+	return a.kernel.getRedis()
+}
+
+// PubSub returns the primary Pub/Sub client, or untyped nil when Pub/Sub is not configured.
+func (a *App) PubSub() pubsub.Client {
+	if a == nil || a.kernel == nil {
+		return nil
+	}
+	return a.kernel.getPubSub()
+}
+
+// GetPublisher returns the primary Pub/Sub publisher, or untyped nil when unconfigured.
+func (a *App) GetPublisher() pubsub.Publisher {
+	if a == nil || a.kernel == nil {
+		return nil
+	}
+	return a.kernel.getPublisher()
+}
+
+// GetSubscriber returns the primary Pub/Sub subscriber, or untyped nil when unconfigured.
+func (a *App) GetSubscriber() pubsub.Subscriber {
+	if a == nil || a.kernel == nil {
+		return nil
+	}
+	return a.kernel.getSubscriber()
+}
+
+// File returns the configured FileSystem (defaulting to local filesystem).
+func (a *App) File() file.FileSystem {
+	if a == nil || a.kernel == nil {
+		return nil
+	}
+	return a.kernel.getFile()
+}
+
+// Logger returns the logger instance associated with the App (never nil).
+func (a *App) Logger() logging.Logger {
+	if a == nil || a.kernel == nil {
+		return nopFallbackLogger{}
+	}
+	return a.kernel.getLogger()
+}
+
 // Metrics returns the metrics manager associated with the App.
 func (a *App) Metrics() metrics.Manager {
-	return a.container.Metrics()
+	if a == nil || a.kernel == nil {
+		return nil
+	}
+	return a.kernel.getMetrics()
 }
 
-// Container returns the container instance associated with the App.
-// This allows access to all registered datasources (SQL, Redis, Mongo, etc.)
-// for dependency injection in layered architectures.
-func (a *App) Container() *infra.Container {
-	return a.container
+// TracerProvider returns the OpenTelemetry TracerProvider associated with the App.
+func (a *App) TracerProvider() trace.TracerProvider {
+	if a == nil || a.kernel == nil {
+		return otel.GetTracerProvider()
+	}
+	return a.kernel.getTracerProvider()
 }
 
-// Logger returns the logger instance associated with the App.
-func (a *App) Logger() logging.Logger {
-	return a.container.Logger
+func (a *App) tracerProvider() trace.TracerProvider {
+	return a.TracerProvider()
+}
+
+// HTTPService returns the registered downstream HTTP service client with the given name, or nil.
+func (a *App) HTTPService(name string) service.HTTP {
+	if a == nil || a.kernel == nil {
+		return nil
+	}
+	return a.kernel.getHTTPService(name)
+}
+
+// GetHTTPService returns the registered downstream HTTP service client with the given name, or nil.
+func (a *App) GetHTTPService(name string) service.HTTP {
+	return a.HTTPService(name)
+}
+
+// WebSocketHub returns the WebSocket connection manager associated with the App.
+func (a *App) WebSocketHub() *websocket.Manager {
+	if a == nil || a.kernel == nil {
+		return nil
+	}
+	return a.kernel.wsManager
+}
+
+// Health executes bounded singleflight deep health checks across core datasources, HTTP services, and adapters.
+func (a *App) Health(ctx context.Context) map[string]any {
+	if a == nil || a.kernel == nil {
+		return (*runtimeKernel)(nil).Health(ctx)
+	}
+	return a.kernel.Health(ctx)
+}
+
+// AppName returns the configured application name.
+func (a *App) AppName() string {
+	if a == nil || a.kernel == nil {
+		return ""
+	}
+	return a.kernel.getAppName()
+}
+
+// AppVersion returns the configured application version.
+func (a *App) AppVersion() string {
+	if a == nil || a.kernel == nil {
+		return ""
+	}
+	return a.kernel.getAppVersion()
+}
+
+// MigrationDeps implements migration.Target for running migrations against App datasources and external adapters.
+func (a *App) MigrationDeps() migration.Deps {
+	if a == nil || a.kernel == nil {
+		return migration.Deps{}
+	}
+	deps := migration.Deps{
+		Logger: a.Logger(),
+	}
+	if sqlClient := a.SQL(); !isNilValue(sqlClient) {
+		deps.SQL = sqlClient
+	}
+	if redisClient := a.Redis(); !isNilValue(redisClient) {
+		deps.Redis = redisClient
+	}
+	if pubsubClient := a.PubSub(); !isNilValue(pubsubClient) {
+		deps.PubSub = pubsubClient
+	}
+	if a.kernel.adapters != nil {
+		deps.Adapters = migrationAdapterLookup{reg: a.kernel.adapters}
+	}
+	return deps
 }
 
 // SubCommand adds a sub-command to the CLI application.
 // Can be used to create commands like "kubectl get" or "kubectl get ingress".
 func (a *App) SubCommand(pattern string, handler Handler, options ...Options) {
+	if a == nil {
+		return
+	}
+	if a.cmd == nil {
+		a.cmd = &cmd{out: terminal.New()}
+	}
 	a.cmd.addRoute(pattern, handler, options...)
 }
 
@@ -740,7 +876,7 @@ func (a *App) MigrateContext(
 		}
 	}()
 
-	return migration.Run(ctx, migrationsMap, a.container, opts...)
+	return migration.Run(ctx, migrationsMap, a, opts...)
 }
 
 // MustMigrate applies migrations and panics if they fail. It is intended for small programs
@@ -763,7 +899,7 @@ func (a *App) MigrationPlanContext(
 	migrationsMap map[int64]migration.Migrate,
 	opts ...migration.Option,
 ) (migration.PlanResult, error) {
-	return migration.Plan(ctx, migrationsMap, a.container, opts...)
+	return migration.Plan(ctx, migrationsMap, a, opts...)
 }
 
 // MigrationStatus returns migration status. It may initialize the state store.
@@ -777,12 +913,12 @@ func (a *App) MigrationStatusContext(
 	migrationsMap map[int64]migration.Migrate,
 	opts ...migration.Option,
 ) (migration.StatusResult, error) {
-	return migration.Status(ctx, migrationsMap, a.container, opts...)
+	return migration.Status(ctx, migrationsMap, a, opts...)
 }
 
 // Subscribe registers a handler for the given topic.
 //
-// If the subscriber is not initialized in the container, an error is logged and
+// If the subscriber is not initialized, an error is logged and
 // the subscription is not registered.
 func (a *App) Subscribe(topic string, handler SubscribeFunc) {
 	if topic == "" || handler == nil {
@@ -793,9 +929,9 @@ func (a *App) Subscribe(topic string, handler SubscribeFunc) {
 		return
 	}
 
-	if a.container == nil || a.container.GetSubscriber() == nil {
+	if a == nil || a.GetSubscriber() == nil {
 		if l := a.safeLogger(); l != nil {
-			l.Errorf("subscriber not initialized in the container")
+			l.Errorf("subscriber not initialized in the application")
 		}
 
 		return
@@ -808,6 +944,15 @@ func (a *App) Subscribe(topic string, handler SubscribeFunc) {
 			l.Errorf("%v", errSubscriberRegisterTooLate)
 		}
 		return
+	}
+	if mh, ok := a.PubSub().(*managedPubSubHandle); ok {
+		if err := mh.validateSubscriberConfig(); err != nil {
+			a.subConfigErr = errors.Join(a.subConfigErr, err)
+			if l := a.safeLogger(); l != nil {
+				l.Errorf("%v", err)
+			}
+			return
+		}
 	}
 	if a.subscriptionManager.subscriptions == nil {
 		a.subscriptionManager.subscriptions = make(map[string]SubscribeFunc)
@@ -850,19 +995,6 @@ func (a *App) UseMiddleware(middlewares ...PiMiddleware) {
 	reg.markDirtyLocked()
 }
 
-// UseMiddlewareWithContainer adds a middleware that has access to the container
-// and wraps the provided handler with the middleware logic.
-//
-// The `middleware` function receives the container and the handler, allowing
-// the middleware to modify the request processing flow.
-// Deprecated: UseMiddlewareWithContainer will be removed in a future release.
-// Please use the [*App.UseMiddleware] method that does not depend on the infra.
-func (a *App) UseMiddlewareWithContainer(middlewareHandler func(c *infra.Container, handler http.Handler) http.Handler) {
-	a.Use(func(h http.Handler) http.Handler {
-		return middlewareHandler(a.container, h)
-	})
-}
-
 // Group creates or gets a route group with the given prefix and returns it.
 // An optional callback can be provided for backward-compatible inline registration.
 func (a *App) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGroup {
@@ -873,8 +1005,8 @@ func (a *App) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGroup {
 	validCallbacks := make([]func(sub *RouteGroup), 0, len(fns))
 	for _, fn := range fns {
 		if fn == nil {
-			if a.container != nil && a.container.Logger != nil {
-				a.container.Logger.Error("route group callback cannot be nil")
+			if l := a.safeLogger(); l != nil {
+				l.Error("route group callback cannot be nil")
 			}
 			continue
 		}
@@ -966,7 +1098,7 @@ func (a *App) AddStaticFiles(endpoint, filePath string) {
 	endpoint = "/" + strings.TrimPrefix(endpoint, "/")
 
 	if _, err := os.Stat(filePath); err != nil {
-		a.container.Logger.Errorf("error in registering '%s' static endpoint, error: %v", endpoint, err)
+		a.Logger().Errorf("error in registering '%s' static endpoint, error: %v", endpoint, err)
 		return
 	}
 
@@ -975,22 +1107,7 @@ func (a *App) AddStaticFiles(endpoint, filePath string) {
 
 // OnStart registers a startup hook that will be executed when the application starts.
 // The hook function receives a Context that provides access to the application's
-// container, logger, and configuration. This is useful for performing initialization
-// tasks such as database connections, service registrations, or other setup operations
-// that need to be completed before the application begins serving requests.
-//
-// Example usage:
-//
-//	app := pi.New()
-//	app.OnStart(func(ctx *pi.Context) error {
-//	    // Initialize database connection
-//	    db, err := database.Connect(ctx.Config.Get("DB_URL"))
-//	    if err != nil {
-//	        return err
-//	    }
-//	    ctx.Container.SQL = db
-//	    return nil
-//	})
+// configured datasources, adapters, logger, and telemetry after owned resources have started.
 func (a *App) OnStart(hook func(ctx *Context) error) {
 	a.runtimeMu.Lock()
 	defer a.runtimeMu.Unlock()

@@ -11,27 +11,49 @@ import (
 
 const healthCheckTimeout = 5 * time.Second
 
-// Health returns the health status of the SQS connection.
-func (c *Client) Health() datasource.Health {
+// HealthCheckContext performs a context-aware health check of the SQS connection.
+func (c *Client) HealthCheckContext(ctx context.Context) datasource.Health {
+	if c == nil {
+		return datasource.Health{Status: datasource.StatusDown}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var region string
+	if c.cfg != nil {
+		region = c.cfg.Region
+	}
+
 	health := datasource.Health{
 		Details: map[string]any{
 			"backend": "SQS",
-			"region":  c.cfg.Region,
+			"region":  region,
 		},
 	}
 
-	if c.conn == nil {
+	conn := c.getConn()
+	if conn == nil {
 		health.Status = datasource.StatusDown
 		health.Details["error"] = "client not connected"
 
 		return health
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
-	defer cancel()
+	if err := ctx.Err(); err != nil {
+		health.Status = datasource.StatusDown
+		health.Details["error"] = err.Error()
+		return health
+	}
+
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, healthCheckTimeout)
+		defer cancel()
+	}
 
 	// Use ListQueues with MaxResults=1 as a lightweight health check
-	_, err := c.conn.ListQueues(ctx, &sqs.ListQueuesInput{
+	_, err := conn.ListQueues(ctx, &sqs.ListQueuesInput{
 		MaxResults: aws.Int32(1),
 	})
 	if err != nil {
@@ -44,4 +66,11 @@ func (c *Client) Health() datasource.Health {
 	health.Status = datasource.StatusUp
 
 	return health
+}
+
+// Health returns the health status of the SQS connection.
+func (c *Client) Health() datasource.Health {
+	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
+	defer cancel()
+	return c.HealthCheckContext(ctx)
 }

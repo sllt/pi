@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/metrics"
 )
 
@@ -25,25 +24,26 @@ func newMetricServer(port int) *metricServer {
 	return &metricServer{port: port}
 }
 
-func (m *metricServer) Run(c *infra.Container) error {
-	err := m.start(c, func(err error) {
-		c.Errorf("error while listening to metrics server, err: %v", err)
+func (m *metricServer) Run(rt *runtimeKernel) error {
+	err := m.start(rt, func(err error) {
+		rt.getLogger().Errorf("error while listening to metrics server, err: %v", err)
 	})
 	if err != nil {
-		c.Errorf("error while starting metrics server, err: %v", err)
+		rt.getLogger().Errorf("error while starting metrics server, err: %v", err)
 	}
 
 	return err
 }
 
-func (m *metricServer) start(c *infra.Container, onError func(error)) error {
+func (m *metricServer) start(rt *runtimeKernel, onError func(error)) error {
 	if m != nil {
-		c.Logf("Starting metrics server on port: %d", m.port)
+		logger := rt.getLogger()
+		logger.Logf("Starting metrics server on port: %d", m.port)
 
 		addr := m.listenAddress(m.port)
 		h := m.handler
 		if h == nil {
-			h = metrics.GetHandler(c.Metrics())
+			h = metrics.GetHandler(rt.getMetrics())
 		}
 		m.srv = &http.Server{
 			Addr:              addr,
@@ -58,7 +58,7 @@ func (m *metricServer) start(c *infra.Container, onError func(error)) error {
 		listener := &idempotentListener{Listener: rawListener}
 		m.listener.Store(listener)
 		m.boundTo(listener.Addr())
-		c.Infof("Metrics server listening on %s", listener.Addr())
+		logger.Infof("Metrics server listening on %s", listener.Addr())
 
 		go func() {
 			if err := m.srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {

@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/sortkeys"
-
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 type PlanAction string
@@ -60,7 +58,7 @@ type migrationStateReader struct {
 
 // Plan builds a migration plan without executing user migration functions. It may
 // initialize the authoritative migration state store when it does not exist yet.
-func Plan(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Container, opts ...Option) (PlanResult, error) {
+func Plan(ctx context.Context, migrationsMap map[int64]Migrate, target Target, opts ...Option) (PlanResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -80,7 +78,7 @@ func Plan(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Contain
 	}
 	sortkeys.Int64s(keys)
 
-	state, err := currentMigrationState(ctx, c, migrationsMap)
+	state, err := currentMigrationState(ctx, target, migrationsMap)
 	if err != nil {
 		return plan, err
 	}
@@ -115,7 +113,7 @@ func Plan(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Contain
 
 // Status returns an applied/pending summary without executing user migration functions.
 // It may initialize the authoritative migration state store when it does not exist yet.
-func Status(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Container, opts ...Option) (StatusResult, error) {
+func Status(ctx context.Context, migrationsMap map[int64]Migrate, target Target, opts ...Option) (StatusResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -134,7 +132,7 @@ func Status(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Conta
 	}
 	sortkeys.Int64s(keys)
 
-	state, err := currentMigrationState(ctx, c, migrationsMap)
+	state, err := currentMigrationState(ctx, target, migrationsMap)
 	if err != nil {
 		return StatusResult{}, err
 	}
@@ -165,37 +163,38 @@ func Status(ctx context.Context, migrationsMap map[int64]Migrate, c *infra.Conta
 	return status, nil
 }
 
-func currentMigrationState(ctx context.Context, c *infra.Container, migrationsMap map[int64]Migrate) (migrationState, error) {
+func currentMigrationState(ctx context.Context, target Target, migrationsMap map[int64]Migrate) (migrationState, error) {
 	if err := ctx.Err(); err != nil {
 		return migrationState{}, err
 	}
 
-	_, mg, ok := getMigrator(c)
+	deps, _ := resolveDeps(target)
+	_, mg, ok := getMigrator(deps)
 	if !ok {
 		return migrationState{}, ErrNoDatasource
 	}
 
-	reader := selectMigrationStateReader(c, mg)
-	if err := reader.migrator.checkAndCreateMigrationTable(ctx, c); err != nil {
+	reader := selectMigrationStateReader(deps, mg)
+	if err := reader.migrator.checkAndCreateMigrationTable(ctx, deps); err != nil {
 		return migrationState{}, fmt.Errorf("migration: ensure state store: %w", err)
 	}
 
-	return readMigrationState(ctx, c, reader, migrationsMap)
+	return readMigrationState(ctx, deps, reader, migrationsMap)
 }
 
-func selectMigrationStateReader(c *infra.Container, fallback migrator) migrationStateReader {
+func selectMigrationStateReader(deps *Deps, fallback migrator) migrationStateReader {
 	base := &Datasource{}
-	if c != nil && !isNil(c.SQL) {
+	if deps != nil && !isNil(deps.SQL) {
 		return migrationStateReader{
-			migrator: (&sqlDS{SQL: c.SQL}).apply(base),
+			migrator: (&sqlDS{SQL: deps.SQL}).apply(base),
 			source:   StateSourceSQL,
 			precise:  true,
 		}
 	}
 
-	if c != nil && !isNil(c.Redis) {
+	if deps != nil && !isNil(deps.Redis) {
 		return migrationStateReader{
-			migrator: redisDS{Redis: c.Redis}.apply(base),
+			migrator: redisDS{Redis: deps.Redis}.apply(base),
 			source:   StateSourceRedis,
 			precise:  true,
 		}
@@ -210,18 +209,18 @@ func selectMigrationStateReader(c *infra.Container, fallback migrator) migration
 
 func readMigrationState(
 	ctx context.Context,
-	c *infra.Container,
+	deps *Deps,
 	reader migrationStateReader,
 	migrationsMap map[int64]Migrate,
 ) (migrationState, error) {
-	records, err := reader.migrator.listApplied(ctx, c)
+	records, err := reader.migrator.listApplied(ctx, deps)
 	if err != nil {
 		return migrationState{}, fmt.Errorf("migration: list applied state: %w", err)
 	}
 
 	lastMigration := maxRecordVersion(records)
 	if !reader.precise {
-		lastMigration, err = reader.migrator.getLastMigration(ctx, c)
+		lastMigration, err = reader.migrator.getLastMigration(ctx, deps)
 		if err != nil {
 			return migrationState{}, fmt.Errorf("migration: read legacy migration state: %w", err)
 		}

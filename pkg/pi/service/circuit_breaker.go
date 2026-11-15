@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // circuitBreaker states.
@@ -80,8 +82,10 @@ func NewCircuitBreakerWithContext(ctx context.Context, config CircuitBreakerConf
 	}
 
 	if httpSvc := extractHTTPService(h); httpSvc != nil {
+		httpSvc.mu.RLock()
 		cb.metrics = httpSvc.Metrics
 		cb.serviceName = httpSvc.name
+		httpSvc.mu.RUnlock()
 	}
 
 	if cb.interval <= 0 {
@@ -159,15 +163,21 @@ func (cb *circuitBreaker) healthCheck(ctx context.Context) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if httpSvc := extractHTTPService(cb.HTTP); httpSvc != nil && httpSvc.healthEndpoint != "" {
-		resp := cb.HTTP.getHealthResponseForEndpoint(ctx, httpSvc.healthEndpoint, httpSvc.healthTimeout)
+	if httpSvc := extractHTTPService(cb.HTTP); httpSvc != nil {
+		httpSvc.mu.RLock()
+		endpoint := httpSvc.healthEndpoint
+		timeout := httpSvc.healthTimeout
+		httpSvc.mu.RUnlock()
+		if endpoint != "" {
+			resp := checkEndpointHealth(ctx, cb.HTTP, endpoint, timeout)
 
-		return resp.Status == serviceUp
+			return resp != nil && resp.Status == serviceUp
+		}
 	}
 
 	resp := cb.HTTP.HealthCheck(ctx)
 
-	return resp.Status == serviceUp
+	return resp != nil && resp.Status == serviceUp
 }
 
 // startHealthChecks initiates periodic health checks in a single cancelable goroutine.
@@ -240,7 +250,7 @@ func (cb *CircuitBreakerConfig) AddOption(h HTTP) HTTP {
 
 	breaker.mu.Lock()
 	if breaker.metrics != nil {
-		// Initialize the gauge to 0 (Closed) - gauge is already registered in infra.go
+		// Initialize the gauge to 0 (Closed) - gauge is registered by runtime observability
 		breaker.metrics.SetGauge("app_http_circuit_breaker_state", 0, "service", breaker.serviceName)
 	}
 	breaker.mu.Unlock()
@@ -392,4 +402,47 @@ func (cb *circuitBreaker) Put(ctx context.Context, path string, queryParams map[
 func (cb *circuitBreaker) Delete(ctx context.Context, path string, body []byte) (
 	*http.Response, error) {
 	return cb.doRequest(ctx, http.MethodDelete, path, nil, body, nil)
+}
+
+func (cb *circuitBreaker) UseServiceName(name string) {
+	if cb == nil || name == "" {
+		return
+	}
+	cb.mu.Lock()
+	if cb.serviceName == "" {
+		cb.serviceName = name
+	}
+	cb.mu.Unlock()
+	propagateServiceName(cb.HTTP, name)
+}
+
+func (cb *circuitBreaker) UseLogger(logger any) {
+	if cb == nil {
+		return
+	}
+	propagateLogger(cb.HTTP, logger)
+}
+
+func (cb *circuitBreaker) UseMetrics(metrics any) {
+	if cb == nil {
+		return
+	}
+	propagateMetrics(cb.HTTP, metrics)
+	m, ok := metrics.(Metrics)
+	if !ok || isNilServiceAny(m) {
+		return
+	}
+	cb.mu.Lock()
+	if isNilServiceAny(cb.metrics) {
+		cb.metrics = m
+		cb.metrics.SetGauge("app_http_circuit_breaker_state", float64(cb.state), "service", cb.serviceName)
+	}
+	cb.mu.Unlock()
+}
+
+func (cb *circuitBreaker) UseTracerProvider(tp trace.TracerProvider) {
+	if cb == nil {
+		return
+	}
+	propagateTracerProvider(cb.HTTP, tp)
 }

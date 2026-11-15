@@ -361,8 +361,8 @@ func (a *App) ConfigureWebSocketHub(policy websocket.HubPolicy) {
 	a.bindWSManagerHooks()
 	if a.httpServer != nil && a.httpServer.ws != nil {
 		a.httpServer.ws.ConfigureHub(policy)
-	} else if a.container != nil && a.container.WSManager != nil {
-		a.container.WSManager.ConfigureHub(policy)
+	} else if hub := a.WebSocketHub(); hub != nil {
+		hub.ConfigureHub(policy)
 	}
 }
 
@@ -373,8 +373,8 @@ func (a *App) bindWSManagerHooks() {
 	var mgr *websocket.Manager
 	if a.httpServer != nil && a.httpServer.ws != nil {
 		mgr = a.httpServer.ws
-	} else if a.container != nil {
-		mgr = a.container.WSManager
+	} else {
+		mgr = a.WebSocketHub()
 	}
 	if mgr == nil {
 		return

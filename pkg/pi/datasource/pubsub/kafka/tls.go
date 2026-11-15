@@ -27,8 +27,14 @@ func createTLSConfig(tlsConf *TLSConfig) (*tls.Config, error) {
 		}
 
 		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("%w: invalid PEM certificate", errCACertFileRead)
+		}
 		tlsConfig.RootCAs = caCertPool
+	}
+
+	if (tlsConf.CertFile != "") != (tlsConf.KeyFile != "") {
+		return nil, fmt.Errorf("%w: cert file and key file must be configured together", errClientCertLoad)
 	}
 
 	if tlsConf.CertFile != "" && tlsConf.KeyFile != "" {
@@ -44,6 +50,10 @@ func createTLSConfig(tlsConf *TLSConfig) (*tls.Config, error) {
 }
 
 func validateTLSConfigs(conf *Config) error {
+	if (conf.TLS.CertFile != "") != (conf.TLS.KeyFile != "") {
+		return fmt.Errorf("%w: cert file and key file must be configured together", errClientCertLoad)
+	}
+
 	protocol := strings.ToUpper(conf.SecurityProtocol)
 
 	if protocol == protocolSSL || protocol == protocolSASLSSL {

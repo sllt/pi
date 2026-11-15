@@ -1,13 +1,13 @@
 package pi
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 
 	cmd2 "github.com/sllt/pi/pkg/pi/cmd"
 	"github.com/sllt/pi/pkg/pi/cmd/terminal"
-	"github.com/sllt/pi/pkg/pi/infra"
 )
 
 type cmd struct {
@@ -34,30 +34,44 @@ func (e ErrCommandNotFound) Error() string {
 	return fmt.Sprintf("'%s' is not a valid command.", e.Command)
 }
 
-func (cmd *cmd) Run(c *infra.Container) {
+func (cmd *cmd) Run(rt *runtimeKernel) {
+	_ = cmd.RunContext(context.Background(), rt)
+}
+
+func (cmd *cmd) RunContext(ctx context.Context, rt *runtimeKernel) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	args := os.Args[1:] // First one is command itself
 	subCommand, showHelp, firstArg := parseArgs(args)
 
 	if showHelp && subCommand == "" {
 		cmd.printHelp()
-		return
+		return nil
 	}
 
 	r := cmd.handler(subCommand)
-	ctx := newCMDContext(&cmd2.Responder{}, cmd2.NewRequest(args), c, cmd.out)
+	piCtx := newCMDContext(&cmd2.Responder{}, cmd2.NewRequestWithContext(ctx, args), rt, cmd.out)
 
 	commandForError := getCommandForError(subCommand, firstArg)
 
-	if cmd.noCommandResponse(r, ctx, commandForError) {
-		return
+	if err := cmd.noCommandResponse(r, piCtx, commandForError); err != nil {
+		return err
 	}
 
 	if showHelp {
-		cmd.out.Println(r.help)
-		return
+		if cmd.out != nil {
+			cmd.out.Println(r.help)
+		} else {
+			fmt.Println(r.help)
+		}
+		return nil
 	}
 
-	ctx.responder.Respond(r.handler(ctx))
+	data, err := r.handler(piCtx)
+	piCtx.responder.Respond(data, err)
+	return err
 }
 
 // parseArgs parses command line arguments and returns subCommand, showHelp flag, and firstArg.
@@ -99,23 +113,25 @@ func getCommandForError(subCommand, firstArg string) string {
 	return commandForError
 }
 
-// noCommandResponse responds with error when no route with the given subcommand is not found or handler is nil.
-func (cmd *cmd) noCommandResponse(r *route, ctx *Context, subCommand string) bool {
+// noCommandResponse responds with error when no route with the given subcommand is found or handler is nil.
+func (cmd *cmd) noCommandResponse(r *route, ctx *Context, subCommand string) error {
 	if r == nil {
-		ctx.responder.Respond(nil, ErrCommandNotFound{Command: strings.TrimSpace(subCommand)})
+		err := ErrCommandNotFound{Command: strings.TrimSpace(subCommand)}
+		ctx.responder.Respond(nil, err)
 		fmt.Println()
 		cmd.printHelp()
 
-		return true
+		return err
 	}
 
 	if r.handler == nil {
-		ctx.responder.Respond(nil, ErrCommandNotFound{Command: strings.TrimSpace(subCommand)})
+		err := ErrCommandNotFound{Command: strings.TrimSpace(subCommand)}
+		ctx.responder.Respond(nil, err)
 
-		return true
+		return err
 	}
 
-	return false
+	return nil
 }
 
 func (cmd *cmd) handler(path string) *route {

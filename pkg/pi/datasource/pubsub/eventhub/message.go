@@ -27,12 +27,16 @@ func (a *Message) CommitContext(ctx context.Context) error {
 	if a.processor != nil {
 		err := a.processor.UpdateCheckpoint(ctx, a.event, nil)
 		if err != nil {
-			a.logger.Errorf("failed to acknowledge event with eventID %v: %v", a.event.MessageID, err)
+			if a.logger != nil {
+				a.logger.Errorf("failed to acknowledge event with eventID %v: %v", a.event.MessageID, err)
+			}
 			return err
 		}
 
-		a.logger.Debugf("Message committed via processor checkpoint (MessageID: %v)", a.event.MessageID)
-	} else {
+		if a.logger != nil {
+			a.logger.Debugf("Message committed via processor checkpoint (MessageID: %v)", a.event.MessageID)
+		}
+	} else if a.logger != nil {
 		a.logger.Debugf("Message acknowledged (direct read mode)")
 	}
 	return nil

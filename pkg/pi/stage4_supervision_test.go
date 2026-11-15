@@ -43,8 +43,8 @@ import (
 
 	"github.com/sllt/pi/pkg/pi/datasource"
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
+	piRedis "github.com/sllt/pi/pkg/pi/datasource/redis"
 	"github.com/sllt/pi/pkg/pi/http/middleware"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/metrics"
 	"github.com/sllt/pi/pkg/pi/service"
@@ -103,7 +103,7 @@ func TestStage4_WSServer_ActorHubSlowConsumerAndDrainBeforeSQLClose(t *testing.T
 			}
 			<-releaseMidTurn
 			// Must succeed during Phase B drain BEFORE ManagedSQL closes!
-			_, execErr := c.SQL.ExecContext(c.Context, "INSERT INTO ws_events(note) VALUES (?)", "completed-before-sql-close")
+			_, execErr := c.SQL().ExecContext(c.Context, "INSERT INTO ws_events(note) VALUES (?)", "completed-before-sql-close")
 			if execErr != nil {
 				sqlInsertErr.Store(execErr)
 				return nil, execErr
@@ -117,7 +117,7 @@ func TestStage4_WSServer_ActorHubSlowConsumerAndDrainBeforeSQLClose(t *testing.T
 	defer cancel()
 	require.NoError(t, app.Start(ctx))
 
-	_, err = app.Container().SQL.ExecContext(ctx, "CREATE TABLE ws_events (id INTEGER PRIMARY KEY AUTOINCREMENT, note TEXT)")
+	_, err = app.SQL().ExecContext(ctx, "CREATE TABLE ws_events (id INTEGER PRIMARY KEY AUTOINCREMENT, note TEXT)")
 	require.NoError(t, err)
 
 	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", httpPort)
@@ -407,7 +407,7 @@ func TestStage4_OAuthRateLimiterCircuitBreaker_LifecycleCleanup(t *testing.T) {
 		require.NoError(t, app.Start(context.Background()))
 
 		// Trip downstream circuit breaker so periodic probe ticks hit upstream.
-		svc := app.Container().GetHTTPService("downstream")
+		svc := app.HTTPService("downstream")
 		for range 3 {
 			resp, _ := svc.Get(context.Background(), "/fail", nil)
 			if resp != nil && resp.Body != nil {
@@ -619,7 +619,7 @@ func (h *hungLegacyPubSubAdapter) Health() datasource.Health {
 }
 
 type ctxAwareRedisStub struct {
-	infra.Redis
+	piRedis.Client
 	sawDeadline atomic.Bool
 }
 
@@ -642,10 +642,10 @@ func TestStage4_DeepHealth_ContextTimeoutAndHungAdapterSingleflight(t *testing.T
 	hungPS := &hungLegacyPubSubAdapter{unblockCh: unblock}
 	ctxRedis := &ctxAwareRedisStub{}
 
-	c := &infra.Container{
-		PubSub: hungPS,
-		Redis:  ctxRedis,
-	}
+	c := newTestKernel(nil)
+	probeApp := &App{kernel: c}
+	require.NoError(t, probeApp.SetPubSub(hungPS, Borrowed))
+	require.NoError(t, probeApp.SetRedis(ctxRedis, Borrowed))
 
 	// Launch 12 concurrent deep health probes with a 60ms timeout.
 	// Context-aware Redis receives probeCtx deadline and cancels cleanly;
@@ -662,8 +662,8 @@ func TestStage4_DeepHealth_ContextTimeoutAndHungAdapterSingleflight(t *testing.T
 			defer wg.Done()
 			pCtx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 			defer cancel()
-			res, ok := c.Health(pCtx).(map[string]any)
-			require.True(t, ok)
+			res := c.Health(pCtx)
+			require.NotNil(t, res)
 			results[idx] = res
 		}()
 	}
@@ -1037,9 +1037,9 @@ type stage3IndependentCommitter struct {
 	nacked atomic.Int32
 }
 
-func (c *stage3IndependentCommitter) Commit()                            {}
+func (c *stage3IndependentCommitter) Commit()                             {}
 func (c *stage3IndependentCommitter) CommitContext(context.Context) error { return nil }
-func (c *stage3IndependentCommitter) Nack()                              { c.nacked.Add(1) }
+func (c *stage3IndependentCommitter) Nack()                               { c.nacked.Add(1) }
 
 type syncTestBuffer struct {
 	mu  sync.Mutex
@@ -1130,7 +1130,7 @@ func TestStage4_V050_07_FaultMatrixAndRealProcessSIGTERM(t *testing.T) {
 			<-c.Done()
 			// Ignore c.Done() past Stop's short timeout, then write to ManagedSQL before returning!
 			<-releaseStubborn
-			_, execErr := c.SQL.ExecContext(context.Background(), "INSERT INTO final_flush(tag) VALUES (?)", "flushed-after-stop-timeout")
+			_, execErr := c.SQL().ExecContext(context.Background(), "INSERT INTO final_flush(tag) VALUES (?)", "flushed-after-stop-timeout")
 			if execErr != nil {
 				lateSQLErr.Store(execErr)
 				return execErr
@@ -1139,7 +1139,7 @@ func TestStage4_V050_07_FaultMatrixAndRealProcessSIGTERM(t *testing.T) {
 		}))
 
 		require.NoError(t, app.Start(context.Background()))
-		_, err = app.Container().SQL.ExecContext(context.Background(), "CREATE TABLE final_flush (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT)")
+		_, err = app.SQL().ExecContext(context.Background(), "CREATE TABLE final_flush (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT)")
 		require.NoError(t, err)
 		<-workerRunning
 
@@ -1253,7 +1253,7 @@ func TestStage4_HelperProcessSIGTERM(t *testing.T) {
 	}
 
 	app.OnStart(func(c *Context) error {
-		_, execErr := c.SQL.ExecContext(c.Context, "CREATE TABLE IF NOT EXISTS sigterm_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT)")
+		_, execErr := c.SQL().ExecContext(c.Context, "CREATE TABLE IF NOT EXISTS sigterm_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT)")
 		return execErr
 	})
 
@@ -1267,12 +1267,12 @@ func TestStage4_HelperProcessSIGTERM(t *testing.T) {
 		}
 		_ = os.WriteFile(readyFile, []byte(fmt.Sprintf("127.0.0.1:%d", port)), 0o600)
 		<-c.Done()
-		_, execErr := c.SQL.ExecContext(context.Background(), "INSERT INTO sigterm_audit(source) VALUES (?)", "worker-shutdown-checkpoint")
+		_, execErr := c.SQL().ExecContext(context.Background(), "INSERT INTO sigterm_audit(source) VALUES (?)", "worker-shutdown-checkpoint")
 		return execErr
 	})
 
 	_ = app.AddCron("* * * * * *", "tick-audit", func(c *Context) error {
-		_, execErr := c.SQL.ExecContext(c.Context, "INSERT INTO sigterm_audit(source) VALUES (?)", "cron-tick")
+		_, execErr := c.SQL().ExecContext(c.Context, "INSERT INTO sigterm_audit(source) VALUES (?)", "cron-tick")
 		return execErr
 	}, CronJobOptions{Overlap: CronSkipIfRunning})
 
@@ -1619,8 +1619,8 @@ func TestStage4_PanicContainmentHelper(t *testing.T) {
 		app := buildStage3TestApp(t, client, Borrowed)
 		require.NoError(t, app.Start(context.Background()))
 
-		res, ok := app.Container().Health(context.Background()).(map[string]any)
-		require.True(t, ok)
+		res := app.Health(context.Background())
+		require.NotNil(t, res)
 		assert.Equal(t, "DEGRADED", res["status"])
 		psHealth, ok := res["pubsub"].(datasource.Health)
 		require.True(t, ok)
@@ -1706,7 +1706,7 @@ func TestStage4_HealthSamplerLifecycleBarrier_ProtectsOwnedResources(t *testing.
 	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancelProbe()
 	go func() {
-		_ = app.Container().Health(probeCtx)
+		_ = app.Health(probeCtx)
 		close(probeReturned)
 	}()
 
@@ -1725,8 +1725,8 @@ func TestStage4_HealthSamplerLifecycleBarrier_ProtectsOwnedResources(t *testing.
 	assert.False(t, samplerDone.Load())
 
 	// New health checks after shutdown started must be rejected immediately without spawning new samplers.
-	postStopRes, ok := app.Container().Health(context.Background()).(map[string]any)
-	require.True(t, ok)
+	postStopRes := app.Health(context.Background())
+	require.NotNil(t, postStopRes)
 	assert.Equal(t, "DEGRADED", postStopRes["status"])
 
 	close(release)
@@ -2085,7 +2085,7 @@ func TestSelfReview_OTel_HTTPRouteSQLOutboundServiceAndGRPCTraceparentIsolation(
 		handlerRecording.Store(sp.IsRecording())
 		handlerTraceID.Store(sp.SpanContext().TraceID().String())
 
-		if _, execErr := c.SQL.ExecContext(c.Context, "CREATE TABLE IF NOT EXISTS t_trace (id INTEGER PRIMARY KEY)"); execErr != nil {
+		if _, execErr := c.SQL().ExecContext(c.Context, "CREATE TABLE IF NOT EXISTS t_trace (id INTEGER PRIMARY KEY)"); execErr != nil {
 			return nil, execErr
 		}
 		resp, httpErr := c.GetHTTPService("downstream").Get(c.Context, "ping", nil)

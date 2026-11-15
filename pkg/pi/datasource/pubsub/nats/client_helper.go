@@ -10,19 +10,50 @@ import (
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
 )
 
+type noopNATSLogger struct{}
+
+func (noopNATSLogger) Debugf(string, ...any) {}
+func (noopNATSLogger) Debug(...any)          {}
+func (noopNATSLogger) Logf(string, ...any)   {}
+func (noopNATSLogger) Log(...any)            {}
+func (noopNATSLogger) Errorf(string, ...any) {}
+func (noopNATSLogger) Error(...any)          {}
+
 // establishConnection handles the actual connection process to NATS and sets up jStream.
 func (c *Client) establishConnection() error {
-	connManager := NewConnectionManager(c.Config, c.logger, c.natsConnector, c.jetStreamCreator)
+	logger := c.logger
+	if logger == nil {
+		logger = noopNATSLogger{}
+	}
+	connManager := NewConnectionManager(c.Config, logger, c.natsConnector, c.jetStreamCreator)
 	if err := connManager.Connect(); err != nil {
 		return err
 	}
 
-	js, err := connManager.jetStream()
-	if err != nil {
+	return c.finishEstablishConnection(connManager, logger)
+}
+
+func (c *Client) establishConnectionContext(ctx context.Context) error {
+	logger := c.logger
+	if logger == nil {
+		logger = noopNATSLogger{}
+	}
+	connManager := NewConnectionManager(c.Config, logger, c.natsConnector, c.jetStreamCreator)
+	if err := connManager.ConnectContext(ctx); err != nil {
 		return err
 	}
 
-	streamMgr := newStreamManager(js, c.logger)
+	return c.finishEstablishConnection(connManager, logger)
+}
+
+func (c *Client) finishEstablishConnection(connManager *ConnectionManager, logger pubsub.Logger) error {
+	js, err := connManager.jetStream()
+	if err != nil {
+		connManager.Close(context.Background())
+		return err
+	}
+
+	streamMgr := newStreamManager(js, logger)
 	subMgr := newSubscriptionManager(batchSize)
 
 	c.connMu.Lock()
@@ -31,7 +62,9 @@ func (c *Client) establishConnection() error {
 	c.subManager = subMgr
 	c.connMu.Unlock()
 
-	c.logger.Logf("connected to NATS server '%s'", c.Config.Server)
+	if c.logger != nil {
+		c.logger.Logf("connected to NATS server '%s'", redactServerURL(c.Config.Server))
+	}
 
 	return nil
 }
@@ -103,10 +136,15 @@ func (c *Client) retryConnectWithStop(stopCh <-chan struct{}) {
 		default:
 		}
 
-		c.logger.Debugf("connecting to NATS server at %v", c.Config.Server)
+		safeServer := redactServerURL(c.Config.Server)
+		if c.logger != nil {
+			c.logger.Debugf("connecting to NATS server at %v", safeServer)
+		}
 
 		if err := c.establishConnection(); err != nil {
-			c.logger.Errorf("failed to connect to NATS server at %v: %v", c.Config.Server, err)
+			if c.logger != nil {
+				c.logger.Errorf("failed to connect to NATS server at %v: %v", safeServer, err)
+			}
 
 			timer := time.NewTimer(defaultRetryTimeout)
 			select {
@@ -125,7 +163,9 @@ func (c *Client) retryConnectWithStop(stopCh <-chan struct{}) {
 
 func validateAndPrepare(config *Config, logger pubsub.Logger) error {
 	if err := validateConfigs(config); err != nil {
-		logger.Errorf("could not initialize NATS jStream: %v", err)
+		if logger != nil {
+			logger.Errorf("could not initialize NATS jStream: %v", err)
+		}
 
 		return err
 	}
@@ -143,7 +183,9 @@ func (c *Client) createOrUpdateConsumer(
 		DeliverPolicy: jetstream.DeliverNewPolicy,
 	})
 	if err != nil {
-		c.logger.Errorf("failed to create or update consumer: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("failed to create or update consumer: %v", err)
+		}
 		return nil, err
 	}
 
@@ -152,16 +194,20 @@ func (c *Client) createOrUpdateConsumer(
 
 func (c *Client) processMessages(ctx context.Context, cons jetstream.Consumer, subject string, handler messageHandler) {
 	for ctx.Err() == nil {
-		if err := c.fetchAndProcessMessages(ctx, cons, subject, handler); err != nil {
+		if err := c.fetchAndProcessMessages(ctx, cons, subject, handler); err != nil && c.logger != nil {
 			c.logger.Errorf("Error in message processing loop for subject %s: %v", subject, err)
 		}
 	}
 }
 
 func (c *Client) fetchAndProcessMessages(ctx context.Context, cons jetstream.Consumer, subject string, handler messageHandler) error {
-	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(c.Config.MaxWait))
+	maxWait := c.Config.MaxWait
+	if maxWait <= 0 {
+		maxWait = time.Second
+	}
+	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(maxWait))
 	if err != nil {
-		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) && c.logger != nil {
 			c.logger.Errorf("Error fetching messages for subject %s: %v", subject, err)
 		}
 
@@ -177,13 +223,15 @@ func (c *Client) fetchAndProcessMessages(ctx context.Context, cons jetstream.Con
 
 func (c *Client) processFetchedMessages(ctx context.Context, msgs jetstream.MessageBatch, handler messageHandler, subject string) error {
 	for msg := range msgs.Messages() {
-		if err := c.handleMessage(ctx, msg, handler); err != nil {
+		if err := c.handleMessage(ctx, msg, handler); err != nil && c.logger != nil {
 			c.logger.Errorf("Error processing message: %v", err)
 		}
 	}
 
 	if err := msgs.Error(); err != nil {
-		c.logger.Errorf("Error in message batch for subject %s: %v", subject, err)
+		if c.logger != nil {
+			c.logger.Errorf("Error in message batch for subject %s: %v", subject, err)
+		}
 		return err
 	}
 
@@ -194,17 +242,23 @@ func (c *Client) handleMessage(ctx context.Context, msg jetstream.Msg, handler m
 	err := handler(ctx, msg)
 	if err == nil {
 		if ackErr := msg.Ack(); ackErr != nil {
-			c.logger.Errorf("Error sending ACK for message: %v", ackErr)
+			if c.logger != nil {
+				c.logger.Errorf("Error sending ACK for message: %v", ackErr)
+			}
 			return ackErr
 		}
 
 		return nil
 	}
 
-	c.logger.Errorf("Error handling message: %v", err)
+	if c.logger != nil {
+		c.logger.Errorf("Error handling message: %v", err)
+	}
 
 	if nakErr := msg.Nak(); nakErr != nil {
-		c.logger.Debugf("Error sending NAK for message: %v", nakErr)
+		if c.logger != nil {
+			c.logger.Debugf("Error sending NAK for message: %v", nakErr)
+		}
 
 		return nakErr
 	}
@@ -260,7 +314,7 @@ func collectMessages(ctx context.Context, cons jetstream.Consumer, limit int,
 		}
 	}
 
-	if strings.Contains(cons.CachedInfo().Config.FilterSubject, piNatsStreamName) && len(result) == 0 {
+	if strings.Contains(cons.CachedInfo().Config.FilterSubject, piNatsStreamName) && len(result) == 0 && logger != nil {
 		logger.Debugf("No migration records found in stream %s", config.Stream.Stream)
 	}
 
@@ -275,7 +329,9 @@ func fetchBatch(cons jetstream.Consumer, fetchSize int,
 			return nil, nil
 		}
 
-		logger.Errorf("Error fetching messages: %v", err)
+		if logger != nil {
+			logger.Errorf("Error fetching messages: %v", err)
+		}
 
 		return nil, err
 	}
@@ -299,7 +355,7 @@ func processBatch(ctx context.Context, msgs jetstream.MessageBatch,
 		*result = append(*result, msg.Data()...)
 
 		// Acknowledge the message
-		if err := msg.Ack(); err != nil {
+		if err := msg.Ack(); err != nil && logger != nil {
 			logger.Debugf("Error acknowledging message: %v", err)
 		}
 
@@ -371,7 +427,9 @@ func (c *Client) createConsumer(ctx context.Context, js jetstream.JetStream, str
 		AckWait:       c.Config.MaxWait,
 	})
 	if err != nil {
-		c.logger.Errorf("failed to create consumer for query: %v", err)
+		if c.logger != nil {
+			c.logger.Errorf("failed to create consumer for query: %v", err)
+		}
 
 		return nil, err
 	}
@@ -385,7 +443,7 @@ func (c *Client) cleanupConsumer(js jetstream.JetStream, streamName string, cons
 
 	info, err := cons.Info(deleteCtx)
 	if err == nil {
-		if err := js.DeleteConsumer(deleteCtx, streamName, info.Name); err != nil {
+		if err := js.DeleteConsumer(deleteCtx, streamName, info.Name); err != nil && c.logger != nil {
 			c.logger.Debugf("failed to delete temporary consumer: %v", err)
 		}
 	}

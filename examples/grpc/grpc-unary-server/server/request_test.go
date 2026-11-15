@@ -111,11 +111,10 @@ func TestHelloRequestWrapper_Bind(t *testing.T) {
 		}
 
 		// Test Bind method with non-pointer (should fail)
-		var target HelloRequest
-		err := req.Bind(target)
+		err := req.Bind(struct{}{})
 
 		assert.Error(t, err, "Bind should fail with non-pointer")
-		assert.Contains(t, err.Error(), "expected a pointer", "Error message should indicate pointer expected")
+		assert.Contains(t, err.Error(), "non-nil matching message pointers", "Error message should indicate pointer expected")
 	})
 
 	t.Run("BindWithNilPointer", func(t *testing.T) {
@@ -128,7 +127,7 @@ func TestHelloRequestWrapper_Bind(t *testing.T) {
 		err := req.Bind(nil)
 
 		assert.Error(t, err, "Bind should fail with nil pointer")
-		assert.Contains(t, err.Error(), "expected a pointer", "Error message should indicate pointer expected")
+		assert.Contains(t, err.Error(), "non-nil matching message pointers", "Error message should indicate pointer expected")
 	})
 
 	t.Run("BindWithEmptyRequest", func(t *testing.T) {

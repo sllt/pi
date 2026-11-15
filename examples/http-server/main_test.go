@@ -1,21 +1,6 @@
 package main
 
-// This test file demonstrates how to test handlers in Pi.
-//
-// Key Concepts:
-// 1. Pi wraps http.Request using piHTTP.NewRequest(req)
-// 2. Handlers receive pi.Context which contains the wrapped request
-// 3. Use mux.SetURLVars() to set path parameters for ctx.PathParam()
-// 4. Each HTTP service registered with WithMockHTTPService gets its own separate mock instance
-// 5. Expectations set on one service do NOT affect other services
-// 6. Always use mocks.HTTPServices["serviceName"] when you have multiple services
-//
-// For detailed documentation, see:
-// - https://github.com/sllt/pi/docs/references/testing (Official Pi Testing Guide)
-// - https://github.com/sllt/pi/docs/references/context (Pi Context Documentation)
-
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,9 +20,11 @@ import (
 	"github.com/sllt/pi/pkg/pi"
 	"github.com/sllt/pi/pkg/pi/config"
 	"github.com/sllt/pi/pkg/pi/datasource/redis"
+	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/service"
+	"github.com/sllt/pi/pkg/pi/testkit"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
@@ -75,21 +62,18 @@ func TestIntegration_SimpleAPIServer(t *testing.T) {
 
 		c := http.Client{}
 		resp, err := c.Do(req)
+		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
 
 		var data = struct {
 			Data any `json:"data"`
 		}{}
 
 		b, err := io.ReadAll(resp.Body)
-
 		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
 
 		_ = json.Unmarshal(b, &data)
 
 		assert.Equal(t, tc.body, data.Data, "TEST[%d], Failed.\n%s", i, tc.desc)
-
-		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
-
 		assert.Equal(t, http.StatusOK, resp.StatusCode, "TEST[%d], Failed.\n%s", i, tc.desc)
 
 		resp.Body.Close()
@@ -140,21 +124,18 @@ func TestIntegration_SimpleAPIServer_Errors(t *testing.T) {
 
 		c := http.Client{}
 		resp, err := c.Do(req)
+		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
 
 		var data = struct {
 			Error any `json:"error"`
 		}{}
 
 		b, err := io.ReadAll(resp.Body)
-
 		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
 
 		_ = json.Unmarshal(b, &data)
 
 		assert.Equal(t, tc.body, data.Error, "TEST[%d], Failed.\n%s", i, tc.desc)
-
-		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
-
 		assert.Equal(t, tc.statusCode, resp.StatusCode, "TEST[%d], Failed.\n%s", i, tc.desc)
 
 		resp.Body.Close()
@@ -178,8 +159,8 @@ func TestIntegration_SimpleAPIServer_Health(t *testing.T) {
 		path       string
 		statusCode int
 	}{
-		{"health handler", "/.well-known/health", http.StatusOK}, // Health check should be added by the framework.
-		{"favicon handler", "/favicon.ico", http.StatusOK},       // Favicon should be added by the framework.
+		{"health handler", "/.well-known/health", http.StatusOK},
+		{"favicon handler", "/favicon.ico", http.StatusOK},
 	}
 
 	for i, tc := range tests {
@@ -190,134 +171,63 @@ func TestIntegration_SimpleAPIServer_Health(t *testing.T) {
 		resp, err := c.Do(req)
 
 		require.NoError(t, err, "TEST[%d], Failed.\n%s", i, tc.desc)
-
 		assert.Equal(t, tc.statusCode, resp.StatusCode, "TEST[%d], Failed.\n%s", i, tc.desc)
 	}
 }
 
 func TestRedisHandler(t *testing.T) {
-	metricsPort := testutil.GetFreePort(t)
-	httpPort := testutil.GetFreePort(t)
-
-	t.Setenv("METRICS_PORT", strconv.Itoa(metricsPort))
-	t.Setenv("HTTP_PORT", strconv.Itoa(httpPort))
-
-	a := pi.New()
 	logger := logging.NewLogger(logging.DEBUG)
 	redisClient, mock := redismock.NewClientMock()
 
-	rc := redis.NewClient(config.NewMockConfig(map[string]string{"REDIS_HOST": "localhost", "REDIS_PORT": "2001"}), logger, a.Metrics())
+	rc := redis.NewClient(config.NewMockConfig(map[string]string{"REDIS_HOST": "localhost", "REDIS_PORT": "2001"}), logger, nil)
 	rc.Client = redisClient
 
 	mock.ExpectGet("test").SetErr(testutil.CustomError{ErrorMessage: "redis get error"})
 
-	ctx := &pi.Context{Context: context.Background(),
-		Request: nil, Container: &infra.Container{Logger: logger, Redis: rc}}
+	app := testkit.New(t,
+		pi.WithConfig(map[string]string{"HTTP_ENABLED": "false", "GRPC_ENABLED": "false"}),
+		pi.WithLogger(logger),
+		pi.WithRedis(rc, pi.Borrowed),
+	)
 
+	ctx := app.NewContext(t.Context())
 	resp, err := RedisHandler(ctx)
 
 	assert.Nil(t, resp)
 	require.Error(t, err)
 }
 
-// MockRequest implements the Request interface for testing
-type MockRequest struct {
-	*http.Request
-	params map[string]string
-}
-
-func (m *MockRequest) HostName() string {
-	if m.Request != nil {
-		return m.Request.Host
-	}
-
-	return ""
-}
-
-func (m *MockRequest) Params(s string) []string {
-	if m.Request != nil {
-		return m.Request.URL.Query()[s]
-	}
-
-	return nil
-}
-
-func NewMockRequest(req *http.Request) *MockRequest {
-	// Parse query parameters
-	queryParams := make(map[string]string)
-	for k, v := range req.URL.Query() {
-		if len(v) > 0 {
-			queryParams[k] = v[0]
-		}
-	}
-
-	return &MockRequest{
-		Request: req,
-		params:  queryParams,
-	}
-}
-
-// Param returns URL query parameters
-func (m *MockRequest) Param(key string) string {
-	return m.params[key]
-}
-
-// PathParam returns URL path parameters
-func (m *MockRequest) PathParam(key string) string {
-	return ""
-}
-
-// Bind implements the Bind method required by the Request interface
-func (m *MockRequest) Bind(i any) error {
-	return nil
-}
-
-// createTestContext sets up a Pi context for unit tests with a given URL and optional mock container.
-// This demonstrates how Pi wraps http.Request into pi.Request.
-//
-// Note: For path parameters, use mux.SetURLVars() before calling this function.
-// See TestHandler_WithPathParams example for usage with path parameters.
-func createTestContext(method, url string, mockContainer *infra.Container) *pi.Context {
-	// Create standard HTTP request
+func createTestContext(t *testing.T, method, url string, opts ...pi.Option) *pi.Context {
+	t.Helper()
 	req := httptest.NewRequest(method, url, nil)
 	req.Header.Set("Content-Type", "application/json")
 
-	// Wrap with Pi's Request wrapper (this is how Pi wraps requests)
-	piReq := piHTTP.NewRequest(req)
-
-	var c *infra.Container
-	if mockContainer != nil {
-		c = mockContainer
-	} else {
-		c = &infra.Container{Logger: logging.NewLogger(logging.DEBUG)}
+	baseOpts := []pi.Option{
+		pi.WithConfig(map[string]string{"HTTP_ENABLED": "false", "GRPC_ENABLED": "false"}),
+		pi.WithLogger(logging.NewLogger(logging.DEBUG)),
 	}
+	baseOpts = append(baseOpts, opts...)
+	app := testkit.New(t, baseOpts...)
 
-	logger := c.Logger
-
-	return &pi.Context{
-		Context:       req.Context(),
-		Request:       piReq,
-		Container:     c,
-		ContextLogger: *logging.NewContextLogger(req.Context(), logger),
-	}
+	ctx := app.NewContext(req.Context())
+	ctx.Request = piHTTP.NewRequest(req)
+	return ctx
 }
 
 func TestHelloHandler(t *testing.T) {
-	// With name parameter
-	ctx := createTestContext(http.MethodGet, "/hello?name=test", nil)
+	ctx := createTestContext(t, http.MethodGet, "/hello?name=test")
 	resp, err := HelloHandler(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, "Hello test!", resp)
 
-	// Without name parameter
-	ctx = createTestContext(http.MethodGet, "/hello", nil)
+	ctx = createTestContext(t, http.MethodGet, "/hello")
 	resp, err = HelloHandler(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, "Hello World!", resp)
 }
 
 func TestErrorHandler(t *testing.T) {
-	ctx := createTestContext(http.MethodGet, "/error", nil)
+	ctx := createTestContext(t, http.MethodGet, "/error")
 
 	resp, err := ErrorHandler(ctx)
 	assert.Nil(t, resp)
@@ -326,13 +236,13 @@ func TestErrorHandler(t *testing.T) {
 }
 
 func TestMysqlHandler(t *testing.T) {
-	mockContainer, mocks := infra.NewMockContainer(t)
+	sqlDB, sqlMock, _ := piSQL.NewSQLMocks(t)
+	defer sqlDB.Close()
 
-	// Setup SQL mock to return 4
-	mocks.SQL.ExpectQuery("select 2+2").
-		WillReturnRows(mocks.SQL.NewRows([]string{"value"}).AddRow(4))
+	sqlMock.ExpectQuery("select 2\\+2").
+		WillReturnRows(sqlMock.NewRows([]string{"value"}).AddRow(4))
 
-	ctx := createTestContext(http.MethodGet, "/mysql", mockContainer)
+	ctx := createTestContext(t, http.MethodGet, "/mysql", pi.WithSQL(sqlDB, pi.Borrowed))
 
 	resp, err := MysqlHandler(ctx)
 	assert.NoError(t, err)
@@ -340,41 +250,33 @@ func TestMysqlHandler(t *testing.T) {
 }
 
 func TestTraceHandler(t *testing.T) {
-	// Register HTTP service - each service gets its own separate mock instance
-	mockContainer, mocks := infra.NewMockContainer(t, infra.WithMockHTTPService("anotherService"))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-	// Redis expectations
-	mocks.Redis.EXPECT().Ping(gomock.Any()).Return(nil).Times(5)
+	redisClient, redisMock := redismock.NewClientMock()
+	redisMock.MatchExpectationsInOrder(false)
+	for range 5 {
+		redisMock.ExpectPing().SetVal("PONG")
+	}
+	rc := &redis.Redis{Client: redisClient}
 
-	// Create the test context FIRST
-	ctx := createTestContext(http.MethodGet, "/trace", mockContainer)
-
-	// TraceHandler calls Trace() twice, which modifies ctx.Context each time:
-	// 1. defer c.Trace("traceHandler").End() - modifies ctx.Context
-	// 2. span2 := c.Trace("some-sample-work") - modifies ctx.Context again
-	// We need to simulate this exact sequence to get the actual context that will be used
-	defer ctx.Trace("traceHandler").End()  // First Trace() call (same as TraceHandler)
-	span2 := ctx.Trace("some-sample-work") // Second Trace() call (same as TraceHandler)
-	defer span2.End()
-
-	// HTTP service mock - use mocks.HTTPServices["serviceName"] to access the specific service
-	// Important: Use the map keyed by service name, not mocks.HTTPService (singular)
+	mockHTTP := service.NewMockHTTP(ctrl)
 	mockResp := &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(strings.NewReader(`{"data":"mock data"}`)),
 	}
+	mockHTTP.EXPECT().Get(gomock.Any(), "redis", nil).Return(mockResp, nil)
 
-	// Now ctx.Context has been modified by both Trace() calls, matching what TraceHandler does
-	// TraceHandler calls: c.GetHTTPService("anotherService").Get(c, "redis", nil)
-	// When passing 'c' (*pi.Context) to Get(), Go uses the embedded context.Context
-	// which is now the modified context after both Trace() calls
-	mocks.HTTPServices["anotherService"].EXPECT().Get(
-		ctx.Context, // Use the context after both Trace() calls (use gomock.Any to avoid this!)
-		"redis",
-		nil, // queryParams is nil in TraceHandler
-	).Return(mockResp, nil)
+	ctx := createTestContext(
+		t,
+		http.MethodGet,
+		"/trace",
+		pi.WithRedis(rc, pi.Borrowed),
+		pi.WithHTTPService("anotherService", mockHTTP, pi.Borrowed),
+	)
 
 	resp, err := TraceHandler(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, "mock data", resp)
+	assert.NoError(t, redisMock.ExpectationsWereMet())
 }

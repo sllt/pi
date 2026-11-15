@@ -19,8 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sllt/pi/pkg/pi/config"
+	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/migration"
 	"github.com/sllt/pi/pkg/pi/testutil"
@@ -189,7 +189,7 @@ func TestPi_ServerRoutes(t *testing.T) {
 	})
 
 	// Compile the registry so routes are registered on the chi router
-	g.httpServer.registry.compile(g.httpServer.router.Mux(), g.container, 0)
+	g.httpServer.registry.compile(g.httpServer.router.Mux(), g.kernel, 0)
 
 	for i, tc := range testCases {
 		w := httptest.NewRecorder()
@@ -257,7 +257,7 @@ func Test_AddHTTPService(t *testing.T) {
 
 	g.AddHTTPService("test-service", server.URL)
 
-	resp, _ := g.container.GetHTTPService("test-service").
+	resp, _ := g.HTTPService("test-service").
 		Get(t.Context(), "test", nil)
 
 	defer resp.Body.Close()
@@ -305,7 +305,7 @@ func TestApp_AddAndGetHTTPService(t *testing.T) {
 
 	app.AddHTTPService("test-service", "http://test")
 
-	svc := app.container.GetHTTPService("test-service")
+	svc := app.HTTPService("test-service")
 
 	assert.NotNil(t, svc)
 }
@@ -328,8 +328,7 @@ func TestApp_MigratePanicRecovery(t *testing.T) {
 		testutil.NewServerConfigs(t)
 
 		app := New()
-
-		app.container.PubSub = &infra.MockPubSub{}
+		require.NoError(t, app.SetPubSub(mockSubscriber{}, Borrowed))
 
 		_, err := app.Migrate(map[int64]migration.Migrate{1: {UP: func(_ migration.Datasource) error {
 			panic("test panic")
@@ -366,7 +365,7 @@ func Test_addRoute(t *testing.T) {
 
 		// Add the "log" sub-command with its handler and description.
 		a.SubCommand("log", func(c *Context) (any, error) {
-			c.Logger.Info("logging in handler")
+			c.Logger().Info("logging in handler")
 			return "handler called", nil
 		}, AddDescription("Logs a message"))
 
@@ -378,14 +377,15 @@ func Test_addRoute(t *testing.T) {
 	assert.Contains(t, logs, "handler called")
 }
 
-func TestEnableBasicAuthWithFunc(t *testing.T) {
+func TestEnableOAuthRejectsInvalidToken(t *testing.T) {
 	port := testutil.GetFreePort(t)
 
 	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
+	defer jwksServer.Close()
 
-	c := infra.NewContainer(config.NewMockConfig(nil))
+	c := newTestKernel(nil)
 
 	// Initialize a new App instance
 	a := &App{
@@ -394,12 +394,13 @@ func TestEnableBasicAuthWithFunc(t *testing.T) {
 			registry: newRouteRegistry(),
 			port:     port,
 		},
-		container: c,
+		kernel: c,
 	}
+	t.Cleanup(func() { _ = a.Stop(context.Background()) })
 
 	a.EnableOAuth(jwksServer.URL, 600)
 
-	a.httpServer.registry.compile(a.httpServer.router.Mux(), a.container, 0)
+	a.httpServer.registry.compile(a.httpServer.router.Mux(), a.kernel, 0)
 
 	a.httpServer.router.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Println(w, "Hello, world!")
@@ -426,7 +427,7 @@ func TestEnableBasicAuthWithFunc(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "TestEnableBasicAuthWithFunc Failed!")
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "TestEnableOAuthRejectsInvalidToken Failed!")
 }
 
 func encodeBasicAuthorization(t *testing.T, arg string) string {
@@ -446,7 +447,7 @@ func encodeBasicAuthorization(t *testing.T, arg string) string {
 func Test_EnableBasicAuth(t *testing.T) {
 	port := testutil.GetFreePort(t)
 
-	mockContainer, _ := infra.NewMockContainer(t)
+	mockKernel := newTestKernel(nil)
 
 	tests := []struct {
 		name               string
@@ -489,12 +490,12 @@ func Test_EnableBasicAuth(t *testing.T) {
 					registry: newRouteRegistry(),
 					port:     port,
 				},
-				container: mockContainer,
+				kernel: mockKernel,
 			}
 
 			a.EnableBasicAuth(tt.args...)
 
-			a.httpServer.registry.compile(a.httpServer.router.Mux(), a.container, 0)
+			a.httpServer.registry.compile(a.httpServer.router.Mux(), a.kernel, 0)
 
 			a.httpServer.router.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				fmt.Fprintln(w, "Hello, world!")
@@ -526,7 +527,7 @@ func Test_EnableBasicAuth(t *testing.T) {
 func Test_EnableBasicAuthWithValidator(t *testing.T) {
 	port := testutil.GetFreePort(t)
 
-	mockContainer, _ := infra.NewMockContainer(t)
+	mockKernel := newTestKernel(nil)
 
 	tests := []struct {
 		name               string
@@ -559,16 +560,17 @@ func Test_EnableBasicAuthWithValidator(t *testing.T) {
 					registry: newRouteRegistry(),
 					port:     port,
 				},
-				container: mockContainer,
+				kernel: mockKernel,
 			}
 
-			validateFunc := func(_ *infra.Container, username string, password string) bool {
+			validateFunc := func(ctx *Context, username string, password string) bool {
+				assert.NotNil(t, ctx)
 				return username == "user" && password == "password"
 			}
 
 			a.EnableBasicAuthWithValidator(validateFunc)
 
-			a.httpServer.registry.compile(a.httpServer.router.Mux(), a.container, 0)
+			a.httpServer.registry.compile(a.httpServer.router.Mux(), a.kernel, 0)
 
 			a.httpServer.router.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				fmt.Fprintln(w, "Hello, world!")
@@ -666,11 +668,9 @@ func Test_initTracer(t *testing.T) {
 
 	for i, tc := range tests {
 		logMessage := testutil.StdoutOutputForFunc(func() {
-			mockContainer, _ := infra.NewMockContainer(t)
-
 			a := App{
-				Config:    tc.config,
-				container: mockContainer,
+				Config: tc.config,
+				kernel: newTestKernel(logging.NewLogger(logging.DEBUG)),
 			}
 			a.initTracer()
 		})
@@ -703,11 +703,9 @@ func Test_initTracer_invalidConfig(t *testing.T) {
 
 	for i, tc := range testErr {
 		logMessage := testutil.StderrOutputForFunc(func() {
-			mockContainer, _ := infra.NewMockContainer(t)
-
 			a := App{
-				Config:    tc.config,
-				container: mockContainer,
+				Config: tc.config,
+				kernel: newTestKernel(logging.NewLogger(logging.INFO)),
 			}
 			a.initTracer()
 		})
@@ -726,7 +724,7 @@ func Test_UseMiddleware(t *testing.T) {
 		})
 	}
 
-	c := infra.NewContainer(config.NewMockConfig(nil))
+	c := newTestKernel(nil)
 
 	app := &App{
 		httpServer: &httpServer{
@@ -734,7 +732,7 @@ func Test_UseMiddleware(t *testing.T) {
 			registry: newRouteRegistry(),
 			port:     port,
 		},
-		container: c,
+		kernel: c,
 		Config: config.NewMockConfig(map[string]string{
 			"REQUEST_TIMEOUT":       "5",
 			"SHUTDOWN_GRACE_PERIOD": "1s",
@@ -772,69 +770,48 @@ func Test_UseMiddleware(t *testing.T) {
 	assert.Equal(t, "applied", testHeaderValue, "Test_UseMiddleware Failed! header value mismatch.")
 }
 
-// Test the UseMiddlewareWithContainer function.
-func TestUseMiddlewareWithContainer(t *testing.T) {
+func TestUsePiMiddleware(t *testing.T) {
 	port := testutil.GetFreePort(t)
+	c := newTestKernel(nil)
 
-	// Initialize the mock container
-	mockContainer := infra.NewContainer(config.NewMockConfig(nil))
-
-	// Create a simple handler to test middleware functionality
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("Hello, world!"))
-	})
-
-	// Middleware to modify response and test container access
-	middleware := func(c *infra.Container, handler http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Ensure the container is passed correctly (for this test, we are just logging)
-			assert.NotNil(t, c, "Container should not be nil in the middleware")
-
-			// Continue with the handler execution
-			handler.ServeHTTP(w, r)
-		})
-	}
-
-	// Create a new App with a mock server
 	app := &App{
 		httpServer: &httpServer{
 			router:   piHTTP.NewRouter(),
 			registry: newRouteRegistry(),
 			port:     port,
 		},
-		container: mockContainer,
-		Config:    config.NewMockConfig(map[string]string{"REQUEST_TIMEOUT": "5"}),
+		kernel:         c,
+		httpRegistered: true,
+		Config:         config.NewMockConfig(map[string]string{"REQUEST_TIMEOUT": "5"}),
 	}
 
-	// Use the middleware with the container
-	app.UseMiddlewareWithContainer(middleware)
+	app.UseMiddleware(func(next Handler) Handler {
+		return func(ctx *Context) (any, error) {
+			assert.NotNil(t, ctx.Logger())
+			return next(ctx)
+		}
+	})
+	app.GET("/test", func(_ *Context) (any, error) {
+		return "Hello, world!", nil
+	})
 
-	// Compile the registry so middleware is applied to the chi router
-	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.container, 0)
+	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
 
-	// Register the handler directly on chi (after compile, so middleware applies)
-	app.httpServer.router.Handle("/test", handler)
-
-	// Create a test request
 	req := httptest.NewRequest(http.MethodGet, "/test", http.NoBody)
-	// Create a test response recorder
 	rr := httptest.NewRecorder()
-
-	// Call the handler with the request and recorder
 	app.httpServer.router.ServeHTTP(rr, req)
 
-	// Assert the status code and response body
 	assert.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, "Hello, world!", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "Hello, world!")
 }
 
 func Test_APIKeyAuthMiddleware(t *testing.T) {
 	port := testutil.GetFreePort(t)
 
-	c, mocks := infra.NewMockContainer(t)
-	mocks.PubSub.EXPECT().Close().Return(nil)
-	mocks.SQL.ExpectClose()
+	c := newTestKernel(nil)
+	db, sqlMock, _ := piSQL.NewSQLMocks(t)
+	sqlMock.ExpectClose()
+	ps := &lifecycleCloseProbe{}
 
 	app := &App{
 		httpServer: &httpServer{
@@ -842,12 +819,15 @@ func Test_APIKeyAuthMiddleware(t *testing.T) {
 			registry: newRouteRegistry(),
 			port:     port,
 		},
-		container: c,
-		Config:    config.NewMockConfig(map[string]string{"REQUEST_TIMEOUT": "5"}),
+		kernel: c,
+		Config: config.NewMockConfig(map[string]string{"REQUEST_TIMEOUT": "5"}),
 	}
+	require.NoError(t, app.SetSQL(db, Owned))
+	require.NoError(t, app.SetPubSub(ps, Owned))
 
 	apiKeys := []string{"test-key"}
-	validateFunc := func(_ *infra.Container, apiKey string) bool {
+	validateFunc := func(ctx *Context, apiKey string) bool {
+		assert.NotNil(t, ctx)
 		return apiKey == "test-key"
 	}
 
@@ -929,12 +909,11 @@ func Test_SwaggerEndpoints(t *testing.T) {
 }
 
 func Test_AddCronJob_Fail(t *testing.T) {
-	a := App{container: &infra.Container{}}
 	stderr := testutil.StderrOutputForFunc(func() {
-		a.container.Logger = logging.NewLogger(logging.ERROR)
+		a := App{kernel: newTestKernel(logging.NewLogger(logging.ERROR))}
 
 		a.AddCronJob("* * * *", "test-job", func(ctx *Context) {
-			ctx.Logger.Info("test-job-fail")
+			ctx.Logger().Info("test-job-fail")
 		})
 	})
 
@@ -945,11 +924,11 @@ func Test_AddCronJob_Fail(t *testing.T) {
 func Test_AddCronJob_Success(t *testing.T) {
 	pass := false
 	a := App{
-		container: &infra.Container{},
+		kernel: newTestKernel(nil),
 	}
 
 	a.AddCronJob("* * * * *", "test-job", func(ctx *Context) {
-		ctx.Logger.Info("test-job-success")
+		ctx.Logger().Info("test-job-success")
 	})
 
 	assert.Len(t, a.cron.jobs, 1)
@@ -1139,13 +1118,9 @@ func TestApp_SubscriberInitialize(t *testing.T) {
 		testutil.NewServerConfigs(t)
 
 		app := New()
-
-		mockContainer := infra.Container{
-			Logger: logging.NewLogger(logging.ERROR),
-			PubSub: mockSubscriber{},
-		}
-
-		app.container = &mockContainer
+		app.kernel = newTestKernel(logging.NewLogger(logging.ERROR))
+		require.NoError(t, app.SetPubSub(mockSubscriber{}, Borrowed))
+		app.subscriptionManager = newSubscriptionManager(app.kernel)
 
 		app.Subscribe("Hello", func(*Context) error {
 			// this is a test subscriber
@@ -1177,13 +1152,9 @@ func TestApp_Subscribe(t *testing.T) {
 		testutil.NewServerConfigs(t)
 
 		app := New()
-
-		mockContainer := infra.Container{
-			Logger: logging.NewLogger(logging.ERROR),
-			PubSub: mockSubscriber{},
-		}
-
-		app.container = &mockContainer
+		app.kernel = newTestKernel(logging.NewLogger(logging.ERROR))
+		require.NoError(t, app.SetPubSub(mockSubscriber{}, Borrowed))
+		app.subscriptionManager = newSubscriptionManager(app.kernel)
 
 		app.Subscribe("", func(*Context) error { return nil })
 
@@ -1196,13 +1167,9 @@ func TestApp_Subscribe(t *testing.T) {
 		testutil.NewServerConfigs(t)
 
 		app := New()
-
-		mockContainer := infra.Container{
-			Logger: logging.NewLogger(logging.ERROR),
-			PubSub: mockSubscriber{},
-		}
-
-		app.container = &mockContainer
+		app.kernel = newTestKernel(logging.NewLogger(logging.ERROR))
+		require.NoError(t, app.SetPubSub(mockSubscriber{}, Borrowed))
+		app.subscriptionManager = newSubscriptionManager(app.kernel)
 
 		app.Subscribe("Hello", nil)
 

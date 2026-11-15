@@ -11,8 +11,8 @@ import (
 	"github.com/sllt/pi/pkg/pi"
 	"github.com/sllt/pi/pkg/pi/cmd"
 	"github.com/sllt/pi/pkg/pi/cmd/terminal"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/testkit"
 	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
@@ -23,7 +23,8 @@ func TestMain(m *testing.M) {
 
 // TestCMDRunWithNoArg checks that if no subcommand is found then error comes on stderr.
 func TestCMDRunWithNoArg(t *testing.T) {
-	expErr := "No Command Found!\n"
+	expErr := "'' is not a valid command.\n"
+	os.Args = []string{"command"}
 	output := testutil.StderrOutputForFunc(main)
 
 	assert.Equal(t, expErr, output, "TEST Failed.\n")
@@ -72,10 +73,9 @@ func TestCMDRun_SpinnerContextCancelled(t *testing.T) {
 
 	// add an already canceled context
 	res, err := spinner(&pi.Context{
-		Context:   ctx,
-		Request:   cmd.NewRequest([]string{"command", "spinner"}),
-		Container: nil,
-		Out:       terminal.New(),
+		Context: ctx,
+		Request: cmd.NewRequest([]string{"command", "spinner"}),
+		Out:     terminal.New(),
 	})
 
 	assert.Empty(t, res)
@@ -98,18 +98,15 @@ func TestCMDRun_ProgressContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// Create a proper context with logger to avoid nil pointer dereference
-	container := &infra.Container{
-		Logger: logging.NewMockLogger(logging.ERROR),
-	}
+	app := testkit.New(t,
+		pi.WithConfig(map[string]string{"HTTP_ENABLED": "false", "GRPC_ENABLED": "false"}),
+		pi.WithLogger(logging.NewMockLogger(logging.ERROR)),
+	)
+	piCtx := app.NewContext(ctx)
+	piCtx.Request = cmd.NewRequest([]string{"command", "progress"})
+	piCtx.Out = terminal.New()
 
-	res, err := progress(&pi.Context{
-		Context:       ctx,
-		Request:       cmd.NewRequest([]string{"command", "progress"}),
-		Container:     container,
-		Out:           terminal.New(),
-		ContextLogger: *logging.NewContextLogger(ctx, container.Logger),
-	})
+	res, err := progress(piCtx)
 
 	assert.Empty(t, res)
 	assert.ErrorIs(t, err, context.Canceled)
@@ -117,7 +114,7 @@ func TestCMDRun_ProgressContextCancelled(t *testing.T) {
 
 // TestCMDRunWithInvalidCommand tests that invalid commands return appropriate error
 func TestCMDRunWithInvalidCommand(t *testing.T) {
-	expErr := "No Command Found!\n"
+	expErr := "'invalid' is not a valid command.\n"
 	os.Args = []string{"command", "invalid"}
 	output := testutil.StderrOutputForFunc(main)
 

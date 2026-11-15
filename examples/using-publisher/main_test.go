@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/sllt/pi/pkg/pi/testutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,11 +13,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
 	"github.com/sllt/pi/pkg/pi"
-	"github.com/sllt/pi/pkg/pi/infra"
-	"github.com/sllt/pi/pkg/pi/logging"
+	"github.com/sllt/pi/pkg/pi/datasource"
+	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
+	"github.com/sllt/pi/pkg/pi/testkit"
+	"github.com/sllt/pi/pkg/pi/testutil"
 )
 
 func TestMain(m *testing.M) {
@@ -60,9 +60,6 @@ func TestExamplePublisherError(t *testing.T) {
 }
 
 func TestOrderFunction(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	tests := []struct {
 		name           string
 		body           string
@@ -77,24 +74,24 @@ func TestOrderFunction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockContainer, mocks := infra.NewMockContainer(t)
-
-			switch {
-			case tt.publishError != nil:
-				mocks.PubSub.EXPECT().Publish(gomock.Any(), "order-logs", gomock.Any()).Return(tt.publishError)
-			case !tt.expectError:
-				mocks.PubSub.EXPECT().Publish(gomock.Any(), "order-logs", gomock.Any()).Return(nil)
+			called := false
+			ps := &stubPubSub{
+				publishFn: func(_ context.Context, topic string, _ []byte) error {
+					called = true
+					assert.Equal(t, "order-logs", topic)
+					return tt.publishError
+				},
 			}
 
-			testHandler(t, tt.name, order, mockContainer, tt.body, tt.expectError, tt.expectedResult)
+			testHandler(t, tt.name, order, ps, tt.body, tt.expectError, tt.expectedResult)
+			if tt.publishError != nil || !tt.expectError {
+				assert.True(t, called, "expected Publish to be invoked")
+			}
 		})
 	}
 }
 
 func TestProductFunction(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	tests := []struct {
 		name           string
 		body           string
@@ -109,29 +106,36 @@ func TestProductFunction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockContainer, mocks := infra.NewMockContainer(t)
-
-			switch {
-			case tt.publishError != nil:
-				mocks.PubSub.EXPECT().Publish(gomock.Any(), "products", gomock.Any()).Return(tt.publishError)
-			case !tt.expectError:
-				mocks.PubSub.EXPECT().Publish(gomock.Any(), "products", gomock.Any()).Return(nil)
+			called := false
+			ps := &stubPubSub{
+				publishFn: func(_ context.Context, topic string, _ []byte) error {
+					called = true
+					assert.Equal(t, "products", topic)
+					return tt.publishError
+				},
 			}
 
-			testHandler(t, tt.name, product, mockContainer, tt.body, tt.expectError, tt.expectedResult)
+			testHandler(t, tt.name, product, ps, tt.body, tt.expectError, tt.expectedResult)
+			if tt.publishError != nil || !tt.expectError {
+				assert.True(t, called, "expected Publish to be invoked")
+			}
 		})
 	}
 }
 
 func testHandler(t *testing.T, name string, handler func(*pi.Context) (interface{}, error),
-	container *infra.Container, body string, expectError bool, expectedResult interface{}) {
+	ps pubsub.Client, body string, expectError bool, expectedResult interface{}) {
 
 	t.Run(name, func(t *testing.T) {
-		ctx := &pi.Context{
-			Context:       context.Background(),
-			Request:       &testRequest{Request: httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(body))), body: body},
-			Container:     container,
-			ContextLogger: *logging.NewContextLogger(context.Background(), container.Logger),
+		app := testkit.New(
+			t,
+			pi.WithConfig(map[string]string{"HTTP_ENABLED": "false", "GRPC_ENABLED": "false"}),
+			pi.WithPubSub(ps, pi.Borrowed),
+		)
+		ctx := app.NewContext(context.Background())
+		ctx.Request = &testRequest{
+			Request: httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(body))),
+			body:    body,
 		}
 
 		result, err := handler(ctx)
@@ -140,6 +144,24 @@ func testHandler(t *testing.T, name string, handler func(*pi.Context) (interface
 		assert.Equal(t, expectedResult, result, "result mismatch")
 	})
 }
+
+type stubPubSub struct {
+	publishFn func(ctx context.Context, topic string, message []byte) error
+}
+
+func (s *stubPubSub) Publish(ctx context.Context, topic string, message []byte) error {
+	if s.publishFn != nil {
+		return s.publishFn(ctx, topic, message)
+	}
+	return nil
+}
+
+func (*stubPubSub) Subscribe(context.Context, string) (*pubsub.Message, error) { return nil, nil }
+func (*stubPubSub) Health() datasource.Health                                  { return datasource.Health{Status: "UP"} }
+func (*stubPubSub) CreateTopic(context.Context, string) error                  { return nil }
+func (*stubPubSub) DeleteTopic(context.Context, string) error                  { return nil }
+func (*stubPubSub) Query(context.Context, string, ...any) ([]byte, error)      { return nil, nil }
+func (*stubPubSub) Close() error                                               { return nil }
 
 type testRequest struct {
 	*http.Request

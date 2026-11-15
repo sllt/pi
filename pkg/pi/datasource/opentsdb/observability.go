@@ -47,12 +47,14 @@ func sendOperationStats(
 ) {
 	duration := time.Since(start)
 
-	logger.Debug(&QueryLog{
-		Operation: operation,
-		Status:    status,
-		Duration:  duration.Microseconds(),
-		Message:   message,
-	})
+	if logger != nil {
+		logger.Debug(&QueryLog{
+			Operation: operation,
+			Status:    status,
+			Duration:  duration.Microseconds(),
+			Message:   message,
+		})
+	}
 
 	if span != nil {
 		span.SetAttributes(attribute.Int64(fmt.Sprintf("opentsdb.%v.duration", operation), duration.Microseconds()))

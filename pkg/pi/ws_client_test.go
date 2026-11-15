@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sllt/pi/pkg/pi/config"
-	"github.com/sllt/pi/pkg/pi/infra"
 	"github.com/sllt/pi/pkg/pi/logging"
 )
 
@@ -99,7 +98,7 @@ func TestWSClient_ValidationAndPureConstruction(t *testing.T) {
 
 	// Pure construction guarantee: zero network dials before Start.
 	assert.Equal(t, int32(0), handshakes.Load())
-	assert.Nil(t, app.Container().GetWSConnectionByServiceName("orders-ws"))
+	assert.Nil(t, app.WebSocketHub().GetConnectionByServiceName("orders-ws"))
 
 	startCtx, startCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer startCancel()
@@ -114,7 +113,7 @@ func TestWSClient_ValidationAndPureConstruction(t *testing.T) {
 	assert.Equal(t, int32(1), handshakes.Load())
 	assert.Equal(t, "immutable-token", gotHeader.Load())
 	assert.Equal(t, "v1.pi", gotProto.Load())
-	assert.NotNil(t, app.Container().GetWSConnectionByServiceName("orders-ws"))
+	assert.NotNil(t, app.WebSocketHub().GetConnectionByServiceName("orders-ws"))
 }
 
 func TestWSClient_RequiredGatesStartAndReadinessAcrossDisconnect(t *testing.T) {
@@ -200,7 +199,7 @@ func TestWSClient_RequiredGatesStartAndReadinessAcrossDisconnect(t *testing.T) {
 	assert.GreaterOrEqual(t, attempts.Load(), int32(3))
 	assert.True(t, app.isReady())
 
-	conn1 := app.Container().GetWSConnectionByServiceName("realtime")
+	conn1 := app.WebSocketHub().GetConnectionByServiceName("realtime")
 	require.NotNil(t, conn1)
 	require.NoError(t, conn1.WriteMessage(gWebsocket.TextMessage, []byte("ping1")))
 	_, reply, err := conn1.ReadMessage()
@@ -229,7 +228,7 @@ func TestWSClient_RequiredGatesStartAndReadinessAcrossDisconnect(t *testing.T) {
 		return app.isReady()
 	}, 2*time.Second, 10*time.Millisecond)
 
-	conn2 := app.Container().GetWSConnectionByServiceName("realtime")
+	conn2 := app.WebSocketHub().GetConnectionByServiceName("realtime")
 	require.NotNil(t, conn2)
 	assert.NotSame(t, conn1, conn2)
 	require.NoError(t, conn2.WriteMessage(gWebsocket.TextMessage, []byte("ping2")))
@@ -509,11 +508,11 @@ func TestAddWSService_CompatSyncDial_StopBeforeStart_AndSingleReconnector(t *tes
 		// Initial call fails synchronously, returns nil, and starts background retry before Start.
 		err = app.AddWSService("legacy-feed", httpToWSURL(srv.URL), http.Header{"X-Legacy": []string{"1"}}, true, 25*time.Millisecond)
 		require.NoError(t, err)
-		assert.Nil(t, app.Container().GetWSConnectionByServiceName("legacy-feed"))
+		assert.Nil(t, app.WebSocketHub().GetConnectionByServiceName("legacy-feed"))
 
 		allowUpgrade.Store(true)
 		require.Eventually(t, func() bool {
-			return app.Container().GetWSConnectionByServiceName("legacy-feed") != nil
+			return app.WebSocketHub().GetConnectionByServiceName("legacy-feed") != nil
 		}, 2*time.Second, 10*time.Millisecond)
 		assert.Equal(t, int32(1), upgradeCount.Load())
 
@@ -523,7 +522,7 @@ func TestAddWSService_CompatSyncDial_StopBeforeStart_AndSingleReconnector(t *tes
 		assert.Equal(t, int32(1), upgradeCount.Load())
 
 		// Drop active connection during runtime and verify compat reconnector establishes a replacement.
-		firstClientConn := app.Container().GetWSConnectionByServiceName("legacy-feed")
+		firstClientConn := app.WebSocketHub().GetConnectionByServiceName("legacy-feed")
 		require.NotNil(t, firstClientConn)
 		mu.Lock()
 		firstSrv := serverConns[0]
@@ -532,7 +531,7 @@ func TestAddWSService_CompatSyncDial_StopBeforeStart_AndSingleReconnector(t *tes
 		_, _, _ = firstClientConn.ReadMessage()
 
 		require.Eventually(t, func() bool {
-			curr := app.Container().GetWSConnectionByServiceName("legacy-feed")
+			curr := app.WebSocketHub().GetConnectionByServiceName("legacy-feed")
 			return curr != nil && curr != firstClientConn && upgradeCount.Load() == 2
 		}, 2*time.Second, 10*time.Millisecond)
 
@@ -568,17 +567,16 @@ func TestStage1B_TelemetryDefaultAndBorrowedLoggerIsolation(t *testing.T) {
 	require.NoError(t, app.Stop(stopCtx))
 	assert.Equal(t, int32(0), borrowed.closed.Load(), "Borrowed logger injected via WithLogger must not be closed")
 
-	// Pre-injected logger on legacy Container.Create must also not be closed on Container.Close().
+	// Pre-injected logger on legacy kernel must also not be closed on closeOwnedLogger().
 	preSet := &closableTestLogger{Logger: logging.NewMockLogger(logging.ERROR)}
-	c := &infra.Container{Logger: preSet}
-	c.Create(config.NewMockConfig(map[string]string{
+	c := newLegacyKernel(config.NewMockConfig(map[string]string{
 		"APP_NAME":    "borrowed-logger-test",
 		"APP_VERSION": "0.5.0-test",
-	}))
-	require.NoError(t, c.Close())
-	assert.Equal(t, int32(0), preSet.closed.Load(), "Pre-set logger on Container must not be closed")
+	}), preSet, false)
+	require.NoError(t, c.closeOwnedLogger())
+	assert.Equal(t, int32(0), preSet.closed.Load(), "Pre-set logger on kernel must not be closed")
 
-	// Container-owned remotelogger created by NewContainer MUST be closed cleanly on Container.Close().
+	// Kernel-owned remotelogger created by newLegacyKernel MUST be closed cleanly on closeOwnedLogger().
 	pollHits := atomic.Int32{}
 	logSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		pollHits.Add(1)
@@ -587,14 +585,14 @@ func TestStage1B_TelemetryDefaultAndBorrowedLoggerIsolation(t *testing.T) {
 	}))
 	defer logSrv.Close()
 
-	ownedContainer := infra.NewContainer(config.NewMockConfig(map[string]string{
+	ownedKernel := newLegacyKernel(config.NewMockConfig(map[string]string{
 		"APP_NAME":                  "owned-log-app",
 		"APP_VERSION":               "0.5.0-test",
 		"REMOTE_LOG_URL":            logSrv.URL,
 		"REMOTE_LOG_FETCH_INTERVAL": "1",
-	}))
-	require.NoError(t, ownedContainer.Close())
+	}), nil, false)
+	require.NoError(t, ownedKernel.closeOwnedLogger())
 	hitsAtClose := pollHits.Load()
 	time.Sleep(1200 * time.Millisecond)
-	assert.Equal(t, hitsAtClose, pollHits.Load(), "Owned remotelogger polling must stop after Container.Close()")
+	assert.Equal(t, hitsAtClose, pollHits.Load(), "Owned remotelogger polling must stop after closeOwnedLogger()")
 }
