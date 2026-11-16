@@ -2,6 +2,8 @@ package contract
 
 import (
 	"fmt"
+	"mime"
+	"net/http"
 	"path"
 	"reflect"
 	"sort"
@@ -30,11 +32,22 @@ var forbiddenResponseTypes = map[string]struct{}{
 }
 
 var supportedMethods = map[string]struct{}{
-	"GET":    {},
-	"POST":   {},
-	"PUT":    {},
-	"PATCH":  {},
-	"DELETE": {},
+	"GET":     {},
+	"POST":    {},
+	"PUT":     {},
+	"PATCH":   {},
+	"DELETE":  {},
+	"HEAD":    {},
+	"OPTIONS": {},
+}
+
+func isBodylessMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodDelete, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
 }
 
 var supportedStatuses = map[int]struct{}{
@@ -169,37 +182,52 @@ type parsedMeta struct {
 	referencedSecSchemes []string
 	strictJSON           bool
 	nullableRes          bool
+	maxBodyBytes         int64
+	produces             []string
+	hasExplicitProduces  bool
 }
 
-func validateReqResPtrTypes(reqPtrType, resPtrType reflect.Type) (reflect.Type, reflect.Type, error) {
+func validateReqResPtrTypes(reqPtrType, resPtrType reflect.Type) (reflect.Type, reflect.Type, ResponseKind, error) {
 	if reqPtrType == nil || reqPtrType.Kind() != reflect.Ptr || reqPtrType.Elem().Kind() != reflect.Struct {
-		return nil, nil, fmt.Errorf("request type must be a non-nil pointer to struct, got %v", reqPtrType)
+		return nil, nil, ResponseKindJSON, fmt.Errorf("request type must be a non-nil pointer to struct, got %v", reqPtrType)
 	}
 	if resPtrType == nil || resPtrType.Kind() != reflect.Ptr || resPtrType.Elem().Kind() != reflect.Struct {
-		return nil, nil, fmt.Errorf("response type must be a non-nil pointer to struct, got %v", resPtrType)
+		return nil, nil, ResponseKindJSON, fmt.Errorf("response type must be a non-nil pointer to struct, got %v", resPtrType)
 	}
 
 	reqType := reqPtrType.Elem()
 	resType := resPtrType.Elem()
 
 	if IsPiMetaType(reqType) {
-		return nil, nil, fmt.Errorf("request struct cannot be pi.Meta itself")
+		return nil, nil, ResponseKindJSON, fmt.Errorf("request struct cannot be pi.Meta itself")
 	}
 	if IsPiMetaType(resType) {
-		return nil, nil, fmt.Errorf("response struct cannot be pi.Meta")
+		return nil, nil, ResponseKindJSON, fmt.Errorf("response struct cannot be pi.Meta")
 	}
+
+	resKind := ResponseKindJSON
 	if resType.PkgPath() == httpResponsePackagePath {
-		if _, forbidden := forbiddenResponseTypes[resType.Name()]; forbidden {
-			return nil, nil, fmt.Errorf("response type %s.%s is a control response type and cannot be used as a typed handler response", resType.PkgPath(), resType.Name())
+		switch resType.Name() {
+		case "File":
+			resKind = ResponseKindFile
+		case "XML":
+			resKind = ResponseKindXML
+		default:
+			if _, forbidden := forbiddenResponseTypes[resType.Name()]; forbidden {
+				return nil, nil, ResponseKindJSON, fmt.Errorf("response type %s.%s is a control response type and cannot be used as a typed handler response", resType.PkgPath(), resType.Name())
+			}
+			return nil, nil, ResponseKindJSON, fmt.Errorf("response type %s.%s cannot be used as a typed handler response", resType.PkgPath(), resType.Name())
 		}
 	}
 
-	visited := make(map[reflect.Type]bool)
-	if err := ensureNoPiMetaInType(resType, resType.String(), visited); err != nil {
-		return nil, nil, fmt.Errorf("response struct %s: %w", typeDisplayName(resType), err)
+	if resKind == ResponseKindJSON {
+		visited := make(map[reflect.Type]bool)
+		if err := ensureNoPiMetaInType(resType, resType.String(), visited); err != nil {
+			return nil, nil, ResponseKindJSON, fmt.Errorf("response struct %s: %w", typeDisplayName(resType), err)
+		}
 	}
 
-	return reqType, resType, nil
+	return reqType, resType, resKind, nil
 }
 
 func ensureNoPiMetaInType(t reflect.Type, pathDesc string, visited map[reflect.Type]bool) error {
@@ -231,7 +259,7 @@ func ensureNoPiMetaInType(t reflect.Type, pathDesc string, visited map[reflect.T
 	return nil
 }
 
-func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions) (*parsedMeta, error) {
+func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions, resKind ResponseKind) (*parsedMeta, error) {
 	var metaField reflect.StructField
 	metaCount := 0
 	visited := make(map[reflect.Type]bool)
@@ -254,11 +282,15 @@ func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions) (*parsedM
 		}
 	}
 
-	if metaCount == 0 {
-		return nil, fmt.Errorf("request struct %s must embed pi.Meta", typeDisplayName(reqType))
-	}
-	if metaCount > 1 {
-		return nil, fmt.Errorf("request struct %s must embed exactly one pi.Meta, found %d", typeDisplayName(reqType), metaCount)
+	if !opts.HasExplicitRoute {
+		if metaCount == 0 {
+			return nil, fmt.Errorf("request struct %s must embed pi.Meta", typeDisplayName(reqType))
+		}
+		if metaCount > 1 {
+			return nil, fmt.Errorf("request struct %s must embed exactly one pi.Meta, found %d", typeDisplayName(reqType), metaCount)
+		}
+	} else if metaCount > 1 {
+		return nil, fmt.Errorf("request struct %s must embed at most one pi.Meta, found %d", typeDisplayName(reqType), metaCount)
 	}
 
 	groupPrefix := NormalizeGroupPrefix(opts.GroupPrefix)
@@ -268,33 +300,115 @@ func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions) (*parsedM
 		}
 	}
 
-	rawMethod, hasMethod := metaField.Tag.Lookup("method")
-	if !hasMethod || strings.TrimSpace(rawMethod) == "" {
-		return nil, fmt.Errorf("request struct %s pi.Meta requires method tag", typeDisplayName(reqType))
-	}
-	method := strings.ToUpper(strings.TrimSpace(rawMethod))
-	if _, ok := supportedMethods[method]; !ok {
-		return nil, fmt.Errorf("request struct %s has unsupported HTTP method %q (allowed: GET, POST, PUT, PATCH, DELETE)", typeDisplayName(reqType), rawMethod)
-	}
+	var (
+		method        string
+		rawPath       string
+		chiPattern    string
+		canonicalPath string
+		conflictShape string
+	)
 
-	rawPath, hasPath := metaField.Tag.Lookup("path")
-	if !hasPath {
-		return nil, fmt.Errorf("request struct %s pi.Meta requires path tag", typeDisplayName(reqType))
-	}
-	if err := validateMetaPath(rawPath, groupPrefix); err != nil {
-		return nil, fmt.Errorf("request struct %s has invalid path %q: %w", typeDisplayName(reqType), rawPath, err)
-	}
+	if opts.HasExplicitRoute {
+		explicitMethod := strings.ToUpper(strings.TrimSpace(opts.ExplicitMethod))
+		if _, ok := supportedMethods[explicitMethod]; !ok {
+			return nil, fmt.Errorf("unsupported HTTP method %q (allowed: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS)", opts.ExplicitMethod)
+		}
 
-	chiPattern := computeChiPattern(rawPath, groupPrefix)
-	canonicalPath, conflictShape := NormalizeRouteConflict(groupPrefix, method, chiPattern)
+		normPattern := strings.TrimSpace(opts.ExplicitPattern)
+		if normPattern == "" {
+			if groupPrefix == "" {
+				normPattern = "/"
+			}
+		} else if !strings.HasPrefix(normPattern, "/") {
+			normPattern = "/" + normPattern
+		}
+
+		if err := validateMetaPath(normPattern, groupPrefix); err != nil {
+			return nil, fmt.Errorf("invalid route path %q: %w", opts.ExplicitPattern, err)
+		}
+
+		explicitChiPattern := computeChiPattern(normPattern, groupPrefix)
+		explicitCanonicalPath, explicitConflictShape := NormalizeRouteConflict(groupPrefix, explicitMethod, explicitChiPattern)
+		if explicitCanonicalPath != "/" && strings.HasSuffix(explicitCanonicalPath, "/") {
+			suggested := strings.TrimRight(normPattern, "/")
+			if suggested == "" {
+				suggested = "/"
+			}
+			return nil, fmt.Errorf("route path %q must not have a trailing '/'; use %q instead", explicitCanonicalPath, suggested)
+		}
+
+		method = explicitMethod
+		rawPath = normPattern
+		chiPattern = explicitChiPattern
+		canonicalPath = explicitCanonicalPath
+		conflictShape = explicitConflictShape
+
+		if metaCount == 1 {
+			if rawMetaMethod, hasMethod := metaField.Tag.Lookup("method"); hasMethod {
+				if strings.TrimSpace(rawMetaMethod) == "" {
+					return nil, fmt.Errorf("request struct %s pi.Meta method tag cannot be empty", typeDisplayName(reqType))
+				}
+				metaMethod := strings.ToUpper(strings.TrimSpace(rawMetaMethod))
+				if _, ok := supportedMethods[metaMethod]; !ok {
+					return nil, fmt.Errorf("request struct %s has unsupported HTTP method %q (allowed: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS)", typeDisplayName(reqType), rawMetaMethod)
+				}
+				if metaMethod != explicitMethod {
+					return nil, fmt.Errorf("request struct %s method mismatch: registered as %s, but pi.Meta declares method=%q", typeDisplayName(reqType), explicitMethod, rawMetaMethod)
+				}
+			}
+
+			if rawMetaPath, hasPath := metaField.Tag.Lookup("path"); hasPath {
+				if groupPrefix == "" && rawMetaPath == "" {
+					if explicitCanonicalPath != "/" {
+						return nil, fmt.Errorf("path mismatch: registered at %q, but %s pi.Meta declares path=%q", explicitCanonicalPath, typeDisplayName(reqType), rawMetaPath)
+					}
+				} else {
+					if err := validateMetaPath(rawMetaPath, groupPrefix); err != nil {
+						return nil, fmt.Errorf("request struct %s has invalid path %q: %w", typeDisplayName(reqType), rawMetaPath, err)
+					}
+					metaChiPattern := computeChiPattern(rawMetaPath, groupPrefix)
+					metaCanonical, _ := NormalizeRouteConflict(groupPrefix, method, metaChiPattern)
+					if metaCanonical != explicitCanonicalPath {
+						return nil, fmt.Errorf("path mismatch: registered at %q, but %s pi.Meta declares path=%q", explicitCanonicalPath, typeDisplayName(reqType), rawMetaPath)
+					}
+				}
+			}
+		}
+	} else {
+		rawMethod, hasMethod := metaField.Tag.Lookup("method")
+		if !hasMethod || strings.TrimSpace(rawMethod) == "" {
+			return nil, fmt.Errorf("request struct %s pi.Meta requires method tag", typeDisplayName(reqType))
+		}
+		method = strings.ToUpper(strings.TrimSpace(rawMethod))
+		if _, ok := supportedMethods[method]; !ok {
+			return nil, fmt.Errorf("request struct %s has unsupported HTTP method %q (allowed: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS)", typeDisplayName(reqType), rawMethod)
+		}
+
+		var hasPath bool
+		rawPath, hasPath = metaField.Tag.Lookup("path")
+		if !hasPath {
+			return nil, fmt.Errorf("request struct %s pi.Meta requires path tag", typeDisplayName(reqType))
+		}
+		if err := validateMetaPath(rawPath, groupPrefix); err != nil {
+			return nil, fmt.Errorf("request struct %s has invalid path %q: %w", typeDisplayName(reqType), rawPath, err)
+		}
+
+		chiPattern = computeChiPattern(rawPath, groupPrefix)
+		canonicalPath, conflictShape = NormalizeRouteConflict(groupPrefix, method, chiPattern)
+	}
 
 	pathParams, err := extractPathPlaceholders(canonicalPath)
 	if err != nil {
 		return nil, fmt.Errorf("request struct %s path %q: %w", typeDisplayName(reqType), canonicalPath, err)
 	}
 
+	var metaTag reflect.StructTag
+	if metaCount == 1 {
+		metaTag = metaField.Tag
+	}
+
 	status := 200
-	if rawStatus, ok := metaField.Tag.Lookup("status"); ok {
+	if rawStatus, ok := metaTag.Lookup("status"); ok {
 		trimmed := strings.TrimSpace(rawStatus)
 		if trimmed == "" {
 			return nil, fmt.Errorf("request struct %s pi.Meta status tag cannot be empty", typeDisplayName(reqType))
@@ -309,10 +423,10 @@ func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions) (*parsedM
 		status = parsed
 	}
 
-	summary := strings.TrimSpace(metaField.Tag.Get("summary"))
+	summary := strings.TrimSpace(metaTag.Get("summary"))
 
-	descVal, hasDesc := metaField.Tag.Lookup("description")
-	dcVal, hasDC := metaField.Tag.Lookup("dc")
+	descVal, hasDesc := metaTag.Lookup("description")
+	dcVal, hasDC := metaTag.Lookup("dc")
 	if hasDesc && hasDC && strings.TrimSpace(descVal) != strings.TrimSpace(dcVal) {
 		return nil, fmt.Errorf("request struct %s pi.Meta has conflicting description and dc tags", typeDisplayName(reqType))
 	}
@@ -321,18 +435,18 @@ func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions) (*parsedM
 		description = strings.TrimSpace(dcVal)
 	}
 
-	tags, err := resolveMetaTags(metaField.Tag, opts, reqType)
+	tags, err := resolveMetaTags(metaTag, opts, reqType)
 	if err != nil {
 		return nil, err
 	}
 
-	operationID, err := resolveOperationID(metaField.Tag, method, canonicalPath, reqType)
+	operationID, err := resolveOperationID(metaTag, method, canonicalPath, reqType)
 	if err != nil {
 		return nil, err
 	}
 
 	deprecated := false
-	if rawDep, ok := metaField.Tag.Lookup("deprecated"); ok {
+	if rawDep, ok := metaTag.Lookup("deprecated"); ok {
 		b, err := parseStrictMetaBool(rawDep)
 		if err != nil {
 			return nil, fmt.Errorf("request struct %s pi.Meta deprecated: %w", typeDisplayName(reqType), err)
@@ -340,18 +454,18 @@ func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions) (*parsedM
 		deprecated = b
 	}
 
-	errorStatuses, err := parseErrorsTag(metaField.Tag, reqType)
+	errorStatuses, err := parseErrorsTag(metaTag, reqType)
 	if err != nil {
 		return nil, err
 	}
 
-	security, secSchemes, err := resolveMetaSecurity(metaField.Tag, opts, reqType)
+	security, secSchemes, err := resolveMetaSecurity(metaTag, opts, reqType)
 	if err != nil {
 		return nil, err
 	}
 
 	strictJSON := opts.DefaultStrictJSON
-	if rawStrict, ok := metaField.Tag.Lookup("strict"); ok {
+	if rawStrict, ok := metaTag.Lookup("strict"); ok {
 		b, err := parseStrictMetaBool(rawStrict)
 		if err != nil {
 			return nil, fmt.Errorf("request struct %s pi.Meta strict: %w", typeDisplayName(reqType), err)
@@ -362,12 +476,49 @@ func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions) (*parsedM
 	}
 
 	nullableRes := false
-	if rawNullable, ok := metaField.Tag.Lookup("nullable"); ok {
+	if rawNullable, ok := metaTag.Lookup("nullable"); ok {
 		b, err := parseStrictMetaBool(rawNullable)
 		if err != nil {
 			return nil, fmt.Errorf("request struct %s pi.Meta nullable: %w", typeDisplayName(reqType), err)
 		}
 		nullableRes = b
+	}
+
+	var maxBodyBytes int64
+	if rawMaxBody, ok := metaTag.Lookup("maxBody"); ok {
+		parsedMaxBody, err := parseMaxBodyTag(rawMaxBody)
+		if err != nil {
+			return nil, fmt.Errorf("request struct %s pi.Meta maxBody: %w", typeDisplayName(reqType), err)
+		}
+		maxBodyBytes = parsedMaxBody
+	}
+
+	rawProduces, hasProduces := metaTag.Lookup("produces")
+	var produces []string
+	hasExplicitProduces := false
+	switch resKind {
+	case ResponseKindJSON:
+		if hasProduces {
+			return nil, fmt.Errorf("request struct %s pi.Meta produces tag is only supported for *response.File or *response.XML responses", typeDisplayName(reqType))
+		}
+	case ResponseKindFile, ResponseKindXML:
+		if status == http.StatusNoContent {
+			return nil, fmt.Errorf("request struct %s status 204 is not supported for *response.File or *response.XML responses", typeDisplayName(reqType))
+		}
+		if nullableRes {
+			return nil, fmt.Errorf("request struct %s nullable:\"true\" is not supported for *response.File or *response.XML responses", typeDisplayName(reqType))
+		}
+		if hasProduces {
+			produces, err = parseProducesTag(rawProduces, reqType)
+			if err != nil {
+				return nil, err
+			}
+			hasExplicitProduces = true
+		} else if resKind == ResponseKindFile {
+			produces = []string{"application/octet-stream"}
+		} else {
+			produces = []string{"application/xml"}
+		}
 	}
 
 	return &parsedMeta{
@@ -388,6 +539,9 @@ func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions) (*parsedM
 		referencedSecSchemes: secSchemes,
 		strictJSON:           strictJSON,
 		nullableRes:          nullableRes,
+		maxBodyBytes:         maxBodyBytes,
+		produces:             produces,
+		hasExplicitProduces:  hasExplicitProduces,
 	}, nil
 }
 
@@ -727,4 +881,156 @@ func typeDisplayName(t reflect.Type) string {
 		return t.Name()
 	}
 	return t.String()
+}
+
+func parseMaxBodyTag(raw string) (int64, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, fmt.Errorf("maxBody tag cannot be empty")
+	}
+
+	lower := strings.ToLower(s)
+	unit := int64(1)
+	suffixLen := 0
+	switch {
+	case strings.HasSuffix(lower, "kib"):
+		unit = 1 << 10
+		suffixLen = 3
+	case strings.HasSuffix(lower, "mib"):
+		unit = 1 << 20
+		suffixLen = 3
+	case strings.HasSuffix(lower, "gib"):
+		unit = 1 << 30
+		suffixLen = 3
+	case strings.HasSuffix(lower, "kb"):
+		unit = 1 << 10
+		suffixLen = 2
+	case strings.HasSuffix(lower, "mb"):
+		unit = 1 << 20
+		suffixLen = 2
+	case strings.HasSuffix(lower, "gb"):
+		unit = 1 << 30
+		suffixLen = 2
+	case strings.HasSuffix(lower, "b"):
+		unit = 1
+		suffixLen = 1
+	}
+
+	numStr := strings.TrimSpace(s[:len(s)-suffixLen])
+	if numStr == "" {
+		return 0, fmt.Errorf("invalid size %q", raw)
+	}
+	for i := 0; i < len(numStr); i++ {
+		if numStr[i] < '0' || numStr[i] > '9' {
+			return 0, fmt.Errorf("invalid size %q", raw)
+		}
+	}
+	n, err := strconv.ParseInt(numStr, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("size %q must be a positive integer", raw)
+	}
+	if n > maxAllowedBodyBytes/unit {
+		return 0, fmt.Errorf("size %q exceeds maximum allowed %d bytes (1 GiB)", raw, maxAllowedBodyBytes)
+	}
+	return n * unit, nil
+}
+
+func parseProducesTag(raw string, reqType reflect.Type) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("request struct %s pi.Meta produces tag cannot be empty", typeDisplayName(reqType))
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		item := strings.TrimSpace(p)
+		if item == "" {
+			return nil, fmt.Errorf("request struct %s pi.Meta produces contains empty media type in %q", typeDisplayName(reqType), raw)
+		}
+		norm, _, _, err := parseAndValidateMediaRange(item, true)
+		if err != nil {
+			return nil, fmt.Errorf("request struct %s pi.Meta produces has invalid media type %q: %w", typeDisplayName(reqType), item, err)
+		}
+		key := strings.ToLower(norm)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, norm)
+	}
+	return out, nil
+}
+
+func parseAndValidateMediaRange(raw string, allowWildcard bool) (string, string, map[string]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", "", nil, fmt.Errorf("media type cannot be empty")
+	}
+	mt, params, err := mime.ParseMediaType(trimmed)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if strings.Count(mt, "/") != 1 {
+		return "", "", nil, fmt.Errorf("media type %q must be in type/subtype form", raw)
+	}
+	slash := strings.IndexByte(mt, '/')
+	if slash <= 0 || slash == len(mt)-1 {
+		return "", "", nil, fmt.Errorf("media type %q must have non-empty type and subtype", raw)
+	}
+	mainType := mt[:slash]
+	subType := mt[slash+1:]
+	if strings.Contains(mainType, "*") || strings.Contains(subType, "*") {
+		if !allowWildcard {
+			return "", "", nil, fmt.Errorf("wildcard media type %q is not allowed", raw)
+		}
+		if mainType == "*" {
+			if subType != "*" {
+				return "", "", nil, fmt.Errorf("invalid wildcard media range %q", raw)
+			}
+		} else if subType != "*" {
+			return "", "", nil, fmt.Errorf("invalid wildcard media range %q", raw)
+		}
+		if len(params) > 0 {
+			return "", "", nil, fmt.Errorf("wildcard media range %q cannot carry parameters", raw)
+		}
+		return mt, mt, nil, nil
+	}
+	if len(params) == 0 {
+		return mt, mt, nil, nil
+	}
+	formatted := mime.FormatMediaType(mt, params)
+	if formatted == "" {
+		return "", "", nil, fmt.Errorf("invalid media type %q", raw)
+	}
+	return formatted, mt, params, nil
+}
+
+func mediaRangeMatches(actualMT string, actualParams map[string]string, rangeRaw string) bool {
+	_, rangeMT, rangeParams, err := parseAndValidateMediaRange(rangeRaw, true)
+	if err != nil {
+		return false
+	}
+	if rangeMT == "*/*" {
+		return true
+	}
+	rSlash := strings.IndexByte(rangeMT, '/')
+	aSlash := strings.IndexByte(actualMT, '/')
+	if rSlash <= 0 || aSlash <= 0 {
+		return false
+	}
+	rangeMain, rangeSub := rangeMT[:rSlash], rangeMT[rSlash+1:]
+	actualMain := actualMT[:aSlash]
+	if rangeSub == "*" {
+		return actualMain == rangeMain
+	}
+	if actualMT != rangeMT {
+		return false
+	}
+	for k, v := range rangeParams {
+		av, ok := actualParams[k]
+		if !ok || !strings.EqualFold(av, v) {
+			return false
+		}
+	}
+	return true
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -162,6 +163,14 @@ func TestCompileOperation_MetaPathAndConflictRules(t *testing.T) {
 			ID      string `json:"id"`
 		}
 
+		type nestedFileInReq struct {
+			pi.Meta `path:"/x" method:"POST"`
+			F       *resTypes.File `json:"f"`
+		}
+		type nestedXMLInRes struct {
+			X *resTypes.XML `json:"x"`
+		}
+
 		cases := []struct {
 			name string
 			req  reflect.Type
@@ -177,10 +186,10 @@ func TestCompileOperation_MetaPathAndConflictRules(t *testing.T) {
 			{"non_ptr_req_type", reflect.TypeOf(okReq{}), reflect.TypeOf((*emptyRes)(nil))},
 			{"forbidden_res_result", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Result)(nil))},
 			{"forbidden_res_stream", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Stream)(nil))},
-			{"forbidden_res_file", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.File)(nil))},
+			{"nested_file_in_req", reflect.TypeOf((*nestedFileInReq)(nil)), reflect.TypeOf((*emptyRes)(nil))},
 			{"forbidden_res_raw", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Raw)(nil))},
 			{"forbidden_res_template", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Template)(nil))},
-			{"forbidden_res_xml", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.XML)(nil))},
+			{"nested_xml_in_res", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*nestedXMLInRes)(nil))},
 			{"forbidden_res_redirect", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Redirect)(nil))},
 			{"forbidden_res_response", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Response)(nil))},
 			{"forbidden_res_handled", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Handled)(nil))},
@@ -199,7 +208,7 @@ func TestCompileOperation_MetaPathAndConflictRules(t *testing.T) {
 			pi.Meta `path:"/x"`
 		}
 		type badMethodReq struct {
-			pi.Meta `path:"/x" method:"OPTIONS"`
+			pi.Meta `path:"/x" method:"TRACE"`
 		}
 		type badPathQueryReq struct {
 			pi.Meta `path:"/x?a=1" method:"GET"`
@@ -2126,5 +2135,906 @@ func TestSchemaNullability_PointerValidationAndOmitSemantics(t *testing.T) {
 		)
 		require.Error(t, err)
 		assert.Contains(t, piHTTP.ErrorDetails(err), apperror.Detail{Field: "condOmitMinPtr", Rule: "min"})
+	})
+}
+
+func makeMultipartRequest(t *testing.T, method, target string, fields map[string][]string, files map[string][]struct {
+	filename string
+	content  []byte
+}) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, vals := range fields {
+		for _, v := range vals {
+			require.NoError(t, mw.WriteField(k, v))
+		}
+	}
+	for fieldName, fileList := range files {
+		for _, f := range fileList {
+			part, err := mw.CreateFormFile(fieldName, f.filename)
+			require.NoError(t, err)
+			_, err = part.Write(f.content)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, mw.Close())
+
+	req := httptest.NewRequest(method, target, bytes.NewReader(buf.Bytes()))
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	return req
+}
+
+func TestUnifiedRouting_OptionalMetaAndMaxBody(t *testing.T) {
+	t.Run("no_meta_all_7_methods_and_bodyless_rules", func(t *testing.T) {
+		type queryOnlyReq struct {
+			Page int `query:"page" default:"1" validate:"min=1"`
+		}
+		type jsonReq struct {
+			Name string `json:"name" validate:"required"`
+		}
+
+		for _, method := range []string{http.MethodGet, http.MethodDelete, http.MethodHead, http.MethodOptions} {
+			op, sr := compileOp[queryOnlyReq, simpleRes](t, contract.CompileOptions{
+				GroupPrefix:      "/api/v1",
+				HasExplicitRoute: true,
+				ExplicitMethod:   method,
+				ExplicitPattern:  "items",
+				InheritedTags:    []string{"Items"},
+			})
+			assert.Equal(t, method, op.Method)
+			assert.Equal(t, "/items", op.ChiPattern)
+			assert.Equal(t, "/api/v1/items", op.CanonicalPath)
+			assert.Equal(t, 200, op.Status)
+			assert.Equal(t, []string{"Items"}, op.Tags)
+			assert.Equal(t, int64(1<<20), op.MaxBodyBytes)
+
+			var out queryOnlyReq
+			require.NoError(t, op.BindAndValidate(makePIRequest(method, "/api/v1/items", nil, "", nil), &out, nil))
+			assert.Equal(t, 1, out.Page)
+
+			// Bodyless methods (GET, DELETE, HEAD, OPTIONS) must reject even "{}" body.
+			err := op.BindAndValidate(makePIRequest(method, "/api/v1/items", []byte("{}"), "application/json", nil), &out, nil)
+			require.Error(t, err)
+			errStatus, _, _ := piHTTP.ErrorResponse(err)
+			assert.Equal(t, http.StatusBadRequest, errStatus)
+
+			oasOp := op.BuildOpenAPIOperation(sr)
+			assert.Nil(t, oasOp.RequestBody)
+			assert.Contains(t, oasOp.Responses, "200")
+
+			// Bodyless methods reject JSON body fields at compile time.
+			_, compileErr := contract.CompileOperation("h", reflect.TypeOf((*jsonReq)(nil)), reflect.TypeOf((*simpleRes)(nil)), contract.CompileOptions{
+				HasExplicitRoute: true,
+				ExplicitMethod:   method,
+				ExplicitPattern:  "/items",
+			}, contract.NewSchemaRegistry())
+			assert.Error(t, compileErr)
+		}
+
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch} {
+			op, _ := compileOp[jsonReq, simpleRes](t, contract.CompileOptions{
+				HasExplicitRoute: true,
+				ExplicitMethod:   method,
+				ExplicitPattern:  "/items",
+			})
+			assert.Equal(t, method, op.Method)
+			assert.Equal(t, 200, op.Status)
+
+			var out jsonReq
+			require.NoError(t, op.BindAndValidate(makePIRequest(method, "/items", []byte(`{"name":"ok"}`), "application/json", nil), &out, nil))
+			assert.Equal(t, "ok", out.Name)
+		}
+	})
+
+	t.Run("explicit_pattern_normalization_and_meta_matching", func(t *testing.T) {
+		type plainReq struct{}
+		opRoot, _ := compileOp[plainReq, emptyRes](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "",
+		})
+		assert.Equal(t, "/", opRoot.ChiPattern)
+		assert.Equal(t, "/", opRoot.CanonicalPath)
+		assert.Equal(t, "getRoot", opRoot.OperationID)
+
+		// Trailing slash on non-root explicit pattern must fail.
+		_, err := contract.CompileOperation("h", reflect.TypeOf((*plainReq)(nil)), reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{
+			GroupPrefix:      "/api/v1",
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/posts/",
+		}, contract.NewSchemaRegistry())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "/posts")
+
+		// Meta without path/method inherits explicit route.
+		type metaNoRouteReq struct {
+			pi.Meta `status:"201" summary:"Create post"`
+			Title   string `json:"title"`
+		}
+		opNoRoute, _ := compileOp[metaNoRouteReq, simpleRes](t, contract.CompileOptions{
+			GroupPrefix:      "/api/v1",
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodPost,
+			ExplicitPattern:  "/posts",
+		})
+		assert.Equal(t, "/api/v1/posts", opNoRoute.CanonicalPath)
+		assert.Equal(t, 201, opNoRoute.Status)
+		assert.Equal(t, "Create post", opNoRoute.Summary)
+
+		// Matching method/path succeeds.
+		type metaMatchReq struct {
+			pi.Meta `path:"/posts" method:"POST"`
+		}
+		opMatch, _ := compileOp[metaMatchReq, emptyRes](t, contract.CompileOptions{
+			GroupPrefix:      "/api/v1",
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodPost,
+			ExplicitPattern:  "posts",
+		})
+		assert.Equal(t, "/api/v1/posts", opMatch.CanonicalPath)
+
+		// Root "" + Meta path:"" matches.
+		type metaEmptyPathReq struct {
+			pi.Meta `path:""`
+		}
+		opRootEmptyMeta, _ := compileOp[metaEmptyPathReq, emptyRes](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "",
+		})
+		assert.Equal(t, "/", opRootEmptyMeta.CanonicalPath)
+
+		// Root /posts + Meta path:"" reports path mismatch (not "root group requires path starting with '/'").
+		_, err = contract.CompileOperation("h", reflect.TypeOf((*metaEmptyPathReq)(nil)), reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/posts",
+		}, contract.NewSchemaRegistry())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path mismatch")
+
+		// Mismatched method fails.
+		type metaWrongMethodReq struct {
+			pi.Meta `method:"PUT"`
+		}
+		_, err = contract.CompileOperation("h", reflect.TypeOf((*metaWrongMethodReq)(nil)), reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodPost,
+			ExplicitPattern:  "/posts",
+		}, contract.NewSchemaRegistry())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "method mismatch")
+
+		// Empty method:"" fails.
+		type metaEmptyMethodReq struct {
+			pi.Meta `method:""`
+		}
+		_, err = contract.CompileOperation("h", reflect.TypeOf((*metaEmptyMethodReq)(nil)), reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodPost,
+			ExplicitPattern:  "/posts",
+		}, contract.NewSchemaRegistry())
+		require.Error(t, err)
+
+		// Mismatched path fails.
+		type metaWrongPathReq struct {
+			pi.Meta `path:"/other"`
+		}
+		_, err = contract.CompileOperation("h", reflect.TypeOf((*metaWrongPathReq)(nil)), reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{
+			GroupPrefix:      "/api/v1",
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/posts",
+		}, contract.NewSchemaRegistry())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path mismatch")
+	})
+
+	t.Run("maxBody_tag_precedence_and_validation", func(t *testing.T) {
+		type metaMaxBodyReq struct {
+			pi.Meta `maxBody:"6MiB"`
+			Title   string `form:"title"`
+		}
+		type fileUploadReq struct {
+			File *multipart.FileHeader `form:"file"`
+		}
+		type fileUploadWithMetaReq struct {
+			pi.Meta `maxBody:"5242880"`
+			File    *multipart.FileHeader `form:"file"`
+		}
+
+		// 1. EndpointMaxBodyBytes > maxBody > ExplicitAppMaxBodyBytes > 32MiB(file)/1MiB(default)
+		op1, _ := compileOp[metaMaxBodyReq, emptyRes](t, contract.CompileOptions{
+			HasExplicitRoute:        true,
+			ExplicitMethod:          http.MethodPost,
+			ExplicitPattern:         "/upload",
+			EndpointMaxBodyBytes:    10 << 20,
+			ExplicitAppMaxBodyBytes: 2 << 20,
+		})
+		assert.Equal(t, int64(10<<20), op1.MaxBodyBytes)
+
+		// 2. maxBody > ExplicitAppMaxBodyBytes
+		op2, _ := compileOp[metaMaxBodyReq, emptyRes](t, contract.CompileOptions{
+			HasExplicitRoute:        true,
+			ExplicitMethod:          http.MethodPost,
+			ExplicitPattern:         "/upload",
+			ExplicitAppMaxBodyBytes: 2 << 20,
+		})
+		assert.Equal(t, int64(6<<20), op2.MaxBodyBytes)
+
+		// 3. ExplicitAppMaxBodyBytes overrides 32 MiB file default (even if set to 1 MiB)
+		op3, _ := compileOp[fileUploadReq, emptyRes](t, contract.CompileOptions{
+			HasExplicitRoute:        true,
+			ExplicitMethod:          http.MethodPost,
+			ExplicitPattern:         "/upload",
+			ExplicitAppMaxBodyBytes: 1 << 20,
+		})
+		assert.Equal(t, int64(1<<20), op3.MaxBodyBytes)
+
+		// 4. File default is 32 MiB
+		op4, _ := compileOp[fileUploadReq, emptyRes](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodPost,
+			ExplicitPattern:  "/upload",
+		})
+		assert.Equal(t, int64(32<<20), op4.MaxBodyBytes)
+		assert.True(t, op4.HasFileFields)
+
+		// 5. Numeric byte string in maxBody
+		op5, _ := compileOp[fileUploadWithMetaReq, emptyRes](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodPost,
+			ExplicitPattern:  "/upload",
+		})
+		assert.Equal(t, int64(5242880), op5.MaxBodyBytes)
+
+		// Invalid maxBody tags
+		type zeroMaxBody struct {
+			pi.Meta `path:"/x" method:"POST" maxBody:"0"`
+		}
+		type negMaxBody struct {
+			pi.Meta `path:"/x" method:"POST" maxBody:"-5MB"`
+		}
+		type overMaxBody struct {
+			pi.Meta `path:"/x" method:"POST" maxBody:"2GB"`
+		}
+		type overflowMaxBody struct {
+			pi.Meta `path:"/x" method:"POST" maxBody:"999999999999GB"`
+		}
+		type badUnitMaxBody struct {
+			pi.Meta `path:"/x" method:"POST" maxBody:"10TB"`
+		}
+		for _, rt := range []reflect.Type{
+			reflect.TypeOf((*zeroMaxBody)(nil)),
+			reflect.TypeOf((*negMaxBody)(nil)),
+			reflect.TypeOf((*overMaxBody)(nil)),
+			reflect.TypeOf((*overflowMaxBody)(nil)),
+			reflect.TypeOf((*badUnitMaxBody)(nil)),
+		} {
+			_, err := contract.CompileOperation("h", rt, reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{}, contract.NewSchemaRegistry())
+			assert.Error(t, err)
+		}
+
+		// BindAndValidate with piHTTP.NewRequest (no snapshot) respects op.MaxBodyBytes (> 1 MiB).
+		bigContent := bytes.Repeat([]byte("x"), 2<<20) // 2 MiB (> default 1 MiB, < 32 MiB)
+		bigReq := makeMultipartRequest(t, http.MethodPost, "/upload", nil, map[string][]struct {
+			filename string
+			content  []byte
+		}{
+			"file": {{filename: "big.bin", content: bigContent}},
+		})
+		var target fileUploadReq
+		require.NoError(t, op4.BindAndValidate(piHTTP.NewRequest(bigReq), &target, nil))
+		require.NotNil(t, target.File)
+		assert.Equal(t, "big.bin", target.File.Filename)
+		if bigReq.MultipartForm != nil {
+			_ = bigReq.MultipartForm.RemoveAll()
+		}
+	})
+}
+
+func TestMultipartFormAndFileContract(t *testing.T) {
+	t.Run("compile_time_tag_and_validation_guards", func(t *testing.T) {
+		type legacyFileTagTop struct {
+			File *multipart.FileHeader `file:"avatar"`
+		}
+		type nestedFormTag struct {
+			Inner struct {
+				Name string `form:"name"`
+			} `json:"inner"`
+		}
+		type nestedFileTag struct {
+			Inner struct {
+				Name string `file:"name"`
+			} `json:"inner"`
+		}
+		type resFormTag struct {
+			Name string `form:"name"`
+		}
+		type resFileTag struct {
+			Name string `file:"name"`
+		}
+		type untaggedFileHeaderInJSON struct {
+			File *multipart.FileHeader `json:"file"`
+		}
+		type untaggedFileHeaderInRes struct {
+			File *multipart.FileHeader `json:"file"`
+		}
+		type valueFileHeader struct {
+			File multipart.FileHeader `form:"file"`
+		}
+		type valueFileSlice struct {
+			Files []multipart.FileHeader `form:"files"`
+		}
+		type formWithJSONOption struct {
+			Title string `form:"title" json:",omitempty"`
+		}
+		type formWithComma struct {
+			Title string `form:"title,omitempty"`
+		}
+		type dupFormName struct {
+			A string `form:"name"`
+			B string `form:"name"`
+		}
+		type mixedFormAndJSON struct {
+			A string `form:"a"`
+			B string `json:"b"`
+		}
+		type fileWithDefault struct {
+			File *multipart.FileHeader `form:"file" default:"x"`
+		}
+		type fileWithExample struct {
+			File *multipart.FileHeader `form:"file" example:"x"`
+		}
+		type fileBadRuleEndswith struct {
+			File *multipart.FileHeader `form:"file" validate:"endswith=.png"`
+		}
+		type fileBadRuleEqfield struct {
+			Title string                `form:"title"`
+			File  *multipart.FileHeader `form:"file" validate:"eqfield=Title"`
+		}
+		type siblingRefFileEqfield struct {
+			Title string                `form:"title" validate:"eqfield=File"`
+			File  *multipart.FileHeader `form:"file"`
+		}
+		type siblingRefFileReqIfBadLit struct {
+			Title string                `form:"title" validate:"required_if=File foo"`
+			File  *multipart.FileHeader `form:"file"`
+		}
+		type siblingRefFileFilename struct {
+			Title string                `form:"title" validate:"required_with=File.Filename"`
+			File  *multipart.FileHeader `form:"file"`
+		}
+		type fileSliceBadRule struct {
+			Files []*multipart.FileHeader `form:"files" validate:"dive,email"`
+		}
+
+		badReqs := []reflect.Type{
+			reflect.TypeOf((*legacyFileTagTop)(nil)),
+			reflect.TypeOf((*nestedFormTag)(nil)),
+			reflect.TypeOf((*nestedFileTag)(nil)),
+			reflect.TypeOf((*untaggedFileHeaderInJSON)(nil)),
+			reflect.TypeOf((*valueFileHeader)(nil)),
+			reflect.TypeOf((*valueFileSlice)(nil)),
+			reflect.TypeOf((*formWithJSONOption)(nil)),
+			reflect.TypeOf((*formWithComma)(nil)),
+			reflect.TypeOf((*dupFormName)(nil)),
+			reflect.TypeOf((*mixedFormAndJSON)(nil)),
+			reflect.TypeOf((*fileWithDefault)(nil)),
+			reflect.TypeOf((*fileWithExample)(nil)),
+			reflect.TypeOf((*fileBadRuleEndswith)(nil)),
+			reflect.TypeOf((*fileBadRuleEqfield)(nil)),
+			reflect.TypeOf((*siblingRefFileEqfield)(nil)),
+			reflect.TypeOf((*siblingRefFileReqIfBadLit)(nil)),
+			reflect.TypeOf((*siblingRefFileFilename)(nil)),
+			reflect.TypeOf((*fileSliceBadRule)(nil)),
+		}
+		for _, rt := range badReqs {
+			_, err := contract.CompileOperation("h", rt, reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{
+				HasExplicitRoute: true,
+				ExplicitMethod:   http.MethodPost,
+				ExplicitPattern:  "/upload",
+			}, contract.NewSchemaRegistry())
+			assert.Error(t, err, "expected compile error for %v", rt)
+		}
+
+		// Forbidden form/file tags and FileHeader in Response structs.
+		type okReq struct{}
+		for _, resT := range []reflect.Type{
+			reflect.TypeOf((*resFormTag)(nil)),
+			reflect.TypeOf((*resFileTag)(nil)),
+			reflect.TypeOf((*untaggedFileHeaderInRes)(nil)),
+		} {
+			_, err := contract.CompileOperation("h", reflect.TypeOf((*okReq)(nil)), resT, contract.CompileOptions{
+				HasExplicitRoute: true,
+				ExplicitMethod:   http.MethodGet,
+				ExplicitPattern:  "/x",
+			}, contract.NewSchemaRegistry())
+			assert.Error(t, err, "expected compile error for res %v", resT)
+		}
+	})
+
+	t.Run("multipart_binding_validation_security_and_openapi", func(t *testing.T) {
+		type uploadReq struct {
+			pi.Meta `strict:"true" summary:"Upload media"`
+			Mode    string                  `form:"mode" default:"single"`
+			Tags    []string                `form:"tags"`
+			OptInt  *int                    `form:"optInt"`
+			File    *multipart.FileHeader   `form:"file" json:"-" validate:"required_if=Mode single"`
+			Gallery []*multipart.FileHeader `form:"gallery" validate:"omitempty,min=1,max=3,dive,required"`
+			Check   string                  `form:"check" validate:"required_if=File nil"`
+		}
+
+		op, sr := compileOp[uploadReq, simpleRes](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodPost,
+			ExplicitPattern:  "/media",
+		})
+		assert.True(t, op.HasFormFields)
+		assert.True(t, op.HasFileFields)
+		assert.False(t, op.HasBodyFields)
+
+		// OpenAPI checks: multipart/form-data only, non-nullable pointers, no minLength on binary items, additionalProperties: false.
+		oasOp := op.BuildOpenAPIOperation(sr)
+		require.NotNil(t, oasOp.RequestBody)
+		assert.Contains(t, oasOp.RequestBody.Content, "multipart/form-data")
+		assert.NotContains(t, oasOp.RequestBody.Content, "application/x-www-form-urlencoded")
+		assert.Contains(t, oasOp.Responses, "415")
+
+		reqRef := oasOp.RequestBody.Content["multipart/form-data"].Schema.Ref
+		require.NotEmpty(t, reqRef)
+		reqObj := sr.Schemas()[strings.TrimPrefix(reqRef, "#/components/schemas/")]
+		require.NotNil(t, reqObj)
+		require.NotNil(t, reqObj.AdditionalProperties)
+		require.NotNil(t, reqObj.AdditionalProperties.Allowed)
+		assert.False(t, *reqObj.AdditionalProperties.Allowed)
+
+		assert.Equal(t, "string", reqObj.Properties["file"].Type)
+		assert.Equal(t, "binary", reqObj.Properties["file"].Format)
+		assert.False(t, reqObj.Properties["file"].Nullable)
+		assert.False(t, reqObj.Properties["optInt"].Nullable)
+		assert.Equal(t, "array", reqObj.Properties["gallery"].Type)
+		require.NotNil(t, reqObj.Properties["gallery"].MinItems)
+		assert.Equal(t, 1, *reqObj.Properties["gallery"].MinItems)
+		assert.Nil(t, reqObj.Properties["gallery"].Items.MinLength)
+
+		// Valid multipart upload with repeated slice keys (no comma splitting).
+		req := makeMultipartRequest(t, http.MethodPost, "/media",
+			map[string][]string{
+				"tags": {"a,b", "c"},
+			},
+			map[string][]struct {
+				filename string
+				content  []byte
+			}{
+				"file": {{filename: "photo.png", content: []byte("PNGDATA")}},
+			},
+		)
+		var out uploadReq
+		require.NoError(t, op.BindAndValidate(piHTTP.NewRequest(req), &out, nil))
+		assert.Equal(t, "single", out.Mode)
+		assert.Equal(t, []string{"a,b", "c"}, out.Tags)
+		require.NotNil(t, out.File)
+		assert.Equal(t, "photo.png", out.File.Filename)
+		// RawReq.MultipartForm must remain populated (cleanup happens in handler.ServeHTTP).
+		assert.NotNil(t, req.MultipartForm)
+		_ = req.MultipartForm.RemoveAll()
+
+		// Empty <input type="file"> (filename="" in form.Value) allowed in strict mode when optional/triggered via Check.
+		reqEmptyInput := makeMultipartRequest(t, http.MethodPost, "/media",
+			map[string][]string{
+				"mode":  {"optional"},
+				"file":  {""},
+				"check": {"ok"},
+			},
+			nil,
+		)
+		var outEmpty uploadReq
+		require.NoError(t, op.BindAndValidate(piHTTP.NewRequest(reqEmptyInput), &outEmpty, nil))
+		assert.Nil(t, outEmpty.File)
+		_ = reqEmptyInput.MultipartForm.RemoveAll()
+
+		// Path traversal filenames rejected with 400 format.
+		for _, badName := range []string{"..", ".", `dir\evil.png`} {
+			var mpBuf bytes.Buffer
+			mw := multipart.NewWriter(&mpBuf)
+			require.NoError(t, mw.WriteField("mode", "single"))
+			part, err := mw.CreateFormFile("file", badName)
+			require.NoError(t, err)
+			_, err = part.Write([]byte("x"))
+			require.NoError(t, err)
+			require.NoError(t, mw.Close())
+
+			rawBody := mpBuf.Bytes()
+			badReq := httptest.NewRequest(http.MethodPost, "/media", bytes.NewReader(rawBody))
+			badReq.Header.Set("Content-Type", mw.FormDataContentType())
+			var target uploadReq
+			err = op.BindAndValidate(piHTTP.NewRequestWithSnapshot(badReq, nil, rawBody, true), &target, nil)
+			require.Error(t, err, "expected error for filename %q", badName)
+			assert.Contains(t, piHTTP.ErrorDetails(err), apperror.Detail{Field: "file", Rule: "format"})
+			if badReq.MultipartForm != nil {
+				_ = badReq.MultipartForm.RemoveAll()
+			}
+		}
+
+		// Multiple files on single-file field -> single_value.
+		reqMultiOnSingle := makeMultipartRequest(t, http.MethodPost, "/media", nil,
+			map[string][]struct {
+				filename string
+				content  []byte
+			}{
+				"file": {
+					{filename: "a.png", content: []byte("1")},
+					{filename: "b.png", content: []byte("2")},
+				},
+			},
+		)
+		var outMulti uploadReq
+		err := op.BindAndValidate(piHTTP.NewRequest(reqMultiOnSingle), &outMulti, nil)
+		require.Error(t, err)
+		assert.Contains(t, piHTTP.ErrorDetails(err), apperror.Detail{Field: "file", Rule: "single_value"})
+		_ = reqMultiOnSingle.MultipartForm.RemoveAll()
+
+		// File uploaded to scalar field -> type.
+		reqFileToScalar := makeMultipartRequest(t, http.MethodPost, "/media", nil,
+			map[string][]struct {
+				filename string
+				content  []byte
+			}{
+				"mode": {{filename: "a.txt", content: []byte("1")}},
+				"file": {{filename: "b.png", content: []byte("2")}},
+			},
+		)
+		var outScalarFile uploadReq
+		err = op.BindAndValidate(piHTTP.NewRequest(reqFileToScalar), &outScalarFile, nil)
+		require.Error(t, err)
+		assert.Contains(t, piHTTP.ErrorDetails(err), apperror.Detail{Field: "mode", Rule: "type"})
+		_ = reqFileToScalar.MultipartForm.RemoveAll()
+
+		// Non-empty text in file field -> type.
+		reqTextToFile := makeMultipartRequest(t, http.MethodPost, "/media",
+			map[string][]string{"file": {"not-a-file"}},
+			nil,
+		)
+		var outTextFile uploadReq
+		err = op.BindAndValidate(piHTTP.NewRequest(reqTextToFile), &outTextFile, nil)
+		require.Error(t, err)
+		assert.Contains(t, piHTTP.ErrorDetails(err), apperror.Detail{Field: "file", Rule: "type"})
+		_ = reqTextToFile.MultipartForm.RemoveAll()
+
+		// Unknown form field in strict mode -> unknown_field.
+		reqUnknown := makeMultipartRequest(t, http.MethodPost, "/media",
+			map[string][]string{"extra": {"1"}},
+			map[string][]struct {
+				filename string
+				content  []byte
+			}{
+				"file": {{filename: "a.png", content: []byte("1")}},
+			},
+		)
+		var outUnknown uploadReq
+		err = op.BindAndValidate(piHTTP.NewRequest(reqUnknown), &outUnknown, nil)
+		require.Error(t, err)
+		assert.Contains(t, piHTTP.ErrorDetails(err), apperror.Detail{Field: "extra", Rule: "unknown_field"})
+		_ = reqUnknown.MultipartForm.RemoveAll()
+
+		// Empty boundary -> 415; empty body with multipart/form-data -> 400; x-www-form-urlencoded with file field -> 415.
+		var target uploadReq
+		err = op.BindAndValidate(makePIRequest(http.MethodPost, "/media", []byte("abc"), "multipart/form-data", nil), &target, nil)
+		st415, _, _ := piHTTP.ErrorResponse(err)
+		assert.Equal(t, http.StatusUnsupportedMediaType, st415)
+
+		err = op.BindAndValidate(makePIRequest(http.MethodPost, "/media", []byte{}, "multipart/form-data; boundary=abc", nil), &target, nil)
+		st400, _, _ := piHTTP.ErrorResponse(err)
+		assert.Equal(t, http.StatusBadRequest, st400)
+
+		err = op.BindAndValidate(makePIRequest(http.MethodPost, "/media", []byte("mode=x"), "application/x-www-form-urlencoded", nil), &target, nil)
+		stURL415, _, _ := piHTTP.ErrorResponse(err)
+		assert.Equal(t, http.StatusUnsupportedMediaType, stURL415)
+	})
+
+	t.Run("scalar_form_dual_media_types_and_schema_isolation", func(t *testing.T) {
+		type scalarFormReq struct {
+			Title string `form:"title" validate:"required"`
+			Count int    `form:"count" default:"5"`
+		}
+		op, sr := compileOp[scalarFormReq, emptyRes](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodPost,
+			ExplicitPattern:  "/submit",
+		})
+		assert.True(t, op.HasFormFields)
+		assert.False(t, op.HasFileFields)
+
+		oasOp := op.BuildOpenAPIOperation(sr)
+		require.NotNil(t, oasOp.RequestBody)
+		mtMP := oasOp.RequestBody.Content["multipart/form-data"]
+		mtURL := oasOp.RequestBody.Content["application/x-www-form-urlencoded"]
+		require.NotNil(t, mtMP)
+		require.NotNil(t, mtURL)
+		assert.NotSame(t, mtMP.Schema, mtURL.Schema)
+
+		// urlencoded binding
+		var out scalarFormReq
+		require.NoError(t, op.BindAndValidate(makePIRequest(http.MethodPost, "/submit", []byte("title=hello"), "application/x-www-form-urlencoded", nil), &out, nil))
+		assert.Equal(t, "hello", out.Title)
+		assert.Equal(t, 5, out.Count)
+
+		// empty body without Content-Type triggers required validation (400)
+		var outEmpty scalarFormReq
+		err := op.BindAndValidate(makePIRequest(http.MethodPost, "/submit", nil, "", nil), &outEmpty, nil)
+		require.Error(t, err)
+		errStatus, _, _ := piHTTP.ErrorResponse(err)
+		assert.Equal(t, http.StatusBadRequest, errStatus)
+		assert.Contains(t, piHTTP.ErrorDetails(err), apperror.Detail{Field: "title", Rule: "required"})
+
+		// Local same-named structs across two functions/modes must not collide or overwrite in SchemaRegistry.
+		srIsolated := contract.NewSchemaRegistry()
+		registerLocal1 := func() *contract.CompiledOperation {
+			type item struct {
+				A string `json:"a"`
+			}
+			opA, err := contract.CompileOperation("a", reflect.TypeOf((*item)(nil)), reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{
+				HasExplicitRoute: true,
+				ExplicitMethod:   http.MethodPost,
+				ExplicitPattern:  "/a",
+			}, srIsolated)
+			require.NoError(t, err)
+			return opA
+		}
+		registerLocal2 := func() *contract.CompiledOperation {
+			type item struct {
+				B int `form:"b"`
+			}
+			opB, err := contract.CompileOperation("b", reflect.TypeOf((*item)(nil)), reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{
+				HasExplicitRoute: true,
+				ExplicitMethod:   http.MethodPost,
+				ExplicitPattern:  "/b",
+			}, srIsolated)
+			require.NoError(t, err)
+			return opB
+		}
+		opA := registerLocal1()
+		opB := registerLocal2()
+		oasA := opA.BuildOpenAPIOperation(srIsolated)
+		oasB := opB.BuildOpenAPIOperation(srIsolated)
+		refA := oasA.RequestBody.Content["application/json"].Schema.Ref
+		refB := oasB.RequestBody.Content["multipart/form-data"].Schema.Ref
+		assert.NotEqual(t, refA, refB)
+		schemas := srIsolated.Schemas()
+		assert.Contains(t, schemas[strings.TrimPrefix(refA, "#/components/schemas/")].Properties, "a")
+		assert.Contains(t, schemas[strings.TrimPrefix(refB, "#/components/schemas/")].Properties, "b")
+	})
+}
+
+func TestResponseFileAndXMLContracts(t *testing.T) {
+	t.Run("compile_time_produces_and_status_rules", func(t *testing.T) {
+		type jsonWithProduces struct {
+			pi.Meta `path:"/j" method:"GET" produces:"application/json"`
+		}
+		type file204 struct {
+			pi.Meta `path:"/f" method:"GET" status:"204"`
+		}
+		type xmlNullable struct {
+			pi.Meta `path:"/x" method:"GET" nullable:"true"`
+		}
+		type badProducesSlashless struct {
+			pi.Meta `path:"/f" method:"GET" produces:"png"`
+		}
+		type badProducesPrefixWildcard struct {
+			pi.Meta `path:"/f" method:"GET" produces:"*/png"`
+		}
+		type badProducesPartialWildcard struct {
+			pi.Meta `path:"/f" method:"GET" produces:"image/*png"`
+		}
+		type badProducesWildcardParams struct {
+			pi.Meta `path:"/f" method:"GET" produces:"image/*; q=0.8"`
+		}
+
+		for _, tc := range []struct {
+			req reflect.Type
+			res reflect.Type
+		}{
+			{reflect.TypeOf((*jsonWithProduces)(nil)), reflect.TypeOf((*simpleRes)(nil))},
+			{reflect.TypeOf((*file204)(nil)), reflect.TypeOf((*resTypes.File)(nil))},
+			{reflect.TypeOf((*xmlNullable)(nil)), reflect.TypeOf((*resTypes.XML)(nil))},
+			{reflect.TypeOf((*badProducesSlashless)(nil)), reflect.TypeOf((*resTypes.File)(nil))},
+			{reflect.TypeOf((*badProducesPrefixWildcard)(nil)), reflect.TypeOf((*resTypes.File)(nil))},
+			{reflect.TypeOf((*badProducesPartialWildcard)(nil)), reflect.TypeOf((*resTypes.File)(nil))},
+			{reflect.TypeOf((*badProducesWildcardParams)(nil)), reflect.TypeOf((*resTypes.File)(nil))},
+		} {
+			_, err := contract.CompileOperation("h", tc.req, tc.res, contract.CompileOptions{}, contract.NewSchemaRegistry())
+			assert.Error(t, err)
+		}
+	})
+
+	t.Run("file_wrap_response_and_openapi", func(t *testing.T) {
+		type imgReq struct {
+			pi.Meta `summary:"Serve image" produces:"image/*, image/PNG, image/png"`
+			ID      string `path:"id"`
+		}
+		op, sr := compileOp[imgReq, resTypes.File](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/uploads/{id}",
+		})
+		assert.Equal(t, contract.ResponseKindFile, op.ResponseKind)
+		assert.Equal(t, []string{"image/*", "image/png"}, op.Produces)
+		assert.Empty(t, sr.Schemas(), "response.File must never leak into components.schemas")
+
+		oasOp := op.BuildOpenAPIOperation(sr)
+		resp200 := oasOp.Responses["200"]
+		require.NotNil(t, resp200)
+		assert.Contains(t, resp200.Content, "image/*")
+		assert.Contains(t, resp200.Content, "image/png")
+		assert.Equal(t, "string", resp200.Content["image/*"].Schema.Type)
+		assert.Equal(t, "binary", resp200.Content["image/*"].Schema.Format)
+		assert.Empty(t, sr.Schemas())
+
+		// Shared pointer must not be mutated; returns dereferenced value inside Result.
+		shared := &resTypes.File{Content: []byte("img"), ContentType: "image/webp"}
+		wrapped, err := op.WrapResponse(shared, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 0, shared.StatusCode)
+		res, ok := wrapped.(resTypes.Result)
+		require.True(t, ok)
+		assert.Equal(t, 200, res.StatusCode)
+		fileVal, ok := res.Data.(resTypes.File)
+		require.True(t, ok)
+		assert.Equal(t, 200, fileVal.StatusCode)
+		assert.Equal(t, "image/webp", fileVal.ContentType)
+
+		// Headers["Content-Type"] preserved and synced to ContentType when ContentType is empty/whitespace.
+		wrappedHdr, err := op.WrapResponse(&resTypes.File{
+			Content:     []byte("png"),
+			ContentType: "   ",
+			Headers:     map[string]string{"content-type": "image/png"},
+		}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "image/png", wrappedHdr.(resTypes.Result).Data.(resTypes.File).ContentType)
+		assert.Equal(t, "image/png", wrappedHdr.(resTypes.Result).Data.(resTypes.File).Headers["content-type"])
+
+		// Mixed-case Headers["content-type"] violating produces:"image/*" must fail with 500.
+		_, err = op.WrapResponse(&resTypes.File{
+			Content: []byte("<html/>"),
+			Headers: map[string]string{"content-type": "text/html"},
+		}, nil)
+		require.Error(t, err)
+
+		// Conflicting mixed-case Content-Type headers must fail with 500.
+		_, err = op.WrapResponse(&resTypes.File{
+			Content: []byte("png"),
+			Headers: map[string]string{
+				"Content-Type": "image/png",
+				"content-type": "image/webp",
+			},
+		}, nil)
+		require.Error(t, err)
+
+		// Empty ContentType with produces:"image/*, image/png" (first range is wildcard) must fail per §4.6.3.
+		_, err = op.WrapResponse(&resTypes.File{Content: []byte("x")}, nil)
+		require.Error(t, err)
+
+		// Mismatched ContentType against explicit produces:"image/*" fails with 500.
+		_, err = op.WrapResponse(&resTypes.File{Content: []byte("<html/>"), ContentType: "text/html"}, nil)
+		require.Error(t, err)
+
+		// Mismatched StatusCode fails with 500.
+		_, err = op.WrapResponse(&resTypes.File{Content: []byte("x"), ContentType: "image/png", StatusCode: 201}, nil)
+		require.Error(t, err)
+
+		// Wildcard produces:"image/*" with empty ContentType fails (cannot default to application/octet-stream).
+		type wildcardOnlyReq struct {
+			pi.Meta `produces:"image/*"`
+		}
+		opWild, _ := compileOp[wildcardOnlyReq, resTypes.File](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/wild",
+		})
+		_, err = opWild.WrapResponse(&resTypes.File{Content: []byte("x")}, nil)
+		require.Error(t, err)
+
+		// Default File (no produces) defaults empty ContentType to application/octet-stream.
+		type defaultFileReq struct{}
+		opDef, _ := compileOp[defaultFileReq, resTypes.File](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/dl",
+		})
+		wrappedDef, err := opDef.WrapResponse(&resTypes.File{Content: []byte("x")}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "application/octet-stream", wrappedDef.(resTypes.Result).Data.(resTypes.File).ContentType)
+	})
+
+	t.Run("xml_wrap_response_and_openapi", func(t *testing.T) {
+		type rssReq struct {
+			pi.Meta `produces:"application/rss+xml"`
+		}
+		op, sr := compileOp[rssReq, resTypes.XML](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/rss.xml",
+		})
+		assert.Equal(t, contract.ResponseKindXML, op.ResponseKind)
+		assert.Equal(t, []string{"application/rss+xml"}, op.Produces)
+		assert.Empty(t, sr.Schemas())
+
+		oasOp := op.BuildOpenAPIOperation(sr)
+		mt := oasOp.Responses["200"].Content["application/rss+xml"]
+		require.NotNil(t, mt)
+		assert.Equal(t, "string", mt.Schema.Type)
+		assert.Empty(t, sr.Schemas())
+
+		// ContentType with charset parameter matches produces:"application/rss+xml".
+		wrapped, err := op.WrapResponse(&resTypes.XML{
+			Content:     []byte("<rss/>"),
+			ContentType: "application/rss+xml; charset=utf-8",
+		}, nil)
+		require.NoError(t, err)
+		xmlVal, ok := wrapped.(resTypes.Result).Data.(resTypes.XML)
+		require.True(t, ok)
+		assert.Equal(t, "application/rss+xml; charset=utf-8", xmlVal.ContentType)
+
+		// Empty ContentType fills concrete produces[0].
+		wrappedEmpty, err := op.WrapResponse(&resTypes.XML{Content: []byte("<rss/>")}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "application/rss+xml", wrappedEmpty.(resTypes.Result).Data.(resTypes.XML).ContentType)
+	})
+
+	t.Run("anonymous_and_ignored_response_package_structs_rejected", func(t *testing.T) {
+		type okReq struct{}
+		type anonHandledRes struct{ resTypes.Handled }
+		type anonPtrHandledRes struct{ *resTypes.Handled }
+		type anonFileRes struct{ resTypes.File }
+		type ignoredHandledRes struct {
+			H *resTypes.Handled `json:"-"`
+		}
+		type anonFileReq struct{ resTypes.File }
+		type anonPtrHandledReq struct{ *resTypes.Handled }
+		type ignoredFileReq struct {
+			F *resTypes.File `json:"-"`
+		}
+		type nestedAnonHandledReq struct {
+			Inner struct {
+				*resTypes.Handled
+			} `json:"inner"`
+		}
+		type nestedIgnoredXMLReq struct {
+			Inner struct {
+				X *resTypes.XML `json:"-"`
+			} `json:"inner"`
+		}
+
+		for _, resT := range []reflect.Type{
+			reflect.TypeOf((*anonHandledRes)(nil)),
+			reflect.TypeOf((*anonPtrHandledRes)(nil)),
+			reflect.TypeOf((*anonFileRes)(nil)),
+			reflect.TypeOf((*ignoredHandledRes)(nil)),
+		} {
+			_, err := contract.CompileOperation("h", reflect.TypeOf((*okReq)(nil)), resT, contract.CompileOptions{
+				HasExplicitRoute: true,
+				ExplicitMethod:   http.MethodGet,
+				ExplicitPattern:  "/bad-res",
+			}, contract.NewSchemaRegistry())
+			assert.Error(t, err, "expected compile error for response type %v", resT)
+		}
+
+		for _, reqT := range []reflect.Type{
+			reflect.TypeOf((*anonFileReq)(nil)),
+			reflect.TypeOf((*anonPtrHandledReq)(nil)),
+			reflect.TypeOf((*ignoredFileReq)(nil)),
+			reflect.TypeOf((*nestedAnonHandledReq)(nil)),
+			reflect.TypeOf((*nestedIgnoredXMLReq)(nil)),
+		} {
+			_, err := contract.CompileOperation("h", reqT, reflect.TypeOf((*emptyRes)(nil)), contract.CompileOptions{
+				HasExplicitRoute: true,
+				ExplicitMethod:   http.MethodPost,
+				ExplicitPattern:  "/bad-req",
+			}, contract.NewSchemaRegistry())
+			assert.Error(t, err, "expected compile error for request type %v", reqT)
+		}
 	})
 }

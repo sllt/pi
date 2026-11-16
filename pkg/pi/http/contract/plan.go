@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"mime/multipart"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -19,14 +20,22 @@ import (
 	"github.com/sllt/pi/pkg/pi/openapi"
 )
 
+const (
+	defaultMaxBodyBytes     int64 = 1 << 20  // 1 MiB
+	defaultFileMaxBodyBytes int64 = 32 << 20 // 32 MiB
+	maxAllowedBodyBytes     int64 = 1 << 30  // 1 GiB
+)
+
 var (
-	timeType            = reflect.TypeOf(time.Time{})
-	uuidType            = reflect.TypeOf(uuid.UUID{})
-	jsonRawMessageType  = reflect.TypeOf(json.RawMessage(nil))
-	jsonMarshalerType   = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
-	jsonUnmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
-	textMarshalerType   = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
-	textUnmarshalerType = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
+	timeType                   = reflect.TypeOf(time.Time{})
+	uuidType                   = reflect.TypeOf(uuid.UUID{})
+	jsonRawMessageType         = reflect.TypeOf(json.RawMessage(nil))
+	multipartFileHeaderType    = reflect.TypeOf(multipart.FileHeader{})
+	multipartFileHeaderPtrType = reflect.TypeOf((*multipart.FileHeader)(nil))
+	jsonMarshalerType          = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	jsonUnmarshalerType        = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
+	textMarshalerType          = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+	textUnmarshalerType        = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 )
 
 var reservedHeaderNames = map[string]struct{}{
@@ -39,6 +48,8 @@ var unexportedForbiddenTags = []string{
 	"path",
 	"query",
 	"header",
+	"form",
+	"file",
 	"default",
 	"validate",
 	"binding",
@@ -47,19 +58,33 @@ var unexportedForbiddenTags = []string{
 	"example",
 }
 
+// ResponseKind identifies the wire response format produced by a typed operation.
+type ResponseKind uint8
+
+const (
+	ResponseKindJSON ResponseKind = iota
+	ResponseKindFile
+	ResponseKindXML
+)
+
 // CompileOptions supplies group/endpoint inheritance and strict JSON configuration
 // when compiling a typed operation contract.
 type CompileOptions struct {
-	GroupPrefix        string
-	DefaultStrictJSON  bool
-	StrictJSONOverride *bool
-	InheritedTags      []string
-	HasInheritedSec    bool
-	InheritedSecurity  []string // nil if unset; empty non-nil slice []string{} if DocNoSecurity; scheme names if DocSecurity
-	HasEndpointTags    bool
-	EndpointTags       []string
-	HasEndpointSec     bool
-	EndpointSecurity   []string // nil if unset; empty non-nil slice []string{} if DocNoSecurity; scheme names if DocSecurity
+	GroupPrefix             string
+	HasExplicitRoute        bool
+	ExplicitMethod          string
+	ExplicitPattern         string
+	EndpointMaxBodyBytes    int64
+	ExplicitAppMaxBodyBytes int64
+	DefaultStrictJSON       bool
+	StrictJSONOverride      *bool
+	InheritedTags           []string
+	HasInheritedSec         bool
+	InheritedSecurity       []string // nil if unset; empty non-nil slice []string{} if DocNoSecurity; scheme names if DocSecurity
+	HasEndpointTags         bool
+	EndpointTags            []string
+	HasEndpointSec          bool
+	EndpointSecurity        []string // nil if unset; empty non-nil slice []string{} if DocNoSecurity; scheme names if DocSecurity
 }
 
 // CompiledOperation holds the immutable registration-time contract, FieldPlan,
@@ -81,21 +106,41 @@ type CompiledOperation struct {
 	Security             *[]openapi.SecurityRequirement
 	ReferencedSecSchemes []string
 	StrictJSON           bool
+	MaxBodyBytes         int64
 	HasBodyFields        bool
+	HasFormFields        bool
+	HasFileFields        bool
+	ResponseKind         ResponseKind
+	Produces             []string
 	EmptyResponse        bool
 	NullableRes          bool
 	ReqType              reflect.Type // struct Elem of *Req
 	ResType              reflect.Type // struct Elem of *Res
 
-	pathParamsOrder []string
-	pathFields      []*compiledField
-	queryFields     []*compiledField
-	headerFields    []*compiledField
-	bodyFields      []*compiledField
-	bodyPlan        *jsonStructPlan
-	fieldByChain    map[string]*compiledField
-	valValidator    *validator.Validate
-	bindValidator   *validator.Validate
+	hasExplicitProduces bool
+	pathParamsOrder     []string
+	pathFields          []*compiledField
+	queryFields         []*compiledField
+	headerFields        []*compiledField
+	formFields          []*compiledField
+	formByName          map[string]*compiledField
+	bodyFields          []*compiledField
+	bodyPlan            *jsonStructPlan
+	fieldByChain        map[string]*compiledField
+	valValidator        *validator.Validate
+	bindValidator       *validator.Validate
+}
+
+// EffectiveMaxBodyBytes returns the compiled max request body byte limit,
+// falling back to 32 MiB for file-upload routes or 1 MiB otherwise.
+func (op *CompiledOperation) EffectiveMaxBodyBytes() int64 {
+	if op != nil && op.MaxBodyBytes > 0 {
+		return op.MaxBodyBytes
+	}
+	if op != nil && op.HasFileFields {
+		return defaultFileMaxBodyBytes
+	}
+	return defaultMaxBodyBytes
 }
 
 type fieldSource uint8
@@ -104,6 +149,7 @@ const (
 	sourcePath fieldSource = iota + 1
 	sourceQuery
 	sourceHeader
+	sourceForm
 	sourceBody
 )
 
@@ -115,12 +161,22 @@ func (s fieldSource) prefix() string {
 		return "query"
 	case sourceHeader:
 		return "header"
+	case sourceForm:
+		return "form"
 	case sourceBody:
 		return "body"
 	default:
 		return ""
 	}
 }
+
+type formFileKind uint8
+
+const (
+	fileNone formFileKind = iota
+	fileSingle
+	fileMulti
+)
 
 type scalarKind uint8
 
@@ -158,6 +214,8 @@ type compiledField struct {
 	isJSONString  bool
 	omitempty     bool
 	isSlice       bool
+	isFile        bool
+	fileKind      formFileKind
 	scalar        compiledScalarType
 	hasDefault    bool
 	defaultRaw    string
@@ -229,7 +287,11 @@ func CompileOperation(
 	opts CompileOptions,
 	sr *SchemaRegistry,
 ) (*CompiledOperation, error) {
-	reqType, resType, err := validateReqResPtrTypes(reqPtrType, resPtrType)
+	if opts.EndpointMaxBodyBytes < 0 || opts.EndpointMaxBodyBytes > maxAllowedBodyBytes {
+		return nil, wrapCompileErr(handlerName, fmt.Errorf("endpoint maxBodyBytes %d must be between 0 and %d", opts.EndpointMaxBodyBytes, maxAllowedBodyBytes))
+	}
+
+	reqType, resType, resKind, err := validateReqResPtrTypes(reqPtrType, resPtrType)
 	if err != nil {
 		return nil, wrapCompileErr(handlerName, err)
 	}
@@ -237,7 +299,7 @@ func CompileOperation(
 		return nil, wrapCompileErr(handlerName, fmt.Errorf("request struct %s: %w", typeDisplayName(reqType), err))
 	}
 
-	meta, err := extractAndValidateMeta(reqType, opts)
+	meta, err := extractAndValidateMeta(reqType, opts, resKind)
 	if err != nil {
 		return nil, wrapCompileErr(handlerName, err)
 	}
@@ -248,6 +310,7 @@ func CompileOperation(
 		seenPathNames: make(map[string]struct{}),
 		seenQuery:     make(map[string]struct{}),
 		seenHeaders:   make(map[string]struct{}),
+		seenForm:      make(map[string]struct{}),
 		seenBody:      make(map[string]struct{}),
 		structMemo:    make(map[reflect.Type]*jsonStructPlan),
 	}
@@ -257,8 +320,41 @@ func CompileOperation(
 	}
 
 	hasBodyFields := len(collector.bodyFields) > 0
-	if (meta.method == http.MethodGet || meta.method == http.MethodDelete) && hasBodyFields {
+	hasFormFields := len(collector.formFields) > 0
+	if hasBodyFields && hasFormFields {
+		return nil, wrapCompileErr(handlerName, fmt.Errorf("request struct %s cannot mix form fields with JSON body fields", typeDisplayName(reqType)))
+	}
+	if isBodylessMethod(meta.method) && (hasBodyFields || hasFormFields) {
+		if hasFormFields {
+			return nil, wrapCompileErr(handlerName, fmt.Errorf("%s %s (%s) cannot declare form/file fields; use query/path/header tags", meta.method, meta.canonicalPath, typeDisplayName(reqType)))
+		}
 		return nil, wrapCompileErr(handlerName, fmt.Errorf("%s %s (%s) cannot declare JSON body fields; use query/path/header tags", meta.method, meta.canonicalPath, typeDisplayName(reqType)))
+	}
+
+	hasFileFields := false
+	var formByName map[string]*compiledField
+	if hasFormFields {
+		formByName = make(map[string]*compiledField, len(collector.formFields))
+		for _, cf := range collector.formFields {
+			formByName[cf.externalName] = cf
+			if cf.isFile {
+				hasFileFields = true
+			}
+		}
+	}
+
+	var maxBodyBytes int64
+	switch {
+	case opts.EndpointMaxBodyBytes > 0:
+		maxBodyBytes = opts.EndpointMaxBodyBytes
+	case meta.maxBodyBytes > 0:
+		maxBodyBytes = meta.maxBodyBytes
+	case opts.ExplicitAppMaxBodyBytes > 0:
+		maxBodyBytes = opts.ExplicitAppMaxBodyBytes
+	case hasFileFields:
+		maxBodyBytes = defaultFileMaxBodyBytes
+	default:
+		maxBodyBytes = defaultMaxBodyBytes
 	}
 
 	if err := validatePathParamPairing(reqType, meta.pathParams, collector.pathFields); err != nil {
@@ -274,13 +370,16 @@ func CompileOperation(
 		return nil, wrapCompileErr(handlerName, err)
 	}
 
-	resFieldCount, err := validateResponseType(resType, make(map[reflect.Type]bool), collector.structMemo)
-	if err != nil {
-		return nil, wrapCompileErr(handlerName, err)
-	}
-	emptyResponse := resFieldCount == 0
-	if meta.status == http.StatusNoContent && !emptyResponse {
-		return nil, wrapCompileErr(handlerName, fmt.Errorf("status 204 requires empty response struct, but %s has %d exported JSON field(s)", typeDisplayName(resType), resFieldCount))
+	emptyResponse := false
+	if resKind == ResponseKindJSON {
+		resFieldCount, err := validateResponseType(resType, make(map[reflect.Type]bool), collector.structMemo)
+		if err != nil {
+			return nil, wrapCompileErr(handlerName, err)
+		}
+		emptyResponse = resFieldCount == 0
+		if meta.status == http.StatusNoContent && !emptyResponse {
+			return nil, wrapCompileErr(handlerName, fmt.Errorf("status 204 requires empty response struct, but %s has %d exported JSON field(s)", typeDisplayName(resType), resFieldCount))
+		}
 	}
 
 	op := &CompiledOperation{
@@ -300,15 +399,23 @@ func CompileOperation(
 		Security:             meta.security,
 		ReferencedSecSchemes: meta.referencedSecSchemes,
 		StrictJSON:           meta.strictJSON,
+		MaxBodyBytes:         maxBodyBytes,
 		HasBodyFields:        hasBodyFields,
+		HasFormFields:        hasFormFields,
+		HasFileFields:        hasFileFields,
+		ResponseKind:         resKind,
+		Produces:             meta.produces,
 		EmptyResponse:        emptyResponse,
 		NullableRes:          meta.nullableRes,
 		ReqType:              reqType,
 		ResType:              resType,
+		hasExplicitProduces:  meta.hasExplicitProduces,
 		pathParamsOrder:      meta.pathParams,
 		pathFields:           collector.pathFields,
 		queryFields:          collector.queryFields,
 		headerFields:         collector.headerFields,
+		formFields:           collector.formFields,
+		formByName:           formByName,
 		bodyFields:           collector.bodyFields,
 		bodyPlan:             bodyPlan,
 		fieldByChain:         collector.fieldByChain,
@@ -341,11 +448,13 @@ type reqCollector struct {
 	pathFields         []*compiledField
 	queryFields        []*compiledField
 	headerFields       []*compiledField
+	formFields         []*compiledField
 	bodyFields         []*compiledField
 	fieldByChain       map[string]*compiledField
 	seenPathNames      map[string]struct{}
 	seenQuery          map[string]struct{}
 	seenHeaders        map[string]struct{}
+	seenForm           map[string]struct{}
 	seenBody           map[string]struct{}
 	structMemo         map[reflect.Type]*jsonStructPlan
 	hasValidate        bool
@@ -362,7 +471,7 @@ func (rc *reqCollector) collectTopLevel(t reflect.Type, prefixChain []int) error
 		chain := append(append([]int(nil), prefixChain...), i)
 
 		if f.Anonymous && f.Type.Kind() == reflect.Ptr && f.Type.Elem().Kind() == reflect.Struct {
-			if hasAnyContractTags(f) || structHasTaggedOrExportedFields(f.Type.Elem(), make(map[reflect.Type]bool)) {
+			if isResponsePackageStruct(f.Type.Elem()) || hasAnyContractTags(f) || structHasTaggedOrExportedFields(f.Type.Elem(), make(map[reflect.Type]bool)) {
 				return fmt.Errorf("request struct %s cannot embed anonymous pointer struct *%s", typeDisplayName(rc.reqType), typeDisplayName(f.Type.Elem()))
 			}
 			continue
@@ -415,6 +524,8 @@ func (rc *reqCollector) collectTopLevel(t reflect.Type, prefixChain []int) error
 			rc.queryFields = append(rc.queryFields, cf)
 		case sourceHeader:
 			rc.headerFields = append(rc.headerFields, cf)
+		case sourceForm:
+			rc.formFields = append(rc.formFields, cf)
 		case sourceBody:
 			rc.bodyFields = append(rc.bodyFields, cf)
 		}
@@ -423,9 +534,17 @@ func (rc *reqCollector) collectTopLevel(t reflect.Type, prefixChain []int) error
 }
 
 func (rc *reqCollector) compileTopLevelField(ownerType reflect.Type, f reflect.StructField, chain []int) (*compiledField, bool, error) {
+	if ft := unwrapPtrType(f.Type); ft != nil && ft.PkgPath() == httpResponsePackagePath {
+		return nil, false, fmt.Errorf("field %s.%s cannot use control response type %s.%s", typeDisplayName(ownerType), f.Name, ft.PkgPath(), ft.Name())
+	}
+	if _, hasFileTag := f.Tag.Lookup("file"); hasFileTag {
+		return nil, false, fmt.Errorf("field %s.%s uses legacy \"file\" tag; use form:\"name\" instead", typeDisplayName(ownerType), f.Name)
+	}
+
 	pathVal, hasPath := f.Tag.Lookup("path")
 	queryVal, hasQuery := f.Tag.Lookup("query")
 	headerVal, hasHeader := f.Tag.Lookup("header")
+	formVal, hasForm := f.Tag.Lookup("form")
 
 	sourceCount := 0
 	if hasPath {
@@ -437,8 +556,11 @@ func (rc *reqCollector) compileTopLevelField(ownerType reflect.Type, f reflect.S
 	if hasHeader {
 		sourceCount++
 	}
+	if hasForm {
+		sourceCount++
+	}
 	if sourceCount > 1 {
-		return nil, false, fmt.Errorf("field %s.%s cannot declare multiple source tags (path/query/header)", typeDisplayName(ownerType), f.Name)
+		return nil, false, fmt.Errorf("field %s.%s cannot declare multiple source tags (path/query/header/form)", typeDisplayName(ownerType), f.Name)
 	}
 
 	validateTag, usedBindingFallback, err := resolveFieldValidationTag(f, ownerType)
@@ -498,6 +620,19 @@ func (rc *reqCollector) compileTopLevelField(ownerType reflect.Type, f reflect.S
 		rc.seenHeaders[lowerName] = struct{}{}
 		src = sourceHeader
 		extName = headerVal
+	case hasForm:
+		if rawJSON, hasJSON := f.Tag.Lookup("json"); hasJSON && rawJSON != "-" {
+			return nil, false, fmt.Errorf("form field %s.%s cannot combine form tag with json:%q", typeDisplayName(ownerType), f.Name, rawJSON)
+		}
+		if err := validateParamTagName("form", formVal, ownerType, f); err != nil {
+			return nil, false, err
+		}
+		if _, dup := rc.seenForm[formVal]; dup {
+			return nil, false, fmt.Errorf("duplicate form parameter %q on %s", formVal, typeDisplayName(rc.reqType))
+		}
+		rc.seenForm[formVal] = struct{}{}
+		src = sourceForm
+		extName = formVal
 	default:
 		if skipJSON {
 			if hasDefault {
@@ -539,11 +674,16 @@ func (rc *reqCollector) compileTopLevelField(ownerType reflect.Type, f reflect.S
 		omitempty:    omitempty,
 	}
 
-	if src == sourcePath || src == sourceQuery || src == sourceHeader {
+	switch src {
+	case sourcePath, sourceQuery, sourceHeader:
 		if err := compileNonBodyFieldType(cf, ownerType, f); err != nil {
 			return nil, false, err
 		}
-	} else {
+	case sourceForm:
+		if err := compileFormFieldType(cf, ownerType, f); err != nil {
+			return nil, false, err
+		}
+	default:
 		spec, err := rc.buildJSONTypeSpec(f.Type, isJSONString, false, rc.structMemo)
 		if err != nil {
 			return nil, false, fmt.Errorf("field %s.%s: %w", typeDisplayName(ownerType), f.Name, err)
@@ -555,6 +695,9 @@ func (rc *reqCollector) compileTopLevelField(ownerType reflect.Type, f reflect.S
 	}
 
 	if hasDefault {
+		if cf.isFile {
+			return nil, false, fmt.Errorf("file form field %s.%s cannot declare default value", typeDisplayName(ownerType), f.Name)
+		}
 		if src == sourcePath {
 			return nil, false, fmt.Errorf("path field %s.%s cannot declare default value", typeDisplayName(ownerType), f.Name)
 		}
@@ -575,6 +718,9 @@ func (rc *reqCollector) compileTopLevelField(ownerType reflect.Type, f reflect.S
 	}
 
 	if hasExample {
+		if cf.isFile {
+			return nil, false, fmt.Errorf("file form field %s.%s cannot declare example", typeDisplayName(ownerType), f.Name)
+		}
 		exVal, err := parseAndValidateExample(exampleRaw, f.Type, cf.scalar, cf.isSlice, src == sourceBody && cf.isJSONString)
 		if err != nil {
 			return nil, false, fmt.Errorf("field %s.%s has invalid example %q: %w", typeDisplayName(ownerType), f.Name, exampleRaw, err)
@@ -584,6 +730,52 @@ func (rc *reqCollector) compileTopLevelField(ownerType reflect.Type, f reflect.S
 	}
 
 	return cf, false, nil
+}
+
+func compileFormFieldType(cf *compiledField, ownerType reflect.Type, f reflect.StructField) error {
+	ft := f.Type
+	if ft == multipartFileHeaderPtrType {
+		cf.isFile = true
+		cf.fileKind = fileSingle
+		return nil
+	}
+	if ft == multipartFileHeaderType {
+		return fmt.Errorf("form field %s.%s must use *multipart.FileHeader pointer instead of value multipart.FileHeader", typeDisplayName(ownerType), f.Name)
+	}
+	if ft.Kind() == reflect.Slice {
+		if ft.Elem() == multipartFileHeaderPtrType {
+			cf.isFile = true
+			cf.isSlice = true
+			cf.fileKind = fileMulti
+			return nil
+		}
+		if ft.Elem() == multipartFileHeaderType {
+			return fmt.Errorf("form field %s.%s must use []*multipart.FileHeader pointer slice instead of []multipart.FileHeader", typeDisplayName(ownerType), f.Name)
+		}
+		if err := checkNoCustomCodec(ft.Elem()); err != nil {
+			return fmt.Errorf("form field %s.%s: %w", typeDisplayName(ownerType), f.Name, err)
+		}
+		if ft == jsonRawMessageType || (ft.Elem().Kind() == reflect.Uint8 && ft.Elem() == reflect.TypeOf(byte(0))) {
+			return fmt.Errorf("form field %s.%s cannot use raw byte slice %s", typeDisplayName(ownerType), f.Name, ft.String())
+		}
+		scalar, ok := classifyScalarType(ft.Elem(), false)
+		if !ok || scalar.isPtr {
+			return fmt.Errorf("form slice field %s.%s has unsupported element type %s", typeDisplayName(ownerType), f.Name, ft.Elem().String())
+		}
+		cf.isSlice = true
+		cf.scalar = scalar
+		return nil
+	}
+
+	if err := checkNoCustomCodec(ft); err != nil {
+		return fmt.Errorf("form field %s.%s: %w", typeDisplayName(ownerType), f.Name, err)
+	}
+	scalar, ok := classifyScalarType(ft, true)
+	if !ok {
+		return fmt.Errorf("form field %s.%s has unsupported type %s", typeDisplayName(ownerType), f.Name, ft.String())
+	}
+	cf.scalar = scalar
+	return nil
 }
 
 func compileNonBodyFieldType(cf *compiledField, ownerType reflect.Type, f reflect.StructField) error {
@@ -715,6 +907,12 @@ func (rc *reqCollector) buildJSONTypeSpec(t reflect.Type, asJSONString bool, all
 		if IsPiMetaType(cur) {
 			return nil, fmt.Errorf("pi.Meta cannot appear inside nested body struct")
 		}
+		if cur == multipartFileHeaderType {
+			return nil, fmt.Errorf("multipart.FileHeader requires a form:\"name\" tag on a top-level request field and cannot be used in JSON request or response types")
+		}
+		if cur.PkgPath() == httpResponsePackagePath {
+			return nil, fmt.Errorf("type %s.%s from package response cannot be nested inside a request or JSON response struct", cur.PkgPath(), cur.Name())
+		}
 		if sp, ok := memo[cur]; ok {
 			return &jsonTypeSpec{
 				goType:     t,
@@ -763,7 +961,7 @@ func (rc *reqCollector) populateNestedStructPlan(t reflect.Type, prefixChain []i
 		chain := append(append([]int(nil), prefixChain...), i)
 
 		if f.Anonymous && f.Type.Kind() == reflect.Ptr && f.Type.Elem().Kind() == reflect.Struct {
-			if hasAnyContractTags(f) || structHasTaggedOrExportedFields(f.Type.Elem(), make(map[reflect.Type]bool)) {
+			if isResponsePackageStruct(f.Type.Elem()) || hasAnyContractTags(f) || structHasTaggedOrExportedFields(f.Type.Elem(), make(map[reflect.Type]bool)) {
 				return fmt.Errorf("nested struct %s cannot embed anonymous pointer struct *%s", typeDisplayName(t), typeDisplayName(f.Type.Elem()))
 			}
 			continue
@@ -782,6 +980,13 @@ func (rc *reqCollector) populateNestedStructPlan(t reflect.Type, prefixChain []i
 				}
 			}
 			continue
+		}
+
+		if _, ok := f.Tag.Lookup("file"); ok {
+			return fmt.Errorf("nested struct field %s.%s cannot declare file tag; use form:\"name\" on top-level request field", typeDisplayName(t), f.Name)
+		}
+		if _, ok := f.Tag.Lookup("form"); ok {
+			return fmt.Errorf("nested struct field %s.%s cannot declare form tag", typeDisplayName(t), f.Name)
 		}
 
 		if !allowRequestTags {
@@ -808,6 +1013,10 @@ func (rc *reqCollector) populateNestedStructPlan(t reflect.Type, prefixChain []i
 				return err
 			}
 			continue
+		}
+
+		if ft := unwrapPtrType(f.Type); ft != nil && ft.PkgPath() == httpResponsePackagePath {
+			return fmt.Errorf("nested struct field %s.%s cannot use control response type %s.%s", typeDisplayName(t), f.Name, ft.PkgPath(), ft.Name())
 		}
 
 		jsonName, skipJSON, omitempty, isJSONString := parseJSONTag(f)
@@ -956,7 +1165,7 @@ func validateResponseStructFields(t reflect.Type, sp *jsonStructPlan, rc *reqCol
 		f := t.Field(i)
 
 		if f.Anonymous && f.Type.Kind() == reflect.Ptr && f.Type.Elem().Kind() == reflect.Struct {
-			if hasAnyContractTags(f) || structHasTaggedOrExportedFields(f.Type.Elem(), make(map[reflect.Type]bool)) {
+			if isResponsePackageStruct(f.Type.Elem()) || hasAnyContractTags(f) || structHasTaggedOrExportedFields(f.Type.Elem(), make(map[reflect.Type]bool)) {
 				return fmt.Errorf("response struct %s cannot embed anonymous pointer struct *%s", typeDisplayName(t), typeDisplayName(f.Type.Elem()))
 			}
 			continue
@@ -983,6 +1192,12 @@ func validateResponseStructFields(t reflect.Type, sp *jsonStructPlan, rc *reqCol
 		if _, ok := f.Tag.Lookup("header"); ok {
 			return fmt.Errorf("response field %s.%s cannot declare header tag", typeDisplayName(t), f.Name)
 		}
+		if _, ok := f.Tag.Lookup("form"); ok {
+			return fmt.Errorf("response field %s.%s cannot declare form tag", typeDisplayName(t), f.Name)
+		}
+		if _, ok := f.Tag.Lookup("file"); ok {
+			return fmt.Errorf("response field %s.%s cannot declare file tag; use form:\"name\" on request field", typeDisplayName(t), f.Name)
+		}
 		if hasOmitZeroTag(f) {
 			return fmt.Errorf("response field %s.%s uses unsupported json \"omitzero\" option", typeDisplayName(t), f.Name)
 		}
@@ -995,6 +1210,10 @@ func validateResponseStructFields(t reflect.Type, sp *jsonStructPlan, rc *reqCol
 				return err
 			}
 			continue
+		}
+
+		if ft := unwrapPtrType(f.Type); ft != nil && ft.PkgPath() == httpResponsePackagePath {
+			return fmt.Errorf("response field %s.%s cannot use control response type %s.%s", typeDisplayName(t), f.Name, ft.PkgPath(), ft.Name())
 		}
 
 		jsonName, skipJSON, omitempty, isJSONString := parseJSONTag(f)
@@ -1090,7 +1309,7 @@ func resolveFieldValidationTag(f reflect.StructField, owner reflect.Type) (strin
 }
 
 func validateParamTagName(tagName, val string, owner reflect.Type, f reflect.StructField) error {
-	if val == "" || val == "-" {
+	if val == "" || val == "-" || strings.Contains(val, ",") {
 		return fmt.Errorf("field %s.%s has invalid %s tag %q", typeDisplayName(owner), f.Name, tagName, val)
 	}
 	for _, r := range val {
@@ -1139,7 +1358,7 @@ func hasAnyContractTags(f reflect.StructField) bool {
 }
 
 func hasAnySourceOrValidationOrDefaultTag(f reflect.StructField) bool {
-	for _, tag := range []string{"path", "query", "header", "default", "validate", "binding"} {
+	for _, tag := range []string{"path", "query", "header", "form", "file", "default", "validate", "binding"} {
 		if _, ok := f.Tag.Lookup(tag); ok {
 			return true
 		}
@@ -1166,8 +1385,12 @@ func structHasTaggedOrExportedFields(t reflect.Type, visited map[reflect.Type]bo
 	return false
 }
 
+func isResponsePackageStruct(t reflect.Type) bool {
+	return t != nil && t.PkgPath() == httpResponsePackagePath && t.Kind() == reflect.Struct
+}
+
 func isSpecialStructType(t reflect.Type) bool {
-	return t == timeType || IsPiMetaType(t)
+	return t == timeType || t == multipartFileHeaderType || isResponsePackageStruct(t) || IsPiMetaType(t)
 }
 
 func isFlattenedAnonymousStructField(f reflect.StructField) bool {

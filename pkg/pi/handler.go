@@ -32,6 +32,7 @@ type handler struct {
 	function       Handler
 	rt             *runtimeKernel
 	requestTimeout time.Duration
+	maxBodyBytes   int64
 }
 
 type handlerResult struct {
@@ -60,6 +61,13 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		policy = piHTTP.ExplicitStatus
 	}
 	responder := piHTTP.NewResponderForRequest(w, r, policy)
+	max := h.maxBodyBytes
+	if max <= 0 && h.rt != nil {
+		max = h.rt.maxBodyBytes
+	}
+	if max <= 0 {
+		max = 1 << 20
+	}
 	// The asynchronous Handler owns a request snapshot. The net/http server may
 	// close/reuse the original body and routing context after a timeout response.
 	var (
@@ -75,17 +83,10 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			copy.RoutePatterns = append([]string(nil), route.RoutePatterns...)
 			owned = owned.WithContext(context.WithValue(owned.Context(), chi.RouteCtxKey, &copy))
 		}
-		if r.Body != nil || r.MultipartForm != nil {
+		if r.Body != nil || r.MultipartForm != nil || len(r.PostForm) > 0 {
 			controller := http.NewResponseController(w)
 			if h.requestTimeout > 0 {
 				_ = controller.SetReadDeadline(deadline)
-			}
-			var max int64
-			if h.rt != nil {
-				max = h.rt.maxBodyBytes
-			}
-			if max <= 0 {
-				max = 32 << 20
 			}
 			body, contentType, err := snapshotBody(w, r, max)
 			if r.Body != nil {
@@ -125,7 +126,9 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.rt != nil {
 		validate = h.rt.validate
 	}
-	c := newContext(responder, piHTTP.NewRequestWithSnapshot(r, validate, snapshotBytes, hasSnapshot), h.rt)
+	piReq := piHTTP.NewRequestWithSnapshotAndLimit(r, validate, snapshotBytes, hasSnapshot, max)
+	snapshotBytes = nil
+	c := newContext(responder, piReq, h.rt)
 
 	if websocket.IsWebSocketUpgrade(r) {
 		// If the request is a WebSocket upgrade, do not apply the timeout

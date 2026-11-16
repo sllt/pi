@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/http/response"
 	"github.com/sllt/pi/pkg/pi/openapi"
 	"github.com/sllt/pi/pkg/pi/testkit"
 )
@@ -79,6 +82,10 @@ func operationFor(t *testing.T, doc *openapi3.T, routePath, method string) *open
 		op = piItem.Patch
 	case http.MethodDelete:
 		op = piItem.Delete
+	case http.MethodHead:
+		op = piItem.Head
+	case http.MethodOptions:
+		op = piItem.Options
 	}
 	if op == nil {
 		t.Fatalf("missing OpenAPI operation %s %s", method, routePath)
@@ -989,4 +996,151 @@ func TestVerifyDiveRequiredPointerElementsAndNullability(t *testing.T) {
 			t.Fatalf("expected 400 for strict missing condPtr (%s), got status=%d body=%s", strictMissingCond, recStrictMissing.Code, recStrictMissing.Body.String())
 		}
 	})
+}
+
+func TestVerifyUnifiedRoutingMultipartFileXMLAndHeadOptions(t *testing.T) {
+	type noMetaGetReq struct {
+		ID string `path:"id" validate:"required"`
+	}
+	type noMetaRes struct {
+		ID string `json:"id"`
+	}
+	type uploadReq struct {
+		pi.Meta `status:"201" summary:"Upload media"`
+		Title   string                `form:"title" validate:"required"`
+		File    *multipart.FileHeader `form:"file" validate:"required"`
+	}
+	type uploadRes struct {
+		Title    string `json:"title"`
+		Filename string `json:"filename"`
+		Size     int    `json:"size"`
+	}
+	type serveFileReq struct {
+		pi.Meta `produces:"image/*" summary:"Serve media"`
+		ID      string `path:"id" validate:"required"`
+	}
+	type rssReq struct {
+		pi.Meta `produces:"application/rss+xml" summary:"RSS feed"`
+	}
+
+	app := newVerifyApp(t, pi.WithOpenAPI(pi.OpenAPIConfig{
+		Title:   "UnifiedVerify",
+		Version: "1.0.0",
+		SecuritySchemes: map[string]openapi.SecurityScheme{
+			"bearerAuth": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
+		},
+	}))
+
+	v1 := app.Group("/api/v1").WithDoc(pi.DocTags("unified"))
+	authed := v1.Scope().WithDoc(pi.DocSecurity("bearerAuth"))
+
+	v1.GET("/items/{id}", pi.H(func(ctx *pi.Context, req *noMetaGetReq) (*noMetaRes, error) {
+		return &noMetaRes{ID: req.ID}, nil
+	}))
+	v1.HEAD("/items/{id}", func(ctx *pi.Context, req *noMetaGetReq) (*noMetaRes, error) {
+		return &noMetaRes{ID: req.ID}, nil
+	})
+	v1.OPTIONS("/items/{id}", func(ctx *pi.Context, req *noMetaGetReq) (*noMetaRes, error) {
+		return &noMetaRes{ID: req.ID}, nil
+	})
+	authed.POST("/media", func(ctx *pi.Context, req *uploadReq) (*uploadRes, error) {
+		f, err := req.File.Open()
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		b, err := io.ReadAll(f)
+		if err != nil {
+			return nil, err
+		}
+		return &uploadRes{Title: req.Title, Filename: req.File.Filename, Size: len(b)}, nil
+	})
+	app.GET("/media/{id}", func(ctx *pi.Context, req *serveFileReq) (*response.File, error) {
+		return &response.File{Content: []byte("PNG"), ContentType: "image/png"}, nil
+	})
+	app.GET("/rss.xml", func(ctx *pi.Context, req *rssReq) (*response.XML, error) {
+		return &response.XML{Content: []byte("<rss/>")}, nil
+	})
+
+	if err := app.RouteError(); err != nil {
+		t.Fatalf("RouteError failed: %v", err)
+	}
+
+	jsonBytes, err := app.OpenAPIJSON()
+	if err != nil {
+		t.Fatalf("OpenAPIJSON failed: %v", err)
+	}
+	yamlBytes, err := app.OpenAPIYAML()
+	if err != nil {
+		t.Fatalf("OpenAPIYAML failed: %v", err)
+	}
+
+	jsonDoc := loadAndValidateDoc(t, jsonBytes)
+	yamlDoc := loadAndValidateDoc(t, yamlBytes)
+
+	for _, doc := range []*openapi3.T{jsonDoc, yamlDoc} {
+		getOp := operationFor(t, doc, "/api/v1/items/{id}", http.MethodGet)
+		if getOp.Security != nil && len(*getOp.Security) > 0 {
+			t.Fatalf("expected GET /api/v1/items/{id} to have no security, got %v", *getOp.Security)
+		}
+		_ = operationFor(t, doc, "/api/v1/items/{id}", http.MethodHead)
+		_ = operationFor(t, doc, "/api/v1/items/{id}", http.MethodOptions)
+
+		uploadOp := operationFor(t, doc, "/api/v1/media", http.MethodPost)
+		if uploadOp.Security == nil || len(*uploadOp.Security) == 0 {
+			t.Fatalf("expected POST /api/v1/media in Scope to inherit Bearer security")
+		}
+		if uploadOp.RequestBody == nil || uploadOp.RequestBody.Value == nil || uploadOp.RequestBody.Value.Content.Get("multipart/form-data") == nil {
+			t.Fatalf("expected multipart/form-data requestBody on POST /api/v1/media")
+		}
+
+		mediaOp := operationFor(t, doc, "/media/{id}", http.MethodGet)
+		if resp200 := mediaOp.Responses.Value("200"); resp200 == nil || resp200.Value == nil || resp200.Value.Content.Get("image/*") == nil {
+			t.Fatalf("expected image/* response content on GET /media/{id}")
+		}
+		rssOp := operationFor(t, doc, "/rss.xml", http.MethodGet)
+		if resp200 := rssOp.Responses.Value("200"); resp200 == nil || resp200.Value == nil || resp200.Value.Content.Get("application/rss+xml") == nil {
+			t.Fatalf("expected application/rss+xml response content on GET /rss.xml")
+		}
+	}
+
+	// Runtime parity checks against validated schema.
+	recGet := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/api/v1/items/42", nil))
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/items/42 status=%d body=%s", recGet.Code, recGet.Body.String())
+	}
+	assertVisitJSON(t, responseSchema(t, jsonDoc, "/api/v1/items/{id}", http.MethodGet, "200"), recGet.Body.Bytes())
+
+	recHead := testkit.Request(t, app, httptest.NewRequest(http.MethodHead, "/api/v1/items/42", nil))
+	if recHead.Code != http.StatusOK || recHead.Body.Len() != 0 {
+		t.Fatalf("HEAD /api/v1/items/42 status=%d len=%d", recHead.Code, recHead.Body.Len())
+	}
+
+	var mpBuf bytes.Buffer
+	mw := multipart.NewWriter(&mpBuf)
+	_ = mw.WriteField("title", "pic")
+	fw, err := mw.CreateFormFile("file", "pic.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile failed: %v", err)
+	}
+	_, _ = fw.Write([]byte("PNG"))
+	_ = mw.Close()
+
+	upReq := httptest.NewRequest(http.MethodPost, "/api/v1/media", &mpBuf)
+	upReq.Header.Set("Content-Type", mw.FormDataContentType())
+	recUp := testkit.Request(t, app, upReq)
+	if recUp.Code != http.StatusCreated {
+		t.Fatalf("POST /api/v1/media status=%d body=%s", recUp.Code, recUp.Body.String())
+	}
+	assertVisitJSON(t, responseSchema(t, jsonDoc, "/api/v1/media", http.MethodPost, "201"), recUp.Body.Bytes())
+
+	recFile := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/media/1", nil))
+	if recFile.Code != http.StatusOK || recFile.Header().Get("Content-Type") != "image/png" || recFile.Body.String() != "PNG" {
+		t.Fatalf("GET /media/1 status=%d ct=%q body=%q", recFile.Code, recFile.Header().Get("Content-Type"), recFile.Body.String())
+	}
+
+	recRSS := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/rss.xml", nil))
+	if recRSS.Code != http.StatusOK || recRSS.Header().Get("Content-Type") != "application/rss+xml" || recRSS.Body.String() != "<rss/>" {
+		t.Fatalf("GET /rss.xml status=%d ct=%q body=%q", recRSS.Code, recRSS.Header().Get("Content-Type"), recRSS.Body.String())
+	}
 }

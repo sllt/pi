@@ -3,9 +3,12 @@ package pi
 import (
 	"bytes"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 )
+
+const multipartSnapshotHeadroom int64 = 64 << 10 // 64 KiB boundary-rewrite headroom
 
 type limitedRequestBuffer struct {
 	bytes.Buffer
@@ -19,18 +22,41 @@ func (b *limitedRequestBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-// A middleware may have parsed multipart before Pi. FileHeader.Clone does not
+// A middleware may have parsed form or multipart before Pi. FileHeader.Clone does not
 // own the underlying temporary file, and net/http removes it when ServeHTTP
 // returns. Re-encode within the same limit so a late Handler owns its own parts.
 func snapshotBody(w http.ResponseWriter, r *http.Request, max int64) ([]byte, string, error) {
 	if r.MultipartForm == nil {
-		if r.Body == nil {
-			return nil, "", nil
+		var data []byte
+		if r.Body != nil {
+			var err error
+			data, err = io.ReadAll(http.MaxBytesReader(w, r.Body, max))
+			if err != nil {
+				return nil, "", err
+			}
 		}
-		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
-		return data, "", err
+		if len(data) == 0 && len(r.PostForm) > 0 {
+			encoded := r.PostForm.Encode()
+			if int64(len(encoded)) > max {
+				return nil, "", &http.MaxBytesError{Limit: max}
+			}
+			ct := r.Header.Get("Content-Type")
+			if ct == "" {
+				ct = "application/x-www-form-urlencoded"
+			}
+			return []byte(encoded), ct, nil
+		}
+		return data, "", nil
 	}
-	buffer := &limitedRequestBuffer{limit: max}
+	limit := max
+	if limit > 0 {
+		if limit <= math.MaxInt64-multipartSnapshotHeadroom {
+			limit += multipartSnapshotHeadroom
+		} else {
+			limit = math.MaxInt64
+		}
+	}
+	buffer := &limitedRequestBuffer{limit: limit}
 	writer := multipart.NewWriter(buffer)
 	for key, values := range r.MultipartForm.Value {
 		for _, value := range values {

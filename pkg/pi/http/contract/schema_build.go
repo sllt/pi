@@ -13,20 +13,25 @@ import (
 	"github.com/sllt/pi/pkg/pi/openapi"
 )
 
+type schemaTypeKey struct {
+	mode string
+	typ  reflect.Type
+}
+
 // SchemaRegistry collects and deduplicates OpenAPI 3.0.3 component schemas
 // with deterministic generic component naming and collision disambiguation.
 type SchemaRegistry struct {
 	schemas   map[string]*openapi.Schema
-	byTypeKey map[string]string
-	usedNames map[string]string
+	byTypeKey map[schemaTypeKey]string
+	usedNames map[string]schemaTypeKey
 }
 
 // NewSchemaRegistry creates an empty SchemaRegistry.
 func NewSchemaRegistry() *SchemaRegistry {
 	return &SchemaRegistry{
 		schemas:   make(map[string]*openapi.Schema),
-		byTypeKey: make(map[string]string),
-		usedNames: make(map[string]string),
+		byTypeKey: make(map[schemaTypeKey]string),
+		usedNames: make(map[string]schemaTypeKey),
 	}
 }
 
@@ -47,8 +52,12 @@ func (op *CompiledOperation) validateAndRegisterSchemas(sr *SchemaRegistry) erro
 		if _, err := registerOrBuildBodySchema(op.ReqType, op.bodyPlan, op.StrictJSON, sr); err != nil {
 			return err
 		}
+	} else if op.HasFormFields {
+		if _, err := registerOrBuildFormSchema(op.ReqType, op.formFields, op.StrictJSON, sr); err != nil {
+			return err
+		}
 	}
-	if !op.EmptyResponse {
+	if op.ResponseKind == ResponseKindJSON && !op.EmptyResponse {
 		if _, err := registerOrBuildResponseSchema(op.ResType, sr); err != nil {
 			return err
 		}
@@ -111,45 +120,93 @@ func (op *CompiledOperation) BuildOpenAPIOperation(sr *SchemaRegistry) *openapi.
 				},
 			},
 		}
+	} else if op.HasFormFields {
+		formSchema, _ := registerOrBuildFormSchema(op.ReqType, op.formFields, op.StrictJSON, sr)
+		bodyRequired := false
+		for _, cf := range op.formFields {
+			if cf.required {
+				bodyRequired = true
+				break
+			}
+		}
+		content := map[string]*openapi.MediaType{
+			"multipart/form-data": {
+				Schema: formSchema.Clone(),
+			},
+		}
+		if !op.HasFileFields {
+			content["application/x-www-form-urlencoded"] = &openapi.MediaType{
+				Schema: formSchema.Clone(),
+			}
+		}
+		out.RequestBody = &openapi.RequestBody{
+			Required: bodyRequired,
+			Content:  content,
+		}
 	}
 
 	statusKey := strconv.Itoa(op.Status)
-	if op.Status == http.StatusNoContent {
-		out.Responses[statusKey] = &openapi.Response{
-			Description: statusDescription(http.StatusNoContent),
-		}
-	} else {
-		var dataSchema *openapi.Schema
-		if op.EmptyResponse {
-			dataSchema = &openapi.Schema{
-				Type:     "object",
-				Nullable: true,
-			}
-		} else {
-			resSchema, _ := registerOrBuildResponseSchema(op.ResType, sr)
-			if op.NullableRes {
-				if resSchema.Ref != "" {
-					dataSchema = &openapi.Schema{
-						Nullable: true,
-						AllOf:    []*openapi.Schema{{Ref: resSchema.Ref}},
-					}
-				} else if resSchema.Type != "" || len(resSchema.AllOf) > 0 {
-					resSchema.Nullable = true
-					dataSchema = resSchema
-				} else {
-					dataSchema = resSchema
-				}
-			} else {
-				dataSchema = resSchema
+	switch op.ResponseKind {
+	case ResponseKindFile:
+		content := make(map[string]*openapi.MediaType, len(op.Produces))
+		for _, mt := range op.Produces {
+			content[mt] = &openapi.MediaType{
+				Schema: &openapi.Schema{Type: "string", Format: "binary"},
 			}
 		}
 		out.Responses[statusKey] = &openapi.Response{
 			Description: statusDescription(op.Status),
-			Content: map[string]*openapi.MediaType{
-				"application/json": {
-					Schema: buildSuccessEnvelopeSchema(dataSchema),
+			Content:     content,
+		}
+	case ResponseKindXML:
+		content := make(map[string]*openapi.MediaType, len(op.Produces))
+		for _, mt := range op.Produces {
+			content[mt] = &openapi.MediaType{
+				Schema: &openapi.Schema{Type: "string"},
+			}
+		}
+		out.Responses[statusKey] = &openapi.Response{
+			Description: statusDescription(op.Status),
+			Content:     content,
+		}
+	default:
+		if op.Status == http.StatusNoContent {
+			out.Responses[statusKey] = &openapi.Response{
+				Description: statusDescription(http.StatusNoContent),
+			}
+		} else {
+			var dataSchema *openapi.Schema
+			if op.EmptyResponse {
+				dataSchema = &openapi.Schema{
+					Type:     "object",
+					Nullable: true,
+				}
+			} else {
+				resSchema, _ := registerOrBuildResponseSchema(op.ResType, sr)
+				if op.NullableRes {
+					if resSchema.Ref != "" {
+						dataSchema = &openapi.Schema{
+							Nullable: true,
+							AllOf:    []*openapi.Schema{{Ref: resSchema.Ref}},
+						}
+					} else if resSchema.Type != "" || len(resSchema.AllOf) > 0 {
+						resSchema.Nullable = true
+						dataSchema = resSchema
+					} else {
+						dataSchema = resSchema
+					}
+				} else {
+					dataSchema = resSchema
+				}
+			}
+			out.Responses[statusKey] = &openapi.Response{
+				Description: statusDescription(op.Status),
+				Content: map[string]*openapi.MediaType{
+					"application/json": {
+						Schema: buildSuccessEnvelopeSchema(dataSchema),
+					},
 				},
-			},
+			}
 		}
 	}
 
@@ -180,7 +237,7 @@ func (op *CompiledOperation) collectErrorStatusCodes() []int {
 		http.StatusRequestEntityTooLarge,
 		http.StatusInternalServerError,
 	}
-	if op.HasBodyFields || op.Method == http.MethodPost || op.Method == http.MethodPut || op.Method == http.MethodPatch {
+	if op.HasBodyFields || op.HasFormFields || op.Method == http.MethodPost || op.Method == http.MethodPut || op.Method == http.MethodPatch {
 		codes = append(codes, http.StatusUnsupportedMediaType)
 	}
 	for _, c := range codes {
@@ -284,16 +341,16 @@ func registerOrBuildBodySchema(reqType reflect.Type, bodyPlan *jsonStructPlan, s
 	if reqType.Name() == "" {
 		return buildStructObjectSchema(bodyPlan, true, strict, sr)
 	}
-	mode := "in:lax"
+	mode := "json:lax"
 	if strict {
-		mode = "in:strict"
+		mode = "json:strict"
 	}
-	typeKey := mode + ":" + canonicalTypeKey(reqType)
+	typeKey := schemaTypeKey{mode: mode, typ: reqType}
 	if compName, ok := sr.byTypeKey[typeKey]; ok {
 		return &openapi.Schema{Ref: "#/components/schemas/" + compName}, nil
 	}
 
-	compName := sr.allocateComponentName(reqType, typeKey)
+	compName := sr.allocateComponentName(typeKey)
 	sr.byTypeKey[typeKey] = compName
 	sr.usedNames[compName] = typeKey
 	sr.schemas[compName] = &openapi.Schema{Type: "object"}
@@ -309,6 +366,124 @@ func registerOrBuildBodySchema(reqType reflect.Type, bodyPlan *jsonStructPlan, s
 	return &openapi.Schema{Ref: "#/components/schemas/" + compName}, nil
 }
 
+func registerOrBuildFormSchema(reqType reflect.Type, formFields []*compiledField, strict bool, sr *SchemaRegistry) (*openapi.Schema, error) {
+	if reqType.Name() == "" {
+		return buildFormObjectSchema(formFields, strict), nil
+	}
+	mode := "form:lax"
+	if strict {
+		mode = "form:strict"
+	}
+	typeKey := schemaTypeKey{mode: mode, typ: reqType}
+	if compName, ok := sr.byTypeKey[typeKey]; ok {
+		return &openapi.Schema{Ref: "#/components/schemas/" + compName}, nil
+	}
+
+	compName := sr.allocateComponentName(typeKey)
+	sr.byTypeKey[typeKey] = compName
+	sr.usedNames[compName] = typeKey
+	sr.schemas[compName] = buildFormObjectSchema(formFields, strict)
+	return &openapi.Schema{Ref: "#/components/schemas/" + compName}, nil
+}
+
+func buildFormObjectSchema(formFields []*compiledField, strict bool) *openapi.Schema {
+	obj := &openapi.Schema{
+		Type:       "object",
+		Properties: make(map[string]*openapi.Schema, len(formFields)),
+	}
+	if strict {
+		obj.AdditionalProperties = openapi.AdditionalPropertiesAllowed(false)
+	}
+	required := make([]string, 0, len(formFields))
+	for _, cf := range formFields {
+		obj.Properties[cf.externalName] = buildFormFieldSchema(cf)
+		if cf.required {
+			required = append(required, cf.externalName)
+		}
+	}
+	if len(required) > 0 {
+		obj.Required = required
+	}
+	return obj
+}
+
+func buildFormFieldSchema(cf *compiledField) *openapi.Schema {
+	desc := cf.description
+	if desc == "" {
+		desc = cf.label
+	}
+
+	if cf.isFile {
+		if cf.fileKind == fileMulti {
+			schema := &openapi.Schema{
+				Type:        "array",
+				Description: desc,
+				Items: &openapi.Schema{
+					Type:   "string",
+					Format: "binary",
+				},
+			}
+			fileSliceSpec := &jsonTypeSpec{
+				kind: jsonSlice,
+				elemSpec: &jsonTypeSpec{
+					kind:     jsonScalar,
+					ptrDepth: 1,
+				},
+			}
+			applyValidatorConstraintsWithSpec(cf.validateTag, schema, fileSliceSpec, false, false)
+			return schema
+		}
+		return &openapi.Schema{
+			Type:        "string",
+			Format:      "binary",
+			Description: desc,
+		}
+	}
+
+	var schema *openapi.Schema
+	if cf.isSlice {
+		schema = &openapi.Schema{
+			Type:  "array",
+			Items: schemaForScalar(cf.scalar, false),
+		}
+	} else {
+		schema = schemaForScalar(cf.scalar, false)
+	}
+	if desc != "" {
+		schema.Description = desc
+	}
+	if cf.hasDefault {
+		schema.Default = cf.schemaDefault
+	}
+	if cf.hasExample {
+		schema.Example = cf.schemaExample
+	}
+	var paramSpec *jsonTypeSpec
+	if cf.isSlice {
+		elemScalar := cf.scalar
+		elemScalar.isPtr = false
+		paramSpec = &jsonTypeSpec{
+			kind: jsonSlice,
+			elemSpec: &jsonTypeSpec{
+				kind:   jsonScalar,
+				scalar: elemScalar,
+			},
+		}
+	} else {
+		ptrDepth := 0
+		if cf.scalar.isPtr {
+			ptrDepth = 1
+		}
+		paramSpec = &jsonTypeSpec{
+			kind:     jsonScalar,
+			ptrDepth: ptrDepth,
+			scalar:   cf.scalar,
+		}
+	}
+	applyValidatorConstraintsWithSpec(cf.validateTag, schema, paramSpec, false, false)
+	return schema
+}
+
 func registerOrBuildResponseSchema(resType reflect.Type, sr *SchemaRegistry) (*openapi.Schema, error) {
 	plan, err := buildResponseStructPlan(resType)
 	if err != nil {
@@ -317,12 +492,12 @@ func registerOrBuildResponseSchema(resType reflect.Type, sr *SchemaRegistry) (*o
 	if resType.Name() == "" {
 		return buildStructObjectSchema(plan, false, false, sr)
 	}
-	typeKey := "out:" + canonicalTypeKey(resType)
+	typeKey := schemaTypeKey{mode: "res", typ: resType}
 	if compName, ok := sr.byTypeKey[typeKey]; ok {
 		return &openapi.Schema{Ref: "#/components/schemas/" + compName}, nil
 	}
 
-	compName := sr.allocateComponentName(resType, typeKey)
+	compName := sr.allocateComponentName(typeKey)
 	sr.byTypeKey[typeKey] = compName
 	sr.usedNames[compName] = typeKey
 	sr.schemas[compName] = &openapi.Schema{Type: "object"}
@@ -566,18 +741,18 @@ func buildSchemaFromTypeSpec(spec *jsonTypeSpec, isInput bool, strict bool, sr *
 			return obj, nil
 		}
 
-		mode := "out"
+		mode := "res"
 		if isInput {
 			if strict {
-				mode = "in:strict"
+				mode = "json:strict"
 			} else {
-				mode = "in:lax"
+				mode = "json:lax"
 			}
 		}
-		typeKey := mode + ":" + canonicalTypeKey(spec.elemType)
+		typeKey := schemaTypeKey{mode: mode, typ: spec.elemType}
 		compName, ok := sr.byTypeKey[typeKey]
 		if !ok {
-			compName = sr.allocateComponentName(spec.elemType, typeKey)
+			compName = sr.allocateComponentName(typeKey)
 			sr.byTypeKey[typeKey] = compName
 			sr.usedNames[compName] = typeKey
 			sr.schemas[compName] = &openapi.Schema{Type: "object"}
@@ -817,7 +992,7 @@ func applyValidatorConstraintsWithSpec(tagExpr string, s *openapi.Schema, spec *
 func applySingleConstraint(name, param string, hasEq bool, s *openapi.Schema, scalar compiledScalarType, asJSONString bool, inDive bool, isPtr bool) {
 	switch name {
 	case "required":
-		if inDive && !isPtr && s.Type == "string" && !asJSONString && s.Format != "byte" {
+		if inDive && !isPtr && s.Type == "string" && !asJSONString && s.Format != "byte" && s.Format != "binary" {
 			if s.MinLength == nil || *s.MinLength < 1 {
 				s.MinLength = intPtr(1)
 			}
@@ -987,15 +1162,8 @@ func convertEnumTokens(tokens []string, schemaType string, scalar compiledScalar
 	return nil
 }
 
-func canonicalTypeKey(t reflect.Type) string {
-	if t == nil {
-		return ""
-	}
-	return t.PkgPath() + "|" + t.Name() + "|" + t.String()
-}
-
-func (sr *SchemaRegistry) allocateComponentName(t reflect.Type, typeKey string) string {
-	base := formatTypeComponentName(t)
+func (sr *SchemaRegistry) allocateComponentName(typeKey schemaTypeKey) string {
+	base := formatTypeComponentName(typeKey.typ)
 	if existingKey, used := sr.usedNames[base]; !used || existingKey == typeKey {
 		return base
 	}
@@ -1009,9 +1177,76 @@ func (sr *SchemaRegistry) allocateComponentName(t reflect.Type, typeKey string) 
 	}
 }
 
-func shortTypeHash(typeKey string) string {
-	sum := sha256.Sum256([]byte(typeKey))
+func shortTypeHash(typeKey schemaTypeKey) string {
+	var b strings.Builder
+	b.WriteString(typeKey.mode)
+	b.WriteByte('|')
+	writeTypeSignature(&b, typeKey.typ, make(map[reflect.Type]int))
+	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:4])
+}
+
+func writeTypeSignature(b *strings.Builder, t reflect.Type, visited map[reflect.Type]int) {
+	if t == nil {
+		b.WriteString("<nil>")
+		return
+	}
+	b.WriteString(t.PkgPath())
+	b.WriteByte('|')
+	b.WriteString(t.Name())
+	b.WriteByte('|')
+	b.WriteString(t.Kind().String())
+
+	if t.Name() != "" && visited[t] > 0 {
+		b.WriteString("|<cycle:")
+		b.WriteString(strconv.Itoa(visited[t]))
+		b.WriteByte('>')
+		return
+	}
+	switch t.Kind() {
+	case reflect.Ptr, reflect.Slice:
+		b.WriteByte('[')
+		writeTypeSignature(b, t.Elem(), visited)
+		b.WriteByte(']')
+	case reflect.Array:
+		b.WriteByte('[')
+		b.WriteString(strconv.Itoa(t.Len()))
+		b.WriteByte(':')
+		writeTypeSignature(b, t.Elem(), visited)
+		b.WriteByte(']')
+	case reflect.Map:
+		b.WriteString("map[")
+		writeTypeSignature(b, t.Key(), visited)
+		b.WriteByte(']')
+		writeTypeSignature(b, t.Elem(), visited)
+	case reflect.Struct:
+		id := len(visited) + 1
+		visited[t] = id
+		b.WriteByte('{')
+		first := true
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() && !f.Anonymous {
+				continue
+			}
+			if !first {
+				b.WriteByte(';')
+			}
+			first = false
+			b.WriteString(f.Name)
+			if f.Anonymous {
+				b.WriteString("(anon)")
+			}
+			b.WriteByte(':')
+			writeTypeSignature(b, f.Type, visited)
+			if f.Tag != "" {
+				b.WriteByte('`')
+				b.WriteString(string(f.Tag))
+				b.WriteByte('`')
+			}
+		}
+		b.WriteByte('}')
+	}
 }
 
 func formatTypeComponentName(t reflect.Type) string {

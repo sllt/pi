@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 
 	"github.com/sllt/pi/pkg/pi/apperror"
 	resTypes "github.com/sllt/pi/pkg/pi/http/response"
@@ -98,16 +99,19 @@ func (r Responder) Respond(data any, err error) {
 	jsonData, encodeErr := json.Marshal(resp)
 	if encodeErr != nil {
 		r.w.WriteHeader(http.StatusInternalServerError)
-
-		_, _ = r.w.Write([]byte(`{"code":-1,"data":null,"message":"failed to encode response as JSON"}` + "\n"))
+		if r.method != http.MethodHead {
+			_, _ = r.w.Write([]byte(`{"code":-1,"data":null,"message":"failed to encode response as JSON"}` + "\n"))
+		}
 
 		return
 	}
 
 	statusCode := r.getHTTPStatusCode(data, err)
 	r.w.WriteHeader(statusCode)
-	_, _ = r.w.Write(jsonData)
-	_, _ = r.w.Write([]byte("\n"))
+	if r.method != http.MethodHead {
+		_, _ = r.w.Write(jsonData)
+		_, _ = r.w.Write([]byte("\n"))
+	}
 }
 
 // buildResponse constructs the unified response structure.
@@ -169,45 +173,41 @@ func (r Responder) handleSpecialResponseTypes(data any, err error) bool {
 		}
 		r.w.Header().Set("Content-Type", contentType)
 		r.w.WriteHeader(statusCode)
-		ctx := r.ctx
-		if ctx == nil {
-			ctx = context.Background()
+		if r.method != http.MethodHead {
+			ctx := r.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			_ = v.Run(ctx, r.w)
 		}
-		_ = v.Run(ctx, r.w)
 		return true
 	case resTypes.File:
-		for k, val := range v.Headers {
-			if k != "" && val != "" {
-				r.w.Header().Set(k, val)
-			}
+		r.writeFileResponse(v, statusCode)
+		return true
+	case *resTypes.File:
+		if v == nil {
+			return false
 		}
-		r.w.Header().Set("Content-Type", v.ContentType)
-		r.w.WriteHeader(statusCode)
-		_, _ = r.w.Write(v.Content)
-
+		r.writeFileResponse(*v, statusCode)
 		return true
 
 	case resTypes.Template:
 		r.w.Header().Set("Content-Type", "text/html")
 		r.w.WriteHeader(statusCode)
-		v.Render(r.w)
+		if r.method != http.MethodHead {
+			v.Render(r.w)
+		}
 
 		return true
 
 	case resTypes.XML:
-		contentType := v.ContentType
-
-		if contentType == "" {
-			contentType = "application/xml"
+		r.writeXMLResponse(v, statusCode)
+		return true
+	case *resTypes.XML:
+		if v == nil {
+			return false
 		}
-
-		r.w.Header().Set("Content-Type", contentType)
-		r.w.WriteHeader(statusCode)
-
-		if len(v.Content) > 0 {
-			_, _ = r.w.Write(v.Content)
-		}
-
+		r.writeXMLResponse(*v, statusCode)
 		return true
 
 	case resTypes.Redirect:
@@ -226,6 +226,40 @@ func (r Responder) handleSpecialResponseTypes(data any, err error) bool {
 	return false
 }
 
+func (r Responder) writeFileResponse(v resTypes.File, statusCode int) {
+	for k, val := range v.Headers {
+		if k != "" && val != "" {
+			r.w.Header().Set(k, val)
+		}
+	}
+	if ct := strings.TrimSpace(v.ContentType); ct != "" {
+		r.w.Header().Set("Content-Type", ct)
+	} else if strings.TrimSpace(r.w.Header().Get("Content-Type")) == "" {
+		r.w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	r.w.WriteHeader(statusCode)
+	if r.method != http.MethodHead {
+		_, _ = r.w.Write(v.Content)
+	}
+}
+
+func (r Responder) writeXMLResponse(v resTypes.XML, statusCode int) {
+	contentType := strings.TrimSpace(v.ContentType)
+	if contentType == "" {
+		contentType = strings.TrimSpace(r.w.Header().Get("Content-Type"))
+	}
+	if contentType == "" {
+		contentType = "application/xml"
+	}
+
+	r.w.Header().Set("Content-Type", contentType)
+	r.w.WriteHeader(statusCode)
+
+	if r.method != http.MethodHead && len(v.Content) > 0 {
+		_, _ = r.w.Write(v.Content)
+	}
+}
+
 // getStatusCodeForSpecialResponse returns the appropriate status code for special response types.
 func (r Responder) getStatusCodeForSpecialResponse(data any, err error) int {
 	return r.getHTTPStatusCode(data, err)
@@ -240,7 +274,17 @@ func getCustomStatusCode(data any) (int, bool) {
 		statusCode = v.StatusCode
 	case resTypes.XML:
 		statusCode = v.StatusCode
+	case *resTypes.XML:
+		if v == nil {
+			return 0, false
+		}
+		statusCode = v.StatusCode
 	case resTypes.File:
+		statusCode = v.StatusCode
+	case *resTypes.File:
+		if v == nil {
+			return 0, false
+		}
 		statusCode = v.StatusCode
 	case resTypes.Stream:
 		statusCode = v.StatusCode

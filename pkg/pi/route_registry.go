@@ -25,6 +25,7 @@ type RouteDef struct {
 	Pattern        string
 	Handler        Handler
 	RequestTimeout time.Duration
+	MaxBodyBytes   int64
 }
 
 type docConfig struct {
@@ -46,6 +47,7 @@ type routeMeta struct {
 type GroupNode struct {
 	prefix     string
 	parent     *GroupNode
+	isScope    bool
 	httpMWs    []func(http.Handler) http.Handler
 	piMWs      []PiMiddleware
 	routes     []RouteDef
@@ -114,34 +116,39 @@ func (n *GroupNode) setRouteMeta(idx int, meta *routeMeta) {
 
 // ---------- RouteGroup: route registration helpers ----------
 
-// GET registers a handler for HTTP GET on this group.
-func (g *RouteGroup) GET(pattern string, h Handler) *RouteGroup {
-	g.addRoute("GET", pattern, h, 0)
-	return g
+// GET registers a typed or legacy handler for HTTP GET on this group.
+func (g *RouteGroup) GET(pattern string, handler any, opts ...EndpointOption) *RouteGroup {
+	return g.addUnifiedRoute(http.MethodGet, pattern, handler, opts...)
 }
 
-// POST registers a handler for HTTP POST on this group.
-func (g *RouteGroup) POST(pattern string, h Handler) *RouteGroup {
-	g.addRoute("POST", pattern, h, 0)
-	return g
+// POST registers a typed or legacy handler for HTTP POST on this group.
+func (g *RouteGroup) POST(pattern string, handler any, opts ...EndpointOption) *RouteGroup {
+	return g.addUnifiedRoute(http.MethodPost, pattern, handler, opts...)
 }
 
-// PUT registers a handler for HTTP PUT on this group.
-func (g *RouteGroup) PUT(pattern string, h Handler) *RouteGroup {
-	g.addRoute("PUT", pattern, h, 0)
-	return g
+// PUT registers a typed or legacy handler for HTTP PUT on this group.
+func (g *RouteGroup) PUT(pattern string, handler any, opts ...EndpointOption) *RouteGroup {
+	return g.addUnifiedRoute(http.MethodPut, pattern, handler, opts...)
 }
 
-// DELETE registers a handler for HTTP DELETE on this group.
-func (g *RouteGroup) DELETE(pattern string, h Handler) *RouteGroup {
-	g.addRoute("DELETE", pattern, h, 0)
-	return g
+// DELETE registers a typed or legacy handler for HTTP DELETE on this group.
+func (g *RouteGroup) DELETE(pattern string, handler any, opts ...EndpointOption) *RouteGroup {
+	return g.addUnifiedRoute(http.MethodDelete, pattern, handler, opts...)
 }
 
-// PATCH registers a handler for HTTP PATCH on this group.
-func (g *RouteGroup) PATCH(pattern string, h Handler) *RouteGroup {
-	g.addRoute("PATCH", pattern, h, 0)
-	return g
+// PATCH registers a typed or legacy handler for HTTP PATCH on this group.
+func (g *RouteGroup) PATCH(pattern string, handler any, opts ...EndpointOption) *RouteGroup {
+	return g.addUnifiedRoute(http.MethodPatch, pattern, handler, opts...)
+}
+
+// HEAD registers a typed or legacy handler for HTTP HEAD on this group.
+func (g *RouteGroup) HEAD(pattern string, handler any, opts ...EndpointOption) *RouteGroup {
+	return g.addUnifiedRoute(http.MethodHead, pattern, handler, opts...)
+}
+
+// OPTIONS registers a typed or legacy handler for HTTP OPTIONS on this group.
+func (g *RouteGroup) OPTIONS(pattern string, handler any, opts ...EndpointOption) *RouteGroup {
+	return g.addUnifiedRoute(http.MethodOptions, pattern, handler, opts...)
 }
 
 func (g *RouteGroup) addRoute(method, pattern string, h Handler, timeout time.Duration) {
@@ -273,6 +280,49 @@ func (g *RouteGroup) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGr
 	return sub
 }
 
+// Scope creates an isolated child RouteGroup with the same URL prefix as g.
+// Unlike Group(""), Scope always allocates an isolated child node so middleware
+// and WithDoc attributes attached to the returned scope never leak back to g
+// or sibling scopes.
+func (g *RouteGroup) Scope(fns ...func(sub *RouteGroup)) *RouteGroup {
+	if g == nil || g.node == nil {
+		return &RouteGroup{node: &GroupNode{isScope: true}}
+	}
+
+	var sub *RouteGroup
+	if reg := g.registry(); reg != nil {
+		reg.mu.Lock()
+		if !g.app.canMutateRoutesLocked("create route scope") {
+			reg.mu.Unlock()
+			return &RouteGroup{node: &GroupNode{isScope: true}, app: g.app}
+		}
+		g.app.ensureHTTPAvailable()
+		child := &GroupNode{prefix: "", parent: g.node, isScope: true}
+		g.node.children = append(g.node.children, child)
+		reg.markDirtyLocked()
+		sub = &RouteGroup{node: child, app: g.app}
+		reg.mu.Unlock()
+	} else {
+		child := &GroupNode{prefix: "", parent: g.node, isScope: true}
+		g.node.children = append(g.node.children, child)
+		sub = &RouteGroup{node: child, app: g.app}
+	}
+
+	for _, fn := range fns {
+		if fn == nil {
+			if g.app != nil {
+				if l := g.app.safeLogger(); l != nil {
+					l.Error("route scope callback cannot be nil")
+				}
+			}
+			continue
+		}
+		fn(sub)
+	}
+
+	return sub
+}
+
 // ---------- RouteRegistry: compilation to chi ----------
 
 // compile walks the GroupNode tree and registers all routes and middleware on the chi router.
@@ -316,7 +366,7 @@ func collectFoldedNode(node *GroupNode) (
 		}
 
 		childPrefix := normalizeGroupPrefix(child.prefix)
-		if childPrefix == "" {
+		if !child.isScope && childPrefix == "" {
 			cHTTP, cPi, cRoutes, cMetas, cChildren := collectFoldedNode(child)
 			httpMWs = append(httpMWs, cHTTP...)
 			piMWs = append(piMWs, cPi...)
@@ -326,8 +376,12 @@ func collectFoldedNode(node *GroupNode) (
 			continue
 		}
 
-		child.prefix = childPrefix
-		children = append(children, child)
+		c := child
+		if c.prefix != childPrefix {
+			c = cloneShallowGroupNode(c)
+			c.prefix = childPrefix
+		}
+		children = append(children, c)
 	}
 
 	children = mergeChildrenByPrefix(children)
@@ -385,7 +439,7 @@ func (reg *RouteRegistry) compileNode(
 			}
 		}
 	}
-	if curPrefix != "" && !hasRoutes {
+	if node != reg.root && !hasRoutes {
 		return
 	}
 
@@ -401,8 +455,8 @@ func (reg *RouteRegistry) compileNode(
 		}
 	}
 
-	if curPrefix == "" {
-		// Root node or node without prefix: apply HTTP middlewares via Use before any With/Method calls.
+	if node == reg.root {
+		// Root node: apply HTTP middlewares via Use before any With/Method calls.
 		for _, mw := range validHTTPMWs {
 			router.Use(mw)
 		}
@@ -489,6 +543,7 @@ func (reg *RouteRegistry) registerRoutes(
 			function:       composedFn,
 			rt:             rt,
 			requestTimeout: timeout,
+			maxBodyBytes:   rd.MaxBodyBytes,
 		}
 
 		var providerFn func() trace.TracerProvider
@@ -538,7 +593,7 @@ func (g *RouteGroup) canMutate(action string) bool {
 
 func (g *GroupNode) getOrCreateChild(prefix string) *GroupNode {
 	for _, child := range g.children {
-		if child != nil && child.prefix == prefix {
+		if child != nil && !child.isScope && child.prefix == prefix {
 			child.parent = g
 			return child
 		}
@@ -548,6 +603,29 @@ func (g *GroupNode) getOrCreateChild(prefix string) *GroupNode {
 	g.children = append(g.children, child)
 
 	return child
+}
+
+func cloneShallowGroupNode(src *GroupNode) *GroupNode {
+	if src == nil {
+		return nil
+	}
+	clone := &GroupNode{
+		prefix:   src.prefix,
+		parent:   src.parent,
+		isScope:  src.isScope,
+		httpMWs:  append([]func(http.Handler) http.Handler(nil), src.httpMWs...),
+		piMWs:    append([]PiMiddleware(nil), src.piMWs...),
+		routes:   append([]RouteDef(nil), src.routes...),
+		doc:      src.doc,
+		children: append([]*GroupNode(nil), src.children...),
+	}
+	if len(src.routeMetas) > 0 {
+		clone.routeMetas = make(map[int]*routeMeta, len(src.routeMetas))
+		for idx, meta := range src.routeMetas {
+			clone.routeMetas[idx] = meta
+		}
+	}
+	return clone
 }
 
 func (g *GroupNode) mergeFrom(other *GroupNode) {
@@ -562,30 +640,36 @@ func (g *GroupNode) mergeFrom(other *GroupNode) {
 	for idx, meta := range other.routeMetas {
 		g.setRouteMeta(baseIdx+idx, meta)
 	}
-	for _, child := range other.children {
-		if child != nil {
-			child.parent = g
-		}
-		g.children = append(g.children, child)
-	}
+	g.children = append(g.children, other.children...)
 }
 
 func mergeChildrenByPrefix(children []*GroupNode) []*GroupNode {
 	merged := make([]*GroupNode, 0, len(children))
+	mergedCloned := make([]bool, 0, len(children))
 	indexByPrefix := make(map[string]int, len(children))
 
 	for _, child := range children {
 		if child == nil {
 			continue
 		}
+		if child.isScope {
+			merged = append(merged, child)
+			mergedCloned = append(mergedCloned, false)
+			continue
+		}
 
 		if idx, ok := indexByPrefix[child.prefix]; ok {
+			if !mergedCloned[idx] {
+				merged[idx] = cloneShallowGroupNode(merged[idx])
+				mergedCloned[idx] = true
+			}
 			merged[idx].mergeFrom(child)
 			continue
 		}
 
 		indexByPrefix[child.prefix] = len(merged)
 		merged = append(merged, child)
+		mergedCloned = append(mergedCloned, false)
 	}
 
 	return merged

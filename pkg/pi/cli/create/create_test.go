@@ -55,6 +55,12 @@ func TestAllWithOptionsDryRunWriteAndPreserve(t *testing.T) {
 	dtoSrc, err := os.ReadFile(expectedPaths[0])
 	require.NoError(t, err)
 	assert.Contains(t, string(dtoSrc), "pi.Meta")
+	assert.Contains(t, string(dtoSrc), `pi.Meta `+"`"+`summary:"Get UserProfile"`+"`")
+	assert.Contains(t, string(dtoSrc), `pi.Meta `+"`"+`status:"201" summary:"Create UserProfile"`+"`")
+	assert.NotContains(t, string(dtoSrc), `path:"/{id}"`)
+	assert.NotContains(t, string(dtoSrc), `path:""`)
+	assert.NotContains(t, string(dtoSrc), `method:`)
+	assert.NotContains(t, string(dtoSrc), `tags:`)
 	assert.Contains(t, string(dtoSrc), "GetUserProfileReq")
 	assert.Contains(t, string(dtoSrc), "GetUserProfileRes")
 	assert.Contains(t, string(dtoSrc), "CreateUserProfileReq")
@@ -70,10 +76,12 @@ func TestAllWithOptionsDryRunWriteAndPreserve(t *testing.T) {
 
 	routerSrc, err := os.ReadFile(expectedPaths[2])
 	require.NoError(t, err)
-	assert.Contains(t, string(routerSrc), "InitUserProfileRouter(deps RouterDeps, h *handler.UserProfileHandler)")
-	assert.Contains(t, string(routerSrc), `deps.App.Group("/api/v1").Group("/user_profile")`)
-	assert.Contains(t, string(routerSrc), "pi.Register(group, h.GetUserProfile)")
-	assert.Contains(t, string(routerSrc), "pi.Register(group, h.CreateUserProfile)")
+	assert.Contains(t, string(routerSrc), "InitUserProfileRouter(deps RouterDeps, h *handler.UserProfileHandler) error")
+	assert.Contains(t, string(routerSrc), `deps.App.Group("/api/v1").Group("/user_profile").WithDoc(pi.DocTags("UserProfile"))`)
+	assert.Contains(t, string(routerSrc), `group.GET("/{id}", h.GetUserProfile)`)
+	assert.Contains(t, string(routerSrc), `group.POST("", h.CreateUserProfile)`)
+	assert.Contains(t, string(routerSrc), "return deps.App.RouteError()")
+	assert.NotContains(t, string(routerSrc), "pi.Register")
 
 	// 3. Re-running must preserve handwritten edits in both dry-run and write modes.
 	handwritten := "// handwritten business logic\npackage handler\n"

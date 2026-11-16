@@ -15,7 +15,7 @@ Pair Pi with the official [pi-layout](https://github.com/sllt/pi-layout) Fx scaf
 ## Highlights
 
 - **Runtime Microkernel & Generic Adapter Registry (`pi.Build` + `pi.Use[T]`)** — Side-effect-free construction with explicit `Owned` / `Borrowed` ownership (`WithManagedDatasources`, `WithManagedSQL`, `WithManagedRedis`, `WithManagedPubSub`, `WithAdapter`), symmetric read-only accessors (`ctx.SQL()`, `ctx.Redis()`, `ctx.PubSub()`, `ctx.File()`), lock-free O(1) generic resolution (`pi.Use[T]`, `pi.Resolve[T]`, `pi.MustUse[T]`), automatic capability probing (`ConnectContext`, `Shutdown`, `Close`, `HealthCheck`), and deterministic reverse-order rollback/shutdown.
-- **Typed HTTP Contracts & Pre-flight Validation** — Generic `pi.Register[Req, Res]` and `pi.Meta` struct tags bind `path`, `query`, `header`, and `json` inputs without `reflect.Value.Call` on the hot path. Route conflicts, invalid validation rules, and incompatible group mounts are caught before serving via `app.RouteError()`.
+- **Unified HTTP Routing & Pre-flight Validation** — `GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`HEAD`/`OPTIONS` on `*App` and `*RouteGroup` support both strongly-typed `func(*pi.Context, *Req) (*Res, error)` (or zero-reflection `pi.H(fn)`) and classic `func(*pi.Context) (any, error)`. Optional `pi.Meta` tags and five isolated input sources (`path`, `query`, `header`, `json`, and `form` multipart file upload) pair with native `*response.File` / `*response.XML` responses, while route conflicts, invalid validation rules, and incompatible mounts are caught before serving via `app.RouteError()`.
 - **Zero-Tooling OpenAPI 3.0.3 & Offline Scalar UI** — Export or serve deterministic OpenAPI 3.0.3 JSON/YAML directly from registered routes—no `swag` comment annotations or external codegen required. Includes a 100% air-gapped, pre-compressed Scalar API Reference UI (`/.well-known/swagger`).
 - **Actor-Supervised Runtime** — Powered by `github.com/sllt/tao/actor`, Pi supervises background workers (`AddWorker` with `SuperviseFatal`, `SuperviseRestart`, `SuperviseDegrade`), overlap-protected Cron jobs (`AddCron`), resilient Pub/Sub subscribers with static `AckSemantics` validation and Ack/Nack safety, and managed WebSocket sessions.
 - **Unified Business Contracts & Security** — Protocol-agnostic `pkg/pi/apperror` maps cleanly across HTTP, gRPC, and CLI exit codes while sanitizing internal failures. `pkg/pi/auth` propagates verified `Principal` identities across transports; custom auth validators receive a full `*pi.Context` (`ctx.Header`, bounded request body, gRPC incoming metadata).
@@ -29,26 +29,27 @@ Pair Pi with the official [pi-layout](https://github.com/sllt/pi-layout) Fx scaf
 ### Framework Module
 
 ```bash
-go get github.com/sllt/pi@v0.5.2
+go get github.com/sllt/pi@v0.5.3
 ```
 
 ### Pi CLI
 
 ```bash
-go install github.com/sllt/pi/cmd/pi@v0.5.2
+go install github.com/sllt/pi/cmd/pi@v0.5.3
 ```
 
 Scaffold a new production-ready project from [pi-layout](https://github.com/sllt/pi-layout):
 
 ```bash
 pi init --module example.com/acme/orders ./orders
+# Pass --skip-verify for instant scaffolding without initial go mod download / go build
 ```
 
 ---
 
 ## Quick Start
 
-Define strongly-typed request/response DTOs with `pi.Meta`, register handlers with `pi.Register`, and enable live OpenAPI 3.0.3 + Scalar UI:
+Define strongly-typed request/response DTOs, register handlers directly via `app.GET` / `app.POST` / ..., and enable live OpenAPI 3.0.3 + Scalar UI (`pi.Meta` itself is optional when no extra OpenAPI metadata is needed, and `pi.Register` remains supported for compatibility):
 
 ```go
 package main
@@ -60,7 +61,7 @@ import (
 )
 
 type GreetRequest struct {
-	pi.Meta `path:"/greetings/{name}" method:"GET" tags:"Greetings" summary:"Greet a user"`
+	pi.Meta `tags:"Greetings" summary:"Greet a user"`
 	Name    string `path:"name" validate:"required" dc:"Target user name"`
 	Title   string `query:"title" default:"friend" dc:"Optional honorific"`
 }
@@ -94,7 +95,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := pi.Register(app, Greet); err != nil {
+	app.GET("/greetings/{name}", Greet)
+	if err := app.RouteError(); err != nil {
 		log.Fatal(err)
 	}
 
@@ -159,17 +161,17 @@ Inside database migrations (`migration.Datasource`), `migration.Resolve[T](d)` a
 
 ### 2. Route Groups, Middleware & OpenAPI Security
 
-Group routes cleanly while inheriting middleware, OpenAPI tags, and security schemes:
+Group routes cleanly and isolate same-prefix auth boundaries with `Scope()` while inheriting middleware, OpenAPI tags, and security schemes:
 
 ```go
 v1 := app.Group("/api/v1").WithDoc(pi.DocTags("Users"))
-_ = pi.Register(v1, userHandler.Login)
+v1.POST("/auth/login", userHandler.Login)
 
-authed := v1.Group("/users").
+authed := v1.Scope().
 	UseMiddleware(requireBearerMiddleware).
 	WithDoc(pi.DocSecurity("Bearer"))
-_ = pi.Register(authed, userHandler.GetProfile)
-_ = pi.Register(authed, userHandler.UpdateProfile)
+authed.GET("/users/profile", userHandler.GetProfile)
+authed.PUT("/users/profile", userHandler.UpdateProfile)
 
 if err := app.RouteError(); err != nil {
 	return err
@@ -232,9 +234,8 @@ func TestGreet(t *testing.T) {
 		pi.WithExplicitHTTPStatus(),
 		pi.WithAdapter("docs", &fakeDocStore{}, pi.Borrowed),
 	)
-	if err := pi.Register(app, Greet); err != nil {
-		t.Fatal(err)
-	}
+	app.GET("/greetings/{name}", Greet)
+	require.NoError(t, app.RouteError())
 
 	req := httptest.NewRequest(http.MethodGet, "/greetings/world", nil)
 	rec := testkit.Request(t, app, req)
@@ -248,7 +249,7 @@ func TestGreet(t *testing.T) {
 
 Pi keeps core SQL, Redis, local filesystem, and standard messaging contracts in the root module while isolating 25 third-party drivers in independent Go submodules (`FromEnv` + `ConnectContext` + `Shutdown`/`Close` + `HealthCheck`) so your `go.mod` stays lean.
 
-| Category | Built-in (`github.com/sllt/pi`) | Independent Adapter Submodules (`@v0.5.2`) |
+| Category | Built-in (`github.com/sllt/pi`) | Independent Adapter Submodules (`@v0.5.3`) |
 | --- | --- | --- |
 | **Relational SQL** | MySQL, PostgreSQL, SQLite | `oracle`, `dbresolver` |
 | **Key-Value / Cache** | Redis | `kv-store/badger`, `kv-store/dynamodb`, `kv-store/nats` |
@@ -262,9 +263,9 @@ Pi keeps core SQL, Redis, local filesystem, and standard messaging contracts in 
 Install any independent adapter submodule and mount it via `pi.WithAdapter`:
 
 ```bash
-go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.2
-go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.2
-go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.2
+go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.3
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.3
+go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.3
 ```
 
 ---

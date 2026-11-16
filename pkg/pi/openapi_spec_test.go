@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/sllt/pi/pkg/pi"
+	"github.com/sllt/pi/pkg/pi/http/response"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/openapi"
 	"github.com/sllt/pi/pkg/pi/service"
@@ -790,4 +792,158 @@ func TestOpenAPISystemProbePathCollisions(t *testing.T) {
 		require.Contains(t, logs, "Swagger UI available at http://127.0.0.1:")
 		require.Contains(t, logs, "/.well-known/swagger")
 	})
+}
+
+func TestOpenAPIUnifiedRoutingScopeFormFileXMLAndHeadOptions(t *testing.T) {
+	type noMetaQueryReq struct {
+		ID string `path:"id" validate:"required"`
+	}
+	type noMetaBodyReq struct {
+		ID   string `path:"id" validate:"required"`
+		Name string `json:"name" validate:"required"`
+	}
+	type noMetaRes struct {
+		ID string `json:"id"`
+	}
+	type formScalarReq struct {
+		Email string `form:"email" validate:"required,email"`
+	}
+	type formFileReq struct {
+		pi.Meta `status:"201" summary:"Upload avatar"`
+		Avatar  *multipart.FileHeader `form:"avatar" validate:"required"`
+	}
+	type mediaServeReq struct {
+		pi.Meta `produces:"image/*" summary:"Serve avatar"`
+		ID      string `path:"id" validate:"required"`
+	}
+	type rssServeReq struct {
+		pi.Meta `produces:"application/rss+xml" summary:"RSS feed"`
+	}
+
+	buildUnifiedApp := func(usePiH bool) *pi.App {
+		app := testkit.New(t,
+			pi.WithExplicitHTTPStatus(),
+			pi.WithOpenAPI(pi.OpenAPIConfig{
+				Title:   "UnifiedSpec",
+				Version: "1.0.0",
+				SecuritySchemes: map[string]openapi.SecurityScheme{
+					"Bearer": {Type: "http", Scheme: "bearer"},
+				},
+			}),
+		)
+
+		v1 := app.Group("/api/v1").WithDoc(pi.DocTags("items"))
+		authed := v1.Scope().WithDoc(pi.DocSecurity("Bearer"))
+
+		getFn := func(ctx *pi.Context, req *noMetaQueryReq) (*noMetaRes, error) {
+			return &noMetaRes{ID: req.ID}, nil
+		}
+		postFn := func(ctx *pi.Context, req *noMetaBodyReq) (*noMetaRes, error) {
+			return &noMetaRes{ID: req.ID}, nil
+		}
+		putFn := func(ctx *pi.Context, req *noMetaBodyReq) (*noMetaRes, error) {
+			return &noMetaRes{ID: req.ID}, nil
+		}
+		patchFn := func(ctx *pi.Context, req *noMetaBodyReq) (*noMetaRes, error) {
+			return &noMetaRes{ID: req.ID}, nil
+		}
+		delFn := func(ctx *pi.Context, req *noMetaQueryReq) (*noMetaRes, error) {
+			return &noMetaRes{ID: req.ID}, nil
+		}
+		headFn := func(ctx *pi.Context, req *noMetaQueryReq) (*noMetaRes, error) {
+			return &noMetaRes{ID: req.ID}, nil
+		}
+		optFn := func(ctx *pi.Context, req *noMetaQueryReq) (*noMetaRes, error) {
+			return &noMetaRes{ID: req.ID}, nil
+		}
+		if usePiH {
+			v1.GET("/items/{id}", pi.H(getFn))
+			authed.POST("/items/{id}", pi.H(postFn))
+			authed.PUT("/items/{id}", pi.H(putFn))
+			authed.PATCH("/items/{id}", pi.H(patchFn))
+			authed.DELETE("/items/{id}", pi.H(delFn))
+			v1.HEAD("/items/{id}", pi.H(headFn))
+			v1.OPTIONS("/items/{id}", pi.H(optFn))
+		} else {
+			v1.GET("/items/{id}", getFn)
+			authed.POST("/items/{id}", postFn)
+			authed.PUT("/items/{id}", putFn)
+			authed.PATCH("/items/{id}", patchFn)
+			authed.DELETE("/items/{id}", delFn)
+			v1.HEAD("/items/{id}", headFn)
+			v1.OPTIONS("/items/{id}", optFn)
+		}
+
+		v1.POST("/login", func(ctx *pi.Context, req *formScalarReq) (*noMetaRes, error) {
+			return &noMetaRes{ID: req.Email}, nil
+		})
+		authed.POST("/upload", func(ctx *pi.Context, req *formFileReq) (*noMetaRes, error) {
+			return &noMetaRes{ID: req.Avatar.Filename}, nil
+		})
+		app.GET("/media/{id}", func(ctx *pi.Context, req *mediaServeReq) (*response.File, error) {
+			return &response.File{Content: []byte("img"), ContentType: "image/png"}, nil
+		})
+		app.GET("/rss.xml", func(ctx *pi.Context, req *rssServeReq) (*response.XML, error) {
+			return &response.XML{Content: []byte("<rss/>")}, nil
+		})
+		return app
+	}
+
+	appDirect := buildUnifiedApp(false)
+	appPiH := buildUnifiedApp(true)
+
+	jsonDirect, err := appDirect.OpenAPIJSON()
+	require.NoError(t, err)
+	jsonPiH, err := appPiH.OpenAPIJSON()
+	require.NoError(t, err)
+	require.Equal(t, string(jsonDirect), string(jsonPiH))
+
+	yamlDirect, err := appDirect.OpenAPIYAML()
+	require.NoError(t, err)
+	yamlPiH, err := appPiH.OpenAPIYAML()
+	require.NoError(t, err)
+	require.Equal(t, string(yamlDirect), string(yamlPiH))
+
+	doc, err := appDirect.OpenAPISpec()
+	require.NoError(t, err)
+
+	item := doc.Paths["/api/v1/items/{id}"]
+	require.NotNil(t, item)
+	require.NotNil(t, item.Get)
+	require.NotNil(t, item.Post)
+	require.NotNil(t, item.Put)
+	require.NotNil(t, item.Patch)
+	require.NotNil(t, item.Delete)
+	require.NotNil(t, item.Head)
+	require.NotNil(t, item.Options)
+
+	// Scope security isolation: GET (on v1) has no security, POST (on v1.Scope()) has Bearer + inherited "items" tag.
+	require.Nil(t, item.Get.Security)
+	require.Equal(t, []string{"items"}, item.Get.Tags)
+	require.NotNil(t, item.Post.Security)
+	require.Equal(t, []openapi.SecurityRequirement{{"Bearer": {}}}, *item.Post.Security)
+	require.Equal(t, []string{"items"}, item.Post.Tags)
+
+	// Scalar form generates both urlencoded and multipart requestBody schemas.
+	loginOp := doc.Paths["/api/v1/login"].Post
+	require.NotNil(t, loginOp.RequestBody)
+	require.Contains(t, loginOp.RequestBody.Content, "application/x-www-form-urlencoded")
+	require.Contains(t, loginOp.RequestBody.Content, "multipart/form-data")
+
+	// File form generates multipart/form-data with format: binary.
+	uploadOp := doc.Paths["/api/v1/upload"].Post
+	require.NotNil(t, uploadOp.RequestBody)
+	require.True(t, uploadOp.RequestBody.Required)
+	require.Contains(t, uploadOp.RequestBody.Content, "multipart/form-data")
+	require.NotContains(t, uploadOp.RequestBody.Content, "application/x-www-form-urlencoded")
+
+	// *response.File and *response.XML emit produces media types without leaking File/XML into components.schemas.
+	mediaOp := doc.Paths["/media/{id}"].Get
+	require.Contains(t, mediaOp.Responses["200"].Content, "image/*")
+	rssOp := doc.Paths["/rss.xml"].Get
+	require.Contains(t, rssOp.Responses["200"].Content, "application/rss+xml")
+	if doc.Components != nil {
+		require.NotContains(t, doc.Components.Schemas, "File")
+		require.NotContains(t, doc.Components.Schemas, "XML")
+	}
 }

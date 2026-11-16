@@ -28,6 +28,7 @@ func main() {
 					&cli.StringFlag{Name: "ref", Usage: "Template Git tag or commit (default: CLI version)"},
 					&cli.StringFlag{Name: "template", Usage: "Template Git repository"},
 					&cli.BoolFlag{Name: "offline", Usage: "Use a local template; do not claim build verification"},
+					&cli.BoolFlag{Name: "skip-verify", Usage: "Skip initial Go dependency download and build verification for instant scaffolding"},
 				},
 				Arguments: []cli.Argument{
 					&cli.StringArg{
@@ -39,7 +40,14 @@ func main() {
 					if name == "" {
 						return fmt.Errorf("please provide a project name, e.g.: pi init myproject")
 					}
-					return bootstrap.CreateContext(ctx, bootstrap.Options{Directory: name, Module: cmd.String("module"), Ref: cmd.String("ref"), Template: cmd.String("template"), Offline: cmd.Bool("offline")})
+					return bootstrap.CreateContext(ctx, bootstrap.Options{
+						Directory:  name,
+						Module:     cmd.String("module"),
+						Ref:        cmd.String("ref"),
+						Template:   cmd.String("template"),
+						Offline:    cmd.Bool("offline"),
+						SkipVerify: cmd.Bool("skip-verify"),
+					})
 				},
 			},
 			{

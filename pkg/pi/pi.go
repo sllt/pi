@@ -1047,6 +1047,16 @@ func (a *App) Group(prefix string, fns ...func(sub *RouteGroup)) *RouteGroup {
 	return targetGroup
 }
 
+// Scope creates an isolated child RouteGroup at root scope with prefix "".
+// Unlike Group(""), Scope always allocates an isolated child node so middleware
+// and WithDoc attributes attached to it never leak back to the root App or sibling scopes.
+func (a *App) Scope(fns ...func(sub *RouteGroup)) *RouteGroup {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		return &RouteGroup{node: &GroupNode{isScope: true}}
+	}
+	return a.rootRouteGroup().Scope(fns...)
+}
+
 func (a *App) rootRouteGroup() *RouteGroup {
 	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
 		return &RouteGroup{}

@@ -64,6 +64,8 @@ func normalizeDocument(d *Document) *Document {
 		normalizeOperation(item.Post)
 		normalizeOperation(item.Delete)
 		normalizeOperation(item.Patch)
+		normalizeOperation(item.Options)
+		normalizeOperation(item.Head)
 	}
 	return out
 }

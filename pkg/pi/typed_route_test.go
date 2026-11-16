@@ -3,8 +3,11 @@ package pi_test
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +16,8 @@ import (
 
 	"github.com/sllt/pi/pkg/pi"
 	"github.com/sllt/pi/pkg/pi/apperror"
+	piHTTP "github.com/sllt/pi/pkg/pi/http"
+	"github.com/sllt/pi/pkg/pi/http/response"
 	"github.com/sllt/pi/pkg/pi/openapi"
 	"github.com/sllt/pi/pkg/pi/testkit"
 	"github.com/stretchr/testify/require"
@@ -1310,5 +1315,711 @@ func TestLegacyRegexpGroupsAndPrecheck(t *testing.T) {
 		h.ServeHTTP(recFiles, httptest.NewRequest(http.MethodGet, "/files/a/b.txt", nil))
 		require.Equal(t, http.StatusOK, recFiles.Code)
 		require.Contains(t, recFiles.Body.String(), "a/b.txt")
+	})
+}
+
+type unifiedEchoReq struct {
+	ID   string `path:"id" validate:"required"`
+	Tag  string `query:"tag"`
+	Name string `json:"name"`
+}
+
+type unifiedQueryOnlyReq struct {
+	ID  string `path:"id" validate:"required"`
+	Tag string `query:"tag"`
+}
+
+type unifiedEchoRes struct {
+	Method string `json:"method"`
+	ID     string `json:"id"`
+	Tag    string `json:"tag,omitempty"`
+	Name   string `json:"name,omitempty"`
+}
+
+type unifiedMethodCtrl struct{}
+
+func (c *unifiedMethodCtrl) Echo(ctx *pi.Context, req *unifiedEchoReq) (*unifiedEchoRes, error) {
+	return &unifiedEchoRes{Method: "POST", ID: req.ID, Tag: req.Tag, Name: req.Name}, nil
+}
+
+func TestUnifiedRoutingOptionalMetaAndPiH(t *testing.T) {
+	t.Run("all 7 methods work without pi.Meta via direct fn and pi.H parity", func(t *testing.T) {
+		app := testkit.New(t,
+			pi.WithExplicitHTTPStatus(),
+			pi.WithOpenAPI(pi.OpenAPIConfig{Title: "Unified7", Version: "1.0.0"}),
+		)
+
+		ctrl := &unifiedMethodCtrl{}
+		v1 := app.Group("/api/v1").WithDoc(pi.DocTags("unified"))
+
+		v1.GET("/items/{id}", func(ctx *pi.Context, req *unifiedQueryOnlyReq) (*unifiedEchoRes, error) {
+			return &unifiedEchoRes{Method: "GET", ID: req.ID, Tag: req.Tag}, nil
+		})
+		v1.POST("/items/{id}", ctrl.Echo)
+		v1.PUT("/items/{id}", pi.H(func(ctx *pi.Context, req *unifiedEchoReq) (*unifiedEchoRes, error) {
+			return &unifiedEchoRes{Method: "PUT", ID: req.ID, Name: req.Name}, nil
+		}))
+		v1.PATCH("/items/{id}", func(ctx *pi.Context, req *unifiedEchoReq) (*unifiedEchoRes, error) {
+			return &unifiedEchoRes{Method: "PATCH", ID: req.ID, Name: req.Name}, nil
+		})
+		v1.DELETE("/items/{id}", func(ctx *pi.Context, req *unifiedQueryOnlyReq) (*unifiedEchoRes, error) {
+			return &unifiedEchoRes{Method: "DELETE", ID: req.ID}, nil
+		})
+		v1.HEAD("/items/{id}", func(ctx *pi.Context, req *unifiedQueryOnlyReq) (*unifiedEchoRes, error) {
+			return &unifiedEchoRes{Method: "HEAD", ID: req.ID}, nil
+		})
+		v1.OPTIONS("/items/{id}", pi.H(func(ctx *pi.Context, req *unifiedQueryOnlyReq) (*unifiedEchoRes, error) {
+			return &unifiedEchoRes{Method: "OPTIONS", ID: req.ID}, nil
+		}))
+
+		// Also verify root app.GET/POST/... with empty pattern "" normalizes to "/".
+		app.GET("", pi.H(func(ctx *pi.Context, req *emptyRes) (*unifiedEchoRes, error) {
+			return &unifiedEchoRes{Method: "ROOT"}, nil
+		}))
+
+		require.NoError(t, app.RouteError())
+
+		spec, err := app.OpenAPISpec()
+		require.NoError(t, err)
+		require.Contains(t, spec.Paths, "/")
+		require.NotNil(t, spec.Paths["/"].Get)
+		item := spec.Paths["/api/v1/items/{id}"]
+		require.NotNil(t, item)
+		require.NotNil(t, item.Get)
+		require.NotNil(t, item.Post)
+		require.NotNil(t, item.Put)
+		require.NotNil(t, item.Patch)
+		require.NotNil(t, item.Delete)
+		require.NotNil(t, item.Head)
+		require.NotNil(t, item.Options)
+
+		// GET
+		rGet := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/api/v1/items/7?tag=fast", nil))
+		require.Equal(t, http.StatusOK, rGet.Code)
+		require.Contains(t, rGet.Body.String(), `"method":"GET"`)
+		require.Contains(t, rGet.Body.String(), `"tag":"fast"`)
+
+		// POST, PUT, PATCH
+		for _, tc := range []struct {
+			method string
+			want   string
+		}{
+			{http.MethodPost, `"method":"POST"`},
+			{http.MethodPut, `"method":"PUT"`},
+			{http.MethodPatch, `"method":"PATCH"`},
+		} {
+			req := httptest.NewRequest(tc.method, "/api/v1/items/9", strings.NewReader(`{"name":"n1"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := testkit.Request(t, app, req)
+			require.Equal(t, http.StatusOK, rec.Code, tc.method)
+			require.Contains(t, rec.Body.String(), tc.want)
+			require.Contains(t, rec.Body.String(), `"name":"n1"`)
+		}
+
+		// DELETE
+		rDel := testkit.Request(t, app, httptest.NewRequest(http.MethodDelete, "/api/v1/items/9", nil))
+		require.Equal(t, http.StatusOK, rDel.Code)
+		require.Contains(t, rDel.Body.String(), `"method":"DELETE"`)
+
+		// HEAD returns 200 and empty body.
+		rHead := testkit.Request(t, app, httptest.NewRequest(http.MethodHead, "/api/v1/items/9", nil))
+		require.Equal(t, http.StatusOK, rHead.Code)
+		require.Empty(t, rHead.Body.Bytes())
+
+		// OPTIONS
+		rOpt := testkit.Request(t, app, httptest.NewRequest(http.MethodOptions, "/api/v1/items/9", nil))
+		require.Equal(t, http.StatusOK, rOpt.Code)
+		require.Contains(t, rOpt.Body.String(), `"method":"OPTIONS"`)
+
+		// Root ""
+		rRoot := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/", nil))
+		require.Equal(t, http.StatusOK, rRoot.Code)
+		require.Contains(t, rRoot.Body.String(), `"method":"ROOT"`)
+	})
+
+	t.Run("optional pi.Meta enhancements, conflict detection, trailing slash, and invalid handlers", func(t *testing.T) {
+		type metaStatusOnlyReq struct {
+			pi.Meta `status:"201" summary:"Create widget"`
+			Name    string `json:"name" validate:"required"`
+		}
+		type metaMismatchMethodReq struct {
+			pi.Meta `method:"POST"`
+		}
+		type metaMismatchPathReq struct {
+			pi.Meta `path:""`
+		}
+		type okRes struct {
+			OK bool `json:"ok"`
+		}
+
+		app := testkit.New(t, pi.WithOpenAPI(pi.OpenAPIConfig{Title: "Validations", Version: "1.0.0"}))
+		v1 := app.Group("/api/v1")
+		v1.POST("/widgets", func(ctx *pi.Context, req *metaStatusOnlyReq) (*okRes, error) {
+			return &okRes{OK: true}, nil
+		})
+		require.NoError(t, app.RouteError())
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/widgets", strings.NewReader(`{"name":"w1"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := testkit.Request(t, app, req)
+		require.Equal(t, http.StatusCreated, rec.Code)
+
+		// Invalid cases each record a clear RouteError.
+		for _, tc := range []struct {
+			name    string
+			setup   func(a *pi.App)
+			wantSub string
+		}{
+			{
+				name:    "zero TypedHandler",
+				setup:   func(a *pi.App) { a.GET("/z", pi.TypedHandler{}) },
+				wantSub: "must not be nil",
+			},
+			{
+				name:    "pi.H(nil)",
+				setup:   func(a *pi.App) { a.GET("/n", pi.H[emptyRes, okRes](nil)) },
+				wantSub: "must not be nil",
+			},
+			{
+				name: "pointer to TypedHandler",
+				setup: func(a *pi.App) {
+					th := pi.H(func(ctx *pi.Context, req *emptyRes) (*okRes, error) { return &okRes{OK: true}, nil })
+					a.GET("/p", &th)
+				},
+				wantSub: "TypedHandler",
+			},
+			{
+				name:    "untyped nil handler",
+				setup:   func(a *pi.App) { a.GET("/nil", nil) },
+				wantSub: "must not be nil",
+			},
+			{
+				name:    "controller struct pointer",
+				setup:   func(a *pi.App) { a.POST("/ctrl", &unifiedMethodCtrl{}) },
+				wantSub: "specific handler method",
+			},
+			{
+				name: "legacy handler with zero-arg WithEndpointDoc",
+				setup: func(a *pi.App) {
+					a.GET("/leg", func(c *pi.Context) (any, error) { return "ok", nil }, pi.WithEndpointDoc())
+				},
+				wantSub: "WithEndpointDoc",
+			},
+			{
+				name: "legacy handler with WithStrictUnknownFields",
+				setup: func(a *pi.App) {
+					a.POST("/leg2", func(c *pi.Context) (any, error) { return "ok", nil }, pi.WithStrictUnknownFields(true))
+				},
+				wantSub: "WithStrictUnknownFields",
+			},
+			{
+				name: "pi.Meta method mismatch",
+				setup: func(a *pi.App) {
+					a.GET("/mm", func(c *pi.Context, r *metaMismatchMethodReq) (*okRes, error) { return &okRes{}, nil })
+				},
+				wantSub: "mismatch",
+			},
+			{
+				name: "pi.Meta empty path mismatch on non-root route",
+				setup: func(a *pi.App) {
+					a.GET("/mp", func(c *pi.Context, r *metaMismatchPathReq) (*okRes, error) { return &okRes{}, nil })
+				},
+				wantSub: "path mismatch",
+			},
+			{
+				name: "trailing slash on non-root typed route",
+				setup: func(a *pi.App) {
+					a.Group("/api").GET("/posts/", func(c *pi.Context, r *emptyRes) (*okRes, error) { return &okRes{}, nil })
+				},
+				wantSub: "trailing '/'",
+			},
+			{
+				name: "invalid WithEndpointMaxBodyBytes",
+				setup: func(a *pi.App) {
+					a.POST("/mb0", func(c *pi.Context, r *emptyRes) (*okRes, error) { return &okRes{}, nil }, pi.WithEndpointMaxBodyBytes(0))
+				},
+				wantSub: "max body bytes",
+			},
+			{
+				name: "WithEndpointMaxBodyBytes above 1GiB",
+				setup: func(a *pi.App) {
+					a.POST("/mb2", func(c *pi.Context, r *emptyRes) (*okRes, error) { return &okRes{}, nil }, pi.WithEndpointMaxBodyBytes((1<<30)+1))
+				},
+				wantSub: "max body bytes",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				errApp := testkit.New(t)
+				tc.setup(errApp)
+				err := errApp.RouteError()
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.wantSub)
+			})
+		}
+	})
+
+	t.Run("delayed WithDoc on group preserves explicit route and WithEndpointMaxBodyBytes and Scope doc names", func(t *testing.T) {
+		app := testkit.New(t, pi.WithOpenAPI(pi.OpenAPIConfig{
+			Title:   "DelayedDoc",
+			Version: "1.0.0",
+			SecuritySchemes: map[string]openapi.SecurityScheme{
+				"Bearer": {Type: "http", Scheme: "bearer"},
+			},
+		}))
+		type uploadTextReq struct {
+			Data string `json:"data" validate:"required"`
+		}
+		type uploadTextRes struct {
+			Len int `json:"len"`
+		}
+
+		v1 := app.Group("/api/v1")
+		authed := v1.Scope()
+		authed.POST("/big-text", func(ctx *pi.Context, req *uploadTextReq) (*uploadTextRes, error) {
+			return &uploadTextRes{Len: len(req.Data)}, nil
+		}, pi.WithEndpointMaxBodyBytes(2<<20))
+
+		// Delayed WithDoc after route registration triggers syncTypedDocsLocked.
+		v1.WithDoc(pi.DocTags("v1"))
+		authed.WithDoc(pi.DocSecurity("Bearer"))
+		require.NoError(t, app.RouteError())
+
+		spec, err := app.OpenAPISpec()
+		require.NoError(t, err)
+		op := spec.Paths["/api/v1/big-text"].Post
+		require.Equal(t, []string{"v1"}, op.Tags)
+		require.NotNil(t, op.Security)
+		require.Equal(t, []openapi.SecurityRequirement{{"Bearer": {}}}, *op.Security)
+
+		// Verify > 1 MiB body still succeeds (WithEndpointMaxBodyBytes survived syncTypedDocsLocked).
+		bigJSON := `{"data":"` + strings.Repeat("a", (1<<20)+1024) + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/big-text", strings.NewReader(bigJSON))
+		req.Header.Set("Content-Type", "application/json")
+		rec := testkit.Request(t, app, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		// Verify Scope WithDoc error messages name "root scope" / `scope "/api/v1"`.
+		errApp := testkit.New(t)
+		errApp.Scope().WithDoc(nil)
+		require.Contains(t, errApp.RouteError().Error(), "root scope")
+
+		errApp2 := testkit.New(t)
+		errApp2.Group("/api/v1").Scope().WithDoc(nil)
+		require.Contains(t, errApp2.RouteError().Error(), `scope "/api/v1"`)
+	})
+}
+
+func TestUnifiedRoutingMultipartMaxBodyAndSpecialResponses(t *testing.T) {
+	t.Run("multipart upload, ReleaseRawBody, empty file input, traversal guard, and 32MiB file default vs 1MiB JSON default", func(t *testing.T) {
+		app := testkit.New(t,
+			pi.WithExplicitHTTPStatus(),
+			pi.WithOpenAPI(pi.OpenAPIConfig{Title: "UploadAPI", Version: "1.0.0"}),
+		)
+
+		type uploadReq struct {
+			pi.Meta `status:"201" summary:"Upload media"`
+			Title   string                  `form:"title" validate:"required"`
+			File    *multipart.FileHeader   `form:"file" validate:"required"`
+			Extras  []*multipart.FileHeader `form:"extras"`
+		}
+		type uploadRes struct {
+			Title       string `json:"title"`
+			Filename    string `json:"filename"`
+			Size        int64  `json:"size"`
+			ExtraCount  int    `json:"extraCount"`
+			BodyCleared bool   `json:"bodyCleared"`
+		}
+		type jsonReq struct {
+			Body string `json:"body"`
+		}
+
+		app.POST("/upload", func(ctx *pi.Context, req *uploadReq) (*uploadRes, error) {
+			rawReq := ctx.Request.(*piHTTP.Request)
+			rawAfterBind, rawErr := rawReq.RawBodyBytes()
+			bodyCleared := rawErr == nil && len(rawAfterBind) == 0
+
+			f, err := req.File.Open()
+			if err != nil {
+				return nil, err
+			}
+			defer f.Close()
+			data, err := io.ReadAll(f)
+			if err != nil {
+				return nil, err
+			}
+			return &uploadRes{
+				Title:       req.Title,
+				Filename:    req.File.Filename,
+				Size:        int64(len(data)),
+				ExtraCount:  len(req.Extras),
+				BodyCleared: bodyCleared,
+			}, nil
+		})
+
+		app.POST("/upload-small", func(ctx *pi.Context, req *uploadReq) (*uploadRes, error) {
+			return &uploadRes{Title: req.Title, Filename: req.File.Filename}, nil
+		}, pi.WithEndpointMaxBodyBytes(512))
+
+		app.POST("/json-default", func(ctx *pi.Context, req *jsonReq) (*uploadRes, error) {
+			return &uploadRes{Size: int64(len(req.Body))}, nil
+		})
+
+		require.NoError(t, app.RouteError())
+
+		// 1. Upload > 1 MiB succeeds under default 32 MiB file route limit and ReleaseRawBody clears rawBody.
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		require.NoError(t, mw.WriteField("title", "banner"))
+		fw, err := mw.CreateFormFile("file", "banner.png")
+		require.NoError(t, err)
+		bigFile := bytes.Repeat([]byte("P"), (1<<20)+2048)
+		_, err = fw.Write(bigFile)
+		require.NoError(t, err)
+		// Browser empty <input type="file" name="extras"> (filename="", 0 bytes) is tolerated.
+		_, err = mw.CreateFormFile("extras", "")
+		require.NoError(t, err)
+		require.NoError(t, mw.Close())
+
+		req := httptest.NewRequest(http.MethodPost, "/upload", &buf)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		rec := testkit.Request(t, app, req)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), `"filename":"banner.png"`)
+		require.Contains(t, rec.Body.String(), `"extraCount":0`)
+		require.Contains(t, rec.Body.String(), `"bodyCleared":true`)
+
+		// 2. Non-file JSON route defaults to 1 MiB (rejects > 1 MiB with 413).
+		bigJSON := `{"body":"` + strings.Repeat("x", (1<<20)+1024) + `"}`
+		jReq := httptest.NewRequest(http.MethodPost, "/json-default", strings.NewReader(bigJSON))
+		jReq.Header.Set("Content-Type", "application/json")
+		jRec := testkit.Request(t, app, jReq)
+		require.Equal(t, http.StatusRequestEntityTooLarge, jRec.Code)
+
+		// 3. WithEndpointMaxBodyBytes(512) rejects > 512 byte upload with 413.
+		var smallBuf bytes.Buffer
+		smw := multipart.NewWriter(&smallBuf)
+		require.NoError(t, smw.WriteField("title", "t"))
+		sfw, err := smw.CreateFormFile("file", "big.txt")
+		require.NoError(t, err)
+		_, err = sfw.Write(bytes.Repeat([]byte("z"), 1024))
+		require.NoError(t, err)
+		require.NoError(t, smw.Close())
+
+		sReq := httptest.NewRequest(http.MethodPost, "/upload-small", &smallBuf)
+		sReq.Header.Set("Content-Type", smw.FormDataContentType())
+		require.Equal(t, http.StatusRequestEntityTooLarge, testkit.Request(t, app, sReq).Code)
+
+		// 4. Path traversal filename ("../evil.txt") rejected with 400.
+		var travBuf bytes.Buffer
+		tmw := multipart.NewWriter(&travBuf)
+		require.NoError(t, tmw.WriteField("title", "bad"))
+		tfw, err := tmw.CreateFormFile("file", "../evil.txt")
+		require.NoError(t, err)
+		_, err = tfw.Write([]byte("evil"))
+		require.NoError(t, err)
+		require.NoError(t, tmw.Close())
+
+		tReq := httptest.NewRequest(http.MethodPost, "/upload", &travBuf)
+		tReq.Header.Set("Content-Type", tmw.FormDataContentType())
+		require.Equal(t, http.StatusBadRequest, testkit.Request(t, app, tReq).Code)
+	})
+
+	t.Run("upstream middleware ParseForm and ParseMultipartForm compatibility", func(t *testing.T) {
+		app := testkit.New(t, pi.WithExplicitHTTPStatus())
+		type formReq struct {
+			pi.Meta `maxBody:"128"`
+			Name    string `form:"name" validate:"required"`
+		}
+		type formRes struct {
+			Name string `json:"name"`
+		}
+		type mpReq struct {
+			pi.Meta `maxBody:"512"`
+			Title   string                `form:"title" validate:"required"`
+			File    *multipart.FileHeader `form:"file" validate:"required"`
+		}
+		type mpRes struct {
+			Title string `json:"title"`
+			Data  string `json:"data"`
+		}
+
+		// Upstream HTTP middleware pre-parses form & multipart bodies before Pi handler runs.
+		preParseMW := func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ct := r.Header.Get("Content-Type")
+				if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+					_ = r.ParseForm()
+				} else if strings.HasPrefix(ct, "multipart/form-data") {
+					_ = r.ParseMultipartForm(1 << 20)
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+
+		app.Use(preParseMW)
+		app.POST("/form", func(ctx *pi.Context, req *formReq) (*formRes, error) {
+			return &formRes{Name: req.Name}, nil
+		})
+		app.POST("/mp", func(ctx *pi.Context, req *mpReq) (*mpRes, error) {
+			f, err := req.File.Open()
+			if err != nil {
+				return nil, err
+			}
+			defer f.Close()
+			b, err := io.ReadAll(f)
+			if err != nil {
+				return nil, err
+			}
+			return &mpRes{Title: req.Title, Data: string(b)}, nil
+		})
+
+		// URL-encoded form with query param must use PostForm (not Form) and enforce maxBody:"128".
+		vals := url.Values{"name": {"alice"}}
+		fReq := httptest.NewRequest(http.MethodPost, "/form?extraQuery=1", strings.NewReader(vals.Encode()))
+		fReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		fRec := testkit.Request(t, app, fReq)
+		require.Equal(t, http.StatusOK, fRec.Code, fRec.Body.String())
+		require.Contains(t, fRec.Body.String(), `"name":"alice"`)
+
+		// Oversized pre-parsed PostForm triggers 413.
+		bigVals := url.Values{"name": {strings.Repeat("a", 200)}}
+		fBigReq := httptest.NewRequest(http.MethodPost, "/form", strings.NewReader(bigVals.Encode()))
+		fBigReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		require.Equal(t, http.StatusRequestEntityTooLarge, testkit.Request(t, app, fBigReq).Code)
+
+		// Pre-parsed MultipartForm near 512-byte limit succeeds with 64 KiB boundary-rewrite headroom.
+		var mpBuf bytes.Buffer
+		mpw := multipart.NewWriter(&mpBuf)
+		require.NoError(t, mpw.WriteField("title", "hello"))
+		mfw, err := mpw.CreateFormFile("file", "note.txt")
+		require.NoError(t, err)
+		_, err = mfw.Write(bytes.Repeat([]byte("b"), 400))
+		require.NoError(t, err)
+		require.NoError(t, mpw.Close())
+
+		mpReqHTTP := httptest.NewRequest(http.MethodPost, "/mp", &mpBuf)
+		mpReqHTTP.Header.Set("Content-Type", mpw.FormDataContentType())
+		mpRec := testkit.Request(t, app, mpReqHTTP)
+		require.Equal(t, http.StatusOK, mpRec.Code, mpRec.Body.String())
+		require.Contains(t, mpRec.Body.String(), `"title":"hello"`)
+	})
+
+	t.Run("response.File and response.XML typed endpoints with produces, status, headers, and HEAD", func(t *testing.T) {
+		app := testkit.New(t,
+			pi.WithExplicitHTTPStatus(),
+			pi.WithOpenAPI(pi.OpenAPIConfig{Title: "MediaXML", Version: "1.0.0"}),
+		)
+
+		type imgReq struct {
+			pi.Meta `produces:"image/*" summary:"Get image"`
+			ID      string `path:"id" validate:"required"`
+		}
+		type rssReq struct {
+			pi.Meta `produces:"application/rss+xml" summary:"Get RSS"`
+		}
+
+		app.GET("/images/{id}", func(ctx *pi.Context, req *imgReq) (*response.File, error) {
+			if req.ID == "missing-ct" {
+				return &response.File{Content: []byte("raw")}, nil
+			}
+			return &response.File{
+				Content: []byte("PNGDATA"),
+				Headers: map[string]string{
+					"Content-Type":  "image/png",
+					"Cache-Control": "public, max-age=60",
+				},
+			}, nil
+		})
+		app.HEAD("/images/{id}", func(ctx *pi.Context, req *imgReq) (*response.File, error) {
+			return &response.File{
+				Content:     []byte("PNGDATA"),
+				ContentType: "image/png",
+			}, nil
+		})
+		app.GET("/rss.xml", func(ctx *pi.Context, req *rssReq) (*response.XML, error) {
+			return &response.XML{
+				Content: []byte("<rss><channel/></rss>"),
+			}, nil
+		})
+
+		require.NoError(t, app.RouteError())
+
+		spec, err := app.OpenAPISpec()
+		require.NoError(t, err)
+		if spec.Components != nil {
+			require.NotContains(t, spec.Components.Schemas, "File")
+			require.NotContains(t, spec.Components.Schemas, "XML")
+		}
+
+		// File preserves Headers["Content-Type"] and custom headers.
+		recImg := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/images/logo", nil))
+		require.Equal(t, http.StatusOK, recImg.Code)
+		require.Equal(t, "image/png", recImg.Header().Get("Content-Type"))
+		require.Equal(t, "public, max-age=60", recImg.Header().Get("Cache-Control"))
+		require.Equal(t, "PNGDATA", recImg.Body.String())
+
+		// Wildcard produces:"image/*" without ContentType returns 500 contract error.
+		recBad := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/images/missing-ct", nil))
+		require.Equal(t, http.StatusInternalServerError, recBad.Code)
+
+		// HEAD on *response.File returns headers and empty body.
+		recHead := testkit.Request(t, app, httptest.NewRequest(http.MethodHead, "/images/logo", nil))
+		require.Equal(t, http.StatusOK, recHead.Code)
+		require.Equal(t, "image/png", recHead.Header().Get("Content-Type"))
+		require.Empty(t, recHead.Body.Bytes())
+
+		// *response.XML auto-fills ContentType from produces:"application/rss+xml".
+		recRSS := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/rss.xml", nil))
+		require.Equal(t, http.StatusOK, recRSS.Code)
+		require.Equal(t, "application/rss+xml", recRSS.Header().Get("Content-Type"))
+		require.Equal(t, "<rss><channel/></rss>", recRSS.Body.String())
+	})
+
+	t.Run("MaxBodyBytes 4-tier priority: WithEndpointMaxBodyBytes > pi.Meta maxBody > HTTP_MAX_BODY_BYTES > file 32MiB", func(t *testing.T) {
+		app := testkit.New(t,
+			pi.WithConfig(map[string]string{"HTTP_MAX_BODY_BYTES": "1048576"}), // explicit 1 MiB
+			pi.WithExplicitHTTPStatus(),
+		)
+		type plainUploadReq struct {
+			File *multipart.FileHeader `form:"file" validate:"required"`
+		}
+		type metaUploadReq struct {
+			pi.Meta `maxBody:"128KB"`
+			File    *multipart.FileHeader `form:"file" validate:"required"`
+		}
+		type okRes struct {
+			Size int64 `json:"size"`
+		}
+
+		// Tier 3: explicit HTTP_MAX_BODY_BYTES (1 MiB) overrides file 32 MiB default!
+		app.POST("/tier3-app", func(ctx *pi.Context, req *plainUploadReq) (*okRes, error) {
+			return &okRes{Size: req.File.Size}, nil
+		})
+		// Tier 2: pi.Meta maxBody:"128KB" overrides explicit HTTP_MAX_BODY_BYTES (1 MiB).
+		app.POST("/tier2-meta", func(ctx *pi.Context, req *metaUploadReq) (*okRes, error) {
+			return &okRes{Size: req.File.Size}, nil
+		})
+		// Tier 1: WithEndpointMaxBodyBytes(2<<20) overrides pi.Meta maxBody:"128KB".
+		app.POST("/tier1-opt", func(ctx *pi.Context, req *metaUploadReq) (*okRes, error) {
+			return &okRes{Size: req.File.Size}, nil
+		}, pi.WithEndpointMaxBodyBytes(2<<20))
+
+		makeMultipartReq := func(target string, size int) *http.Request {
+			var b bytes.Buffer
+			w := multipart.NewWriter(&b)
+			fw, err := w.CreateFormFile("file", "f.bin")
+			require.NoError(t, err)
+			_, err = fw.Write(bytes.Repeat([]byte("A"), size))
+			require.NoError(t, err)
+			require.NoError(t, w.Close())
+			r := httptest.NewRequest(http.MethodPost, target, &b)
+			r.Header.Set("Content-Type", w.FormDataContentType())
+			return r
+		}
+
+		// 1.1 MiB rejected by /tier3-app (explicit HTTP_MAX_BODY_BYTES=1MiB), accepted by /tier1-opt (2MiB).
+		require.Equal(t, http.StatusRequestEntityTooLarge, testkit.Request(t, app, makeMultipartReq("/tier3-app", (1<<20)+2048)).Code)
+		require.Equal(t, http.StatusOK, testkit.Request(t, app, makeMultipartReq("/tier1-opt", (1<<20)+2048)).Code)
+
+		// 200 KiB rejected by /tier2-meta (maxBody:"128KB"), accepted by /tier3-app (1MiB).
+		require.Equal(t, http.StatusRequestEntityTooLarge, testkit.Request(t, app, makeMultipartReq("/tier2-meta", 200<<10)).Code)
+		require.Equal(t, http.StatusOK, testkit.Request(t, app, makeMultipartReq("/tier3-app", 200<<10)).Code)
+	})
+
+	t.Run("concurrent requests returning shared *response.File pointer are race-free and do not mutate shared struct", func(t *testing.T) {
+		sharedFile := &response.File{
+			Content: []byte("SHARED-PNG"),
+			Headers: map[string]string{"Content-Type": "image/png"},
+		}
+		app := testkit.New(t, pi.WithExplicitHTTPStatus())
+		app.GET("/shared-file", func(ctx *pi.Context, req *emptyRes) (*response.File, error) {
+			return sharedFile, nil
+		})
+
+		h, err := app.HTTPHandler()
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/shared-file", nil))
+				if rec.Code != http.StatusOK {
+					t.Errorf("unexpected status %d", rec.Code)
+				}
+				if rec.Header().Get("Content-Type") != "image/png" {
+					t.Errorf("unexpected content-type %q", rec.Header().Get("Content-Type"))
+				}
+				if rec.Body.String() != "SHARED-PNG" {
+					t.Errorf("unexpected body %q", rec.Body.String())
+				}
+			}()
+		}
+		wg.Wait()
+		require.Empty(t, sharedFile.ContentType)
+		require.Zero(t, sharedFile.StatusCode)
+	})
+
+	t.Run("nil typed or legacy funcs and invalid unified handler signatures record clear RouteErrors without mentioning Bind", func(t *testing.T) {
+		type okRes struct {
+			OK bool `json:"ok"`
+		}
+		type customLegacyFunc func(*pi.Context) (any, error)
+
+		var (
+			nilHandler      pi.Handler
+			nilRawLegacy    func(*pi.Context) (any, error)
+			nilCustomLegacy customLegacyFunc
+			nilTyped        func(*pi.Context, *emptyRes) (*okRes, error)
+		)
+
+		for _, tc := range []struct {
+			name  string
+			setup func(a *pi.App)
+		}{
+			{name: "nil pi.Handler", setup: func(a *pi.App) { a.GET("/nil1", nilHandler) }},
+			{name: "nil raw legacy func", setup: func(a *pi.App) { a.GET("/nil2", nilRawLegacy) }},
+			{name: "nil custom legacy func", setup: func(a *pi.App) { a.GET("/nil3", nilCustomLegacy) }},
+			{name: "nil typed func", setup: func(a *pi.App) { a.POST("/nil4", nilTyped) }},
+			{name: "nil pi.H", setup: func(a *pi.App) { a.POST("/nil5", pi.H[emptyRes, okRes](nil)) }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				errApp := testkit.New(t)
+				require.NotPanics(t, func() { tc.setup(errApp) })
+				err := errApp.RouteError()
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "must not be nil")
+			})
+		}
+
+		for _, tc := range []struct {
+			name  string
+			setup func(a *pi.App)
+		}{
+			{
+				name: "invalid 2-arg non-struct-ptr handler",
+				setup: func(a *pi.App) {
+					a.GET("/bad2", func(ctx *pi.Context, req string) (string, error) { return "", nil })
+				},
+			},
+			{
+				name: "invalid 1-arg handler",
+				setup: func(a *pi.App) {
+					a.GET("/bad1", func(ctx *pi.Context) string { return "" })
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				errApp := testkit.New(t)
+				tc.setup(errApp)
+				err := errApp.RouteError()
+				require.Error(t, err)
+				require.NotContains(t, err.Error(), "Bind")
+				require.NotContains(t, err.Error(), "auto-bound")
+				require.NotContains(t, err.Error(), "pi.Register")
+			})
+		}
 	})
 }

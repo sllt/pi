@@ -110,6 +110,7 @@ type runtimeKernel struct {
 	validate           func(any) error
 	explicitHTTPStatus bool
 	maxBodyBytes       int64
+	hasExplicitMaxBody bool
 
 	// Core slots & managed resource table (guarded by mu until frozen; unconfigured slots are strictly untyped nil)
 	mu           sync.RWMutex
@@ -154,6 +155,7 @@ func newLegacyKernel(conf config.Config, customLogger logging.Logger, loggerOwne
 		if v := strings.TrimSpace(conf.Get("HTTP_MAX_BODY_BYTES")); v != "" {
 			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
 				k.maxBodyBytes = parsed
+				k.hasExplicitMaxBody = true
 			}
 		}
 	}
@@ -292,6 +294,7 @@ func newIsolatedKernel(
 		tracerProvider:  tp,
 		hasCustomTracer: hasCustomTP,
 		isolated:        true,
+		maxBodyBytes:    1 << 20,
 		wsManager:       websocket.New(),
 		httpServices:    make(map[string]service.HTTP),
 		names:           make(map[string]string),

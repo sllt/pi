@@ -131,15 +131,19 @@ func (g *RouteGroup) WithDoc(options ...DocOption) *RouteGroup {
 	return g
 }
 
+const maxEndpointBodyBytesLimit int64 = 1 << 30 // 1 GiB
+
 type typedEndpointConfig struct {
 	timeout        time.Duration
+	maxBodyBytes   int64
 	piMWs          []PiMiddleware
 	httpMWs        []func(http.Handler) http.Handler
 	doc            docConfig
+	hasEndpointDoc bool
 	strictOverride *bool
 }
 
-// EndpointOption configures per-endpoint runtime and OpenAPI behavior on pi.Register.
+// EndpointOption configures per-endpoint runtime and OpenAPI behavior on route registration.
 type EndpointOption func(*typedEndpointConfig) error
 
 // WithEndpointTimeout sets a per-endpoint request timeout overriding the global REQUEST_TIMEOUT.
@@ -149,6 +153,18 @@ func WithEndpointTimeout(d time.Duration) EndpointOption {
 			return fmt.Errorf("endpoint timeout must not be negative: %v", d)
 		}
 		cfg.timeout = d
+		return nil
+	}
+}
+
+// WithEndpointMaxBodyBytes overrides the maximum request body size in bytes for a single endpoint
+// (both typed and legacy handlers). The limit must satisfy 0 < limit <= 1 GiB (1 << 30).
+func WithEndpointMaxBodyBytes(limit int64) EndpointOption {
+	return func(cfg *typedEndpointConfig) error {
+		if limit <= 0 || limit > maxEndpointBodyBytesLimit {
+			return fmt.Errorf("endpoint max body bytes must be in (0, %d], got %d", maxEndpointBodyBytesLimit, limit)
+		}
+		cfg.maxBodyBytes = limit
 		return nil
 	}
 }
@@ -182,6 +198,7 @@ func WithEndpointHTTPMiddleware(mws ...func(http.Handler) http.Handler) Endpoint
 // WithEndpointDoc attaches per-endpoint OpenAPI tags or security overrides.
 func WithEndpointDoc(options ...DocOption) EndpointOption {
 	return func(cfg *typedEndpointConfig) error {
+		cfg.hasEndpointDoc = true
 		for _, opt := range options {
 			if opt == nil {
 				return errors.New("endpoint DocOption must not be nil")
@@ -207,10 +224,39 @@ func WithStrictUnknownFields(strict bool) EndpointOption {
 	}
 }
 
+// TypedHandler is a compile-time-checked typed endpoint descriptor produced by H.
+// Passing H(fn) to App/RouteGroup HTTP method helpers provides compile-time signature
+// checking and eliminates reflect.Value.Call on the request hot path.
+type TypedHandler struct {
+	handlerName string
+	reqPtrType  reflect.Type
+	resPtrType  reflect.Type
+	fnIsNil     bool
+	buildDirect func(*App, *contract.CompiledOperation) Handler
+}
+
+// H wraps a strongly-typed handler function into a TypedHandler descriptor with
+// compile-time type checking and zero reflect.Value.Call on request dispatch.
+func H[Req, Res any](fn func(*Context, *Req) (*Res, error)) TypedHandler {
+	return TypedHandler{
+		handlerName: runtimeFuncName(fn),
+		reqPtrType:  reflect.TypeOf((*Req)(nil)),
+		resPtrType:  reflect.TypeOf((*Res)(nil)),
+		fnIsNil:     fn == nil,
+		buildDirect: func(app *App, op *contract.CompiledOperation) Handler {
+			return makeDirectTypedHandler(app, op, fn)
+		},
+	}
+}
+
 type typedRouteEntry struct {
 	handlerName          string
 	reqPtrType           reflect.Type
 	resPtrType           reflect.Type
+	hasExplicitRoute     bool
+	explicitMethod       string
+	explicitPattern      string
+	endpointMaxBody      int64
 	strictOverride       *bool
 	endpointDoc          docConfig
 	compiledInheritedDoc docConfig
@@ -282,6 +328,9 @@ func Register[Req, Res any](
 }
 
 // Bind validates and atomically registers one or more *struct controllers or typed handler functions at root scope.
+//
+// Deprecated: Prefer App.GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS (with optional pi.H and App.Scope)
+// to declare explicit HTTP routes per endpoint instead of whole-controller reflection binding.
 func (a *App) Bind(targets ...any) error {
 	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
 		return errors.New("application has no HTTP router")
@@ -290,6 +339,9 @@ func (a *App) Bind(targets ...any) error {
 }
 
 // Bind validates and atomically registers one or more *struct controllers or typed handler functions onto this group.
+//
+// Deprecated: Prefer RouteGroup.GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS (with optional pi.H and RouteGroup.Scope)
+// to declare explicit HTTP routes per endpoint instead of whole-controller reflection binding.
 func (g *RouteGroup) Bind(targets ...any) error {
 	if g == nil || g.node == nil {
 		return errors.New("route group must not be nil")
@@ -347,18 +399,212 @@ func (a *App) bindToGroup(node *GroupNode, targets ...any) error {
 }
 
 type typedBindCandidate struct {
-	handlerName  string
-	reqPtrType   reflect.Type
-	resPtrType   reflect.Type
-	cfg          typedEndpointConfig
-	buildHandler func(*contract.CompiledOperation) Handler
+	handlerName      string
+	reqPtrType       reflect.Type
+	resPtrType       reflect.Type
+	hasExplicitRoute bool
+	explicitMethod   string
+	explicitPattern  string
+	cfg              typedEndpointConfig
+	buildHandler     func(*contract.CompiledOperation) Handler
 }
 
 var (
 	contextPtrType = reflect.TypeOf((*Context)(nil))
 	errorType      = reflect.TypeOf((*error)(nil)).Elem()
 	anyType        = reflect.TypeOf((*any)(nil)).Elem()
+	handlerType    = reflect.TypeOf((*Handler)(nil)).Elem()
 )
+
+func matchLegacyHandler(rawHandler any) (fn Handler, matched bool, isNil bool) {
+	if rawHandler == nil {
+		return nil, false, false
+	}
+	switch h := rawHandler.(type) {
+	case Handler:
+		return h, true, h == nil
+	case func(*Context) (any, error):
+		return Handler(h), true, h == nil
+	}
+	rv := reflect.ValueOf(rawHandler)
+	rt := rv.Type()
+	if rt.Kind() == reflect.Func && rt.ConvertibleTo(handlerType) {
+		if rv.IsNil() {
+			return nil, true, true
+		}
+		converted, ok := rv.Convert(handlerType).Interface().(Handler)
+		if !ok || converted == nil {
+			return nil, true, true
+		}
+		return converted, true, false
+	}
+	return nil, false, false
+}
+
+func (g *RouteGroup) addUnifiedRoute(method, pattern string, rawHandler any, opts ...EndpointOption) *RouteGroup {
+	if g == nil || g.node == nil {
+		return g
+	}
+	reg := g.registry()
+	if reg == nil {
+		// Offline GroupNode without a backing *App (e.g. unit tests constructing &GroupNode{} directly).
+		var epCfg typedEndpointConfig
+		for _, opt := range opts {
+			if opt == nil {
+				return g
+			}
+			if err := opt(&epCfg); err != nil {
+				return g
+			}
+		}
+		if legacyFn, matched, isNil := matchLegacyHandler(rawHandler); matched && !isNil && !epCfg.hasEndpointDoc && epCfg.strictOverride == nil {
+			idx := len(g.node.routes)
+			g.node.routes = append(g.node.routes, RouteDef{
+				Method:         method,
+				Pattern:        pattern,
+				Handler:        legacyFn,
+				RequestTimeout: epCfg.timeout,
+				MaxBodyBytes:   epCfg.maxBodyBytes,
+			})
+			if len(epCfg.httpMWs) > 0 || len(epCfg.piMWs) > 0 {
+				g.node.setRouteMeta(idx, &routeMeta{
+					httpMWs: append([]func(http.Handler) http.Handler(nil), epCfg.httpMWs...),
+					piMWs:   append([]PiMiddleware(nil), epCfg.piMWs...),
+				})
+			}
+		}
+		return g
+	}
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+
+	if !g.app.canMutateRoutesLocked("register routes") {
+		return g
+	}
+
+	var epCfg typedEndpointConfig
+	for i, opt := range opts {
+		if opt == nil {
+			g.app.recordRouteErrorLocked(fmt.Errorf("endpoint option at index %d must not be nil", i))
+			return g
+		}
+		if err := opt(&epCfg); err != nil {
+			g.app.recordRouteErrorLocked(err)
+			return g
+		}
+	}
+
+	switch th := rawHandler.(type) {
+	case TypedHandler:
+		if th.buildDirect == nil || th.fnIsNil {
+			g.app.recordRouteErrorLocked(errors.New("typed handler function must not be nil"))
+			return g
+		}
+		cand := typedBindCandidate{
+			handlerName:      th.handlerName,
+			reqPtrType:       th.reqPtrType,
+			resPtrType:       th.resPtrType,
+			hasExplicitRoute: true,
+			explicitMethod:   method,
+			explicitPattern:  pattern,
+			cfg:              epCfg,
+			buildHandler: func(op *contract.CompiledOperation) Handler {
+				return th.buildDirect(g.app, op)
+			},
+		}
+		if err := g.app.commitTypedCandidatesLocked(g.node, []typedBindCandidate{cand}); err != nil {
+			g.app.recordRouteErrorLocked(err)
+		}
+		return g
+	case *TypedHandler:
+		g.app.recordRouteErrorLocked(errors.New("expected pi.TypedHandler value from pi.H(fn), not *pi.TypedHandler pointer"))
+		return g
+	}
+
+	if legacyFn, matched, isNil := matchLegacyHandler(rawHandler); matched {
+		if isNil {
+			g.app.recordRouteErrorLocked(errors.New("route handler must not be nil"))
+			return g
+		}
+		if epCfg.hasEndpointDoc || epCfg.strictOverride != nil {
+			g.app.recordRouteErrorLocked(fmt.Errorf(
+				"legacy route %s %s (func(*pi.Context) (any, error)) does not support WithEndpointDoc or WithStrictUnknownFields; switch to typed handler func(*pi.Context, *Req) (*Res, error)",
+				method, pattern,
+			))
+			return g
+		}
+		idx := len(g.node.routes)
+		g.node.routes = append(g.node.routes, RouteDef{
+			Method:         method,
+			Pattern:        pattern,
+			Handler:        legacyFn,
+			RequestTimeout: epCfg.timeout,
+			MaxBodyBytes:   epCfg.maxBodyBytes,
+		})
+		if len(epCfg.httpMWs) > 0 || len(epCfg.piMWs) > 0 {
+			g.node.setRouteMeta(idx, &routeMeta{
+				httpMWs: append([]func(http.Handler) http.Handler(nil), epCfg.httpMWs...),
+				piMWs:   append([]PiMiddleware(nil), epCfg.piMWs...),
+			})
+		}
+		g.app.ensureHTTPAvailable()
+		reg.markDirtyLocked()
+		return g
+	}
+
+	if rawHandler == nil {
+		g.app.recordRouteErrorLocked(errors.New("route handler must not be nil"))
+		return g
+	}
+
+	rv := reflect.ValueOf(rawHandler)
+	rt := rv.Type()
+	if rv.Kind() == reflect.Func {
+		if rv.IsNil() {
+			g.app.recordRouteErrorLocked(errors.New("typed handler function must not be nil"))
+			return g
+		}
+		handlerName := runtimeFuncName(rawHandler)
+		reqPtrType, resPtrType, err := validateUnifiedTypedHandlerSignature(handlerName, rt)
+		if err != nil {
+			g.app.recordRouteErrorLocked(err)
+			return g
+		}
+		reqElem := reqPtrType.Elem()
+		fnVal := rv
+		cand := typedBindCandidate{
+			handlerName:      handlerName,
+			reqPtrType:       reqPtrType,
+			resPtrType:       resPtrType,
+			hasExplicitRoute: true,
+			explicitMethod:   method,
+			explicitPattern:  pattern,
+			cfg:              epCfg,
+			buildHandler: func(op *contract.CompiledOperation) Handler {
+				return makeReflectTypedHandler(g.app, op, fnVal, reqElem)
+			},
+		}
+		if err := g.app.commitTypedCandidatesLocked(g.node, []typedBindCandidate{cand}); err != nil {
+			g.app.recordRouteErrorLocked(err)
+		}
+		return g
+	}
+
+	if rv.Kind() == reflect.Ptr && rt.Elem().Kind() == reflect.Struct {
+		g.app.recordRouteErrorLocked(fmt.Errorf(
+			"route %s %s received controller pointer %s; pass a specific handler method (e.g. h.Method) instead of the controller struct",
+			method, pattern, rt.String(),
+		))
+		return g
+	}
+
+	g.app.recordRouteErrorLocked(fmt.Errorf(
+		"route %s %s handler must be func(*pi.Context) (any, error), func(*pi.Context, *Req) (*Res, error), or pi.TypedHandler, got %s",
+		method, pattern, rt.String(),
+	))
+	return g
+}
 
 func (a *App) discoverBindCandidates(index int, target any) ([]typedBindCandidate, error) {
 	if target == nil {
@@ -446,11 +692,22 @@ func validateTypedHandlerSignature(handlerName string, fnType reflect.Type) (req
 			handlerName,
 		)
 	}
+	return validateTypedHandlerArgs(handlerName, fnType, "func(*pi.Context, *Req) (*Res, error)")
+}
+
+func validateUnifiedTypedHandlerSignature(handlerName string, fnType reflect.Type) (reqPtrType reflect.Type, resPtrType reflect.Type, err error) {
+	if fnType == nil || fnType.Kind() != reflect.Func {
+		return nil, nil, fmt.Errorf("handler %s is not a function", handlerName)
+	}
+	return validateTypedHandlerArgs(handlerName, fnType, "func(*pi.Context) (any, error) or func(*pi.Context, *Req) (*Res, error)")
+}
+
+func validateTypedHandlerArgs(handlerName string, fnType reflect.Type, expectedSig string) (reqPtrType reflect.Type, resPtrType reflect.Type, err error) {
 	if fnType.IsVariadic() {
 		return nil, nil, fmt.Errorf("handler %s must not be variadic", handlerName)
 	}
 	if fnType.NumIn() != 2 || fnType.In(0) != contextPtrType || fnType.NumOut() != 2 || fnType.Out(1) != errorType {
-		return nil, nil, fmt.Errorf("handler %s must match func(*pi.Context, *Req) (*Res, error), got %s", handlerName, fnType.String())
+		return nil, nil, fmt.Errorf("handler %s must match %s, got %s", handlerName, expectedSig, fnType.String())
 	}
 	reqPtrType = fnType.In(1)
 	resPtrType = fnType.Out(0)
@@ -468,15 +725,20 @@ func makeDirectTypedHandler[Req, Res any](
 	op *contract.CompiledOperation,
 	fn func(*Context, *Req) (*Res, error),
 ) Handler {
+	var customValidate func(any) error
+	if app != nil {
+		customValidate = app.customValidate
+	}
 	return func(ctx *Context) (any, error) {
 		httpReq, ok := ctx.Request.(*piHTTP.Request)
 		if !ok || httpReq == nil {
 			return nil, errors.New("typed HTTP handler requires an HTTP request context")
 		}
 		req := new(Req)
-		if err := op.BindAndValidate(httpReq, req, app.customValidate); err != nil {
+		if err := op.BindAndValidate(httpReq, req, customValidate); err != nil {
 			return nil, err
 		}
+		httpReq.ReleaseRawBody()
 		res, err := fn(ctx, req)
 		return op.WrapResponse(res, err)
 	}
@@ -488,15 +750,20 @@ func makeReflectTypedHandler(
 	fnVal reflect.Value,
 	reqElemType reflect.Type,
 ) Handler {
+	var customValidate func(any) error
+	if app != nil {
+		customValidate = app.customValidate
+	}
 	return func(ctx *Context) (any, error) {
 		httpReq, ok := ctx.Request.(*piHTTP.Request)
 		if !ok || httpReq == nil {
 			return nil, errors.New("typed HTTP handler requires an HTTP request context")
 		}
 		reqVal := reflect.New(reqElemType)
-		if err := op.BindAndValidate(httpReq, reqVal.Interface(), app.customValidate); err != nil {
+		if err := op.BindAndValidate(httpReq, reqVal.Interface(), customValidate); err != nil {
 			return nil, err
 		}
+		httpReq.ReleaseRawBody()
 		outs := fnVal.Call([]reflect.Value{reflect.ValueOf(ctx), reqVal})
 		var fnErr error
 		if !outs[1].IsNil() {
@@ -536,7 +803,18 @@ func (a *App) commitTypedCandidatesLocked(node *GroupNode, candidates []typedBin
 	staged := make([]stagedRoute, 0, len(candidates))
 
 	for _, cand := range candidates {
-		compileOpts := buildCompileOptions(groupPrefix, inheritedDoc, a.typedBind.StrictUnknownFields, cand.cfg.strictOverride, cand.cfg.doc)
+		compileOpts := buildCompileOptions(
+			groupPrefix,
+			inheritedDoc,
+			a.typedBind.StrictUnknownFields,
+			cand.cfg.strictOverride,
+			cand.cfg.doc,
+			cand.hasExplicitRoute,
+			cand.explicitMethod,
+			cand.explicitPattern,
+			cand.cfg.maxBodyBytes,
+			a.explicitMaxBodyBytes(),
+		)
 		op, err := contract.CompileOperation(cand.handlerName, cand.reqPtrType, cand.resPtrType, compileOpts, stagingSR)
 		if err != nil {
 			return err
@@ -580,6 +858,10 @@ func (a *App) commitTypedCandidatesLocked(node *GroupNode, candidates []typedBin
 			handlerName:          cand.handlerName,
 			reqPtrType:           cand.reqPtrType,
 			resPtrType:           cand.resPtrType,
+			hasExplicitRoute:     cand.hasExplicitRoute,
+			explicitMethod:       cand.explicitMethod,
+			explicitPattern:      cand.explicitPattern,
+			endpointMaxBody:      cand.cfg.maxBodyBytes,
 			strictOverride:       cand.cfg.strictOverride,
 			endpointDoc:          cloneDocConfig(cand.cfg.doc),
 			compiledInheritedDoc: cloneDocConfig(inheritedDoc),
@@ -599,6 +881,7 @@ func (a *App) commitTypedCandidatesLocked(node *GroupNode, candidates []typedBin
 				Pattern:        op.ChiPattern,
 				Handler:        cand.buildHandler(op),
 				RequestTimeout: cand.cfg.timeout,
+				MaxBodyBytes:   op.MaxBodyBytes,
 			},
 			meta: meta,
 		})
@@ -619,6 +902,9 @@ func (a *App) syncTypedDocsLocked() (bool, error) {
 	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
 		return false, nil
 	}
+	if a.httpServer.registry.compiled {
+		return false, nil
+	}
 	var errs []error
 	changed := false
 	walkGroupNodesLocked(a.httpServer.registry.root, "", docConfig{}, func(node *GroupNode, fullPrefix string, inherited docConfig) {
@@ -631,7 +917,18 @@ func (a *App) syncTypedDocsLocked() (bool, error) {
 			if docConfigEqual(entry.compiledInheritedDoc, inherited) && entry.compiledPrefix == fullPrefix {
 				continue
 			}
-			compileOpts := buildCompileOptions(fullPrefix, inherited, a.typedBind.StrictUnknownFields, entry.strictOverride, entry.endpointDoc)
+			compileOpts := buildCompileOptions(
+				fullPrefix,
+				inherited,
+				a.typedBind.StrictUnknownFields,
+				entry.strictOverride,
+				entry.endpointDoc,
+				entry.hasExplicitRoute,
+				entry.explicitMethod,
+				entry.explicitPattern,
+				entry.endpointMaxBody,
+				a.explicitMaxBodyBytes(),
+			)
 			op, err := contract.CompileOperation(entry.handlerName, entry.reqPtrType, entry.resPtrType, compileOpts, nil)
 			if err != nil {
 				errs = append(errs, err)
@@ -643,6 +940,8 @@ func (a *App) syncTypedDocsLocked() (bool, error) {
 			} else {
 				entry.op = op
 			}
+			node.routes[i].Pattern = op.ChiPattern
+			node.routes[i].MaxBodyBytes = op.MaxBodyBytes
 			entry.compiledInheritedDoc = cloneDocConfig(inherited)
 			entry.compiledPrefix = fullPrefix
 			changed = true
@@ -1135,17 +1434,34 @@ func inheritDocConfig(parent, current docConfig) docConfig {
 	return out
 }
 
+func (a *App) explicitMaxBodyBytes() int64 {
+	if a != nil && a.kernel != nil && a.kernel.hasExplicitMaxBody {
+		return a.kernel.maxBodyBytes
+	}
+	return 0
+}
+
 func buildCompileOptions(
 	groupPrefix string,
 	inheritedDoc docConfig,
 	defaultStrict bool,
 	strictOverride *bool,
 	endpointDoc docConfig,
+	hasExplicitRoute bool,
+	explicitMethod string,
+	explicitPattern string,
+	endpointMaxBody int64,
+	explicitAppMaxBody int64,
 ) contract.CompileOptions {
 	opts := contract.CompileOptions{
-		GroupPrefix:        groupPrefix,
-		DefaultStrictJSON:  defaultStrict,
-		StrictJSONOverride: strictOverride,
+		GroupPrefix:             groupPrefix,
+		HasExplicitRoute:        hasExplicitRoute,
+		ExplicitMethod:          explicitMethod,
+		ExplicitPattern:         explicitPattern,
+		EndpointMaxBodyBytes:    endpointMaxBody,
+		ExplicitAppMaxBodyBytes: explicitAppMaxBody,
+		DefaultStrictJSON:       defaultStrict,
+		StrictJSONOverride:      strictOverride,
 	}
 	if inheritedDoc.hasTags {
 		opts.InheritedTags = append([]string(nil), inheritedDoc.tags...)
@@ -1175,6 +1491,12 @@ func buildCompileOptions(
 
 func groupDocScopeName(node *GroupNode) string {
 	prefix := groupFullPrefix(node)
+	if node != nil && node.isScope {
+		if prefix == "" {
+			return "root scope"
+		}
+		return fmt.Sprintf("scope %q", prefix)
+	}
 	if prefix == "" {
 		return "root group"
 	}

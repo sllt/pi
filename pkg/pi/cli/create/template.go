@@ -10,7 +10,7 @@ import (
 )
 
 type Get{{ .StructName }}Req struct {
-	pi.Meta ` + "`path:\"/{id}\" method:\"GET\" tags:\"{{ .StructName }}\" summary:\"Get {{ .StructName }}\"`" + `
+	pi.Meta ` + "`summary:\"Get {{ .StructName }}\"`" + `
 
 	ID string ` + "`path:\"id\" validate:\"required\" dc:\"{{ .StructName }} ID\"`" + `
 }
@@ -22,7 +22,7 @@ type Get{{ .StructName }}Res struct {
 }
 
 type Create{{ .StructName }}Req struct {
-	pi.Meta ` + "`path:\"\" method:\"POST\" status:\"201\" tags:\"{{ .StructName }}\" summary:\"Create {{ .StructName }}\"`" + `
+	pi.Meta ` + "`status:\"201\" summary:\"Create {{ .StructName }}\"`" + `
 }
 
 type Create{{ .StructName }}Res struct {
@@ -92,10 +92,11 @@ import (
 	"github.com/sllt/pi/pkg/pi"
 )
 
-func Init{{ .StructName }}Router(deps RouterDeps, h *handler.{{ .StructName }}Handler) {
-	group := deps.App.Group("/api/v1").Group("/{{ .StructNameSnakeCase }}")
-	_ = pi.Register(group, h.Get{{ .StructName }})
-	_ = pi.Register(group, h.Create{{ .StructName }})
+func Init{{ .StructName }}Router(deps RouterDeps, h *handler.{{ .StructName }}Handler) error {
+	group := deps.App.Group("/api/v1").Group("/{{ .StructNameSnakeCase }}").WithDoc(pi.DocTags("{{ .StructName }}"))
+	group.GET("/{id}", h.Get{{ .StructName }})
+	group.POST("", h.Create{{ .StructName }})
+	return deps.App.RouteError()
 }
 `
 

@@ -463,6 +463,10 @@ func assignPathItemOperation(item *openapi.PathItem, method string, op *openapi.
 		item.Patch = op
 	case http.MethodDelete:
 		item.Delete = op
+	case http.MethodHead:
+		item.Head = op
+	case http.MethodOptions:
+		item.Options = op
 	}
 }
 
@@ -478,8 +482,12 @@ func methodSortRank(method string) int {
 		return 3
 	case http.MethodDelete:
 		return 4
-	default:
+	case http.MethodHead:
 		return 5
+	case http.MethodOptions:
+		return 6
+	default:
+		return 7
 	}
 }
 

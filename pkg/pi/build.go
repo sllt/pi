@@ -486,7 +486,10 @@ func Build(options ...Option) (*App, error) {
 	k.explicitHTTPStatus = o.explicitHTTPStatus
 	k.maxBodyBytes = 1 << 20
 	if v := strings.TrimSpace(cfg.Get("HTTP_MAX_BODY_BYTES")); v != "" {
-		k.maxBodyBytes, _ = strconv.ParseInt(v, 10, 64)
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
+			k.maxBodyBytes = parsed
+			k.hasExplicitMaxBody = true
+		}
 	}
 
 	a := &App{

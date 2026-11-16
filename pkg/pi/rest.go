@@ -1,33 +1,51 @@
 package pi
 
 import (
+	"net/http"
 	"strconv"
 	"time"
 )
 
-// GET adds a Handler for HTTP GET method for a route pattern.
-func (a *App) GET(pattern string, handler Handler) {
-	a.add("GET", pattern, handler)
+// GET adds a typed or legacy handler for HTTP GET method for a route pattern.
+func (a *App) GET(pattern string, handler any, opts ...EndpointOption) {
+	a.registerUnifiedRoute(http.MethodGet, pattern, handler, opts...)
 }
 
-// PUT adds a Handler for HTTP PUT method for a route pattern.
-func (a *App) PUT(pattern string, handler Handler) {
-	a.add("PUT", pattern, handler)
+// PUT adds a typed or legacy handler for HTTP PUT method for a route pattern.
+func (a *App) PUT(pattern string, handler any, opts ...EndpointOption) {
+	a.registerUnifiedRoute(http.MethodPut, pattern, handler, opts...)
 }
 
-// POST adds a Handler for HTTP POST method for a route pattern.
-func (a *App) POST(pattern string, handler Handler) {
-	a.add("POST", pattern, handler)
+// POST adds a typed or legacy handler for HTTP POST method for a route pattern.
+func (a *App) POST(pattern string, handler any, opts ...EndpointOption) {
+	a.registerUnifiedRoute(http.MethodPost, pattern, handler, opts...)
 }
 
-// DELETE adds a Handler for HTTP DELETE method for a route pattern.
-func (a *App) DELETE(pattern string, handler Handler) {
-	a.add("DELETE", pattern, handler)
+// DELETE adds a typed or legacy handler for HTTP DELETE method for a route pattern.
+func (a *App) DELETE(pattern string, handler any, opts ...EndpointOption) {
+	a.registerUnifiedRoute(http.MethodDelete, pattern, handler, opts...)
 }
 
-// PATCH adds a Handler for HTTP PATCH method for a route pattern.
-func (a *App) PATCH(pattern string, handler Handler) {
-	a.add("PATCH", pattern, handler)
+// PATCH adds a typed or legacy handler for HTTP PATCH method for a route pattern.
+func (a *App) PATCH(pattern string, handler any, opts ...EndpointOption) {
+	a.registerUnifiedRoute(http.MethodPatch, pattern, handler, opts...)
+}
+
+// HEAD adds a typed or legacy handler for HTTP HEAD method for a route pattern.
+func (a *App) HEAD(pattern string, handler any, opts ...EndpointOption) {
+	a.registerUnifiedRoute(http.MethodHead, pattern, handler, opts...)
+}
+
+// OPTIONS adds a typed or legacy handler for HTTP OPTIONS method for a route pattern.
+func (a *App) OPTIONS(pattern string, handler any, opts ...EndpointOption) {
+	a.registerUnifiedRoute(http.MethodOptions, pattern, handler, opts...)
+}
+
+func (a *App) registerUnifiedRoute(method, pattern string, handler any, opts ...EndpointOption) {
+	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		return
+	}
+	a.rootRouteGroup().addUnifiedRoute(method, pattern, handler, opts...)
 }
 
 func (a *App) add(method, pattern string, h Handler) {

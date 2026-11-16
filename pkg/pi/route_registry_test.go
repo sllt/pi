@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -782,4 +783,354 @@ func newRouteRegistryTestApp() *App {
 		Config:         config.NewMockConfig(nil),
 		httpRegistered: true,
 	}
+}
+
+func TestRouteScope_IsolationAndLifecycleGuards(t *testing.T) {
+	headerMW := func(key, val string) func(http.Handler) http.Handler {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(key, val)
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+
+	t.Run("root app.Scope isolates HTTP and Pi middlewares from root and sibling scopes and activates HTTP", func(t *testing.T) {
+		app := &App{
+			httpServer: &httpServer{
+				router:   piHTTP.NewRouter(),
+				registry: newRouteRegistry(),
+				port:     8080,
+			},
+			kernel: newTestKernel(nil),
+			Config: config.NewMockConfig(nil),
+		}
+		assert.False(t, app.httpRegistered)
+
+		var trace []string
+		recPi := func(name string) PiMiddleware {
+			return func(next Handler) Handler {
+				return func(c *Context) (any, error) {
+					trace = append(trace, name)
+					return next(c)
+				}
+			}
+		}
+
+		// Empty scope with middleware must not leak to chi root router.
+		emptyScope := app.Scope()
+		assert.NotSame(t, app.rootRouteGroup(), emptyScope)
+		assert.True(t, app.httpRegistered)
+		emptyScope.Use(headerMW("X-Empty-Scope", "1"))
+
+		// Scope with nil callback still creates an isolated node and runs valid callbacks.
+		s1 := app.Scope(nil, func(sub *RouteGroup) {
+			sub.Use(headerMW("X-Scope-1", "yes"))
+			sub.UseMiddleware(recPi("pi-s1"))
+			sub.GET("/s1", func(c *Context) (any, error) {
+				return "s1", nil
+			})
+		})
+		assert.NotNil(t, s1)
+		assert.True(t, s1.node.isScope)
+
+		// Scope() with only nil callback never returns root group.
+		sNil := app.Scope(nil)
+		assert.NotSame(t, app.rootRouteGroup(), sNil)
+		assert.True(t, sNil.node.isScope)
+
+		s2 := app.Scope().Use(headerMW("X-Scope-2", "yes")).UseMiddleware(recPi("pi-s2"))
+		s2.GET("/s2", func(c *Context) (any, error) {
+			return "s2", nil
+		})
+
+		app.GET("/public", func(c *Context) (any, error) {
+			return "pub", nil
+		})
+
+		app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
+
+		trace = nil
+		recPub := httptest.NewRecorder()
+		app.httpServer.router.ServeHTTP(recPub, httptest.NewRequest(http.MethodGet, "/public", http.NoBody))
+		assert.Equal(t, http.StatusOK, recPub.Code)
+		assert.Empty(t, recPub.Header().Get("X-Empty-Scope"))
+		assert.Empty(t, recPub.Header().Get("X-Scope-1"))
+		assert.Empty(t, recPub.Header().Get("X-Scope-2"))
+		assert.Empty(t, trace)
+
+		trace = nil
+		rec1 := httptest.NewRecorder()
+		app.httpServer.router.ServeHTTP(rec1, httptest.NewRequest(http.MethodGet, "/s1", http.NoBody))
+		assert.Equal(t, http.StatusOK, rec1.Code)
+		assert.Equal(t, "yes", rec1.Header().Get("X-Scope-1"))
+		assert.Empty(t, rec1.Header().Get("X-Scope-2"))
+		assert.Empty(t, rec1.Header().Get("X-Empty-Scope"))
+		assert.Equal(t, []string{"pi-s1"}, trace)
+
+		trace = nil
+		rec2 := httptest.NewRecorder()
+		app.httpServer.router.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/s2", http.NoBody))
+		assert.Equal(t, http.StatusOK, rec2.Code)
+		assert.Equal(t, "yes", rec2.Header().Get("X-Scope-2"))
+		assert.Empty(t, rec2.Header().Get("X-Scope-1"))
+		assert.Equal(t, []string{"pi-s2"}, trace)
+	})
+
+	t.Run("group.Scope inherits parent prefix and middlewares while isolating own middlewares", func(t *testing.T) {
+		app := newRouteRegistryTestApp()
+		var trace []string
+		recPi := func(name string) PiMiddleware {
+			return func(next Handler) Handler {
+				return func(c *Context) (any, error) {
+					trace = append(trace, name)
+					return next(c)
+				}
+			}
+		}
+
+		v1 := app.Group("/api/v1").Use(headerMW("X-V1", "base")).UseMiddleware(recPi("v1-pi"))
+		v1.GET("/public", func(c *Context) (any, error) { return "v1-pub", nil })
+
+		authed := v1.Scope().Use(headerMW("X-Auth", "bearer")).UseMiddleware(recPi("auth-pi"))
+		assert.NotSame(t, v1, authed)
+		assert.NotSame(t, v1.node, authed.node)
+		authed.POST("/posts", func(c *Context) (any, error) { return "created", nil })
+
+		// v1.Group("") must still return v1 and never collide with authed scope.
+		sameV1 := v1.Group("")
+		assert.Same(t, v1, sameV1)
+
+		// Sibling scope under v1 stays completely separate.
+		admin := v1.Scope().Use(headerMW("X-Admin", "root")).UseMiddleware(recPi("admin-pi"))
+		admin.DELETE("/posts/{id}", func(c *Context) (any, error) { return "deleted", nil })
+
+		app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
+
+		trace = nil
+		recPub := httptest.NewRecorder()
+		app.httpServer.router.ServeHTTP(recPub, httptest.NewRequest(http.MethodGet, "/api/v1/public", http.NoBody))
+		assert.Equal(t, http.StatusOK, recPub.Code)
+		assert.Equal(t, "base", recPub.Header().Get("X-V1"))
+		assert.Empty(t, recPub.Header().Get("X-Auth"))
+		assert.Empty(t, recPub.Header().Get("X-Admin"))
+		assert.Equal(t, []string{"v1-pi"}, trace)
+
+		trace = nil
+		recAuth := httptest.NewRecorder()
+		app.httpServer.router.ServeHTTP(recAuth, httptest.NewRequest(http.MethodPost, "/api/v1/posts", http.NoBody))
+		assert.Equal(t, http.StatusCreated, recAuth.Code)
+		assert.Equal(t, "base", recAuth.Header().Get("X-V1"))
+		assert.Equal(t, "bearer", recAuth.Header().Get("X-Auth"))
+		assert.Empty(t, recAuth.Header().Get("X-Admin"))
+		assert.Equal(t, []string{"v1-pi", "auth-pi"}, trace)
+
+		trace = nil
+		recAdmin := httptest.NewRecorder()
+		app.httpServer.router.ServeHTTP(recAdmin, httptest.NewRequest(http.MethodDelete, "/api/v1/posts/1", http.NoBody))
+		assert.Equal(t, http.StatusNoContent, recAdmin.Code)
+		assert.Equal(t, "base", recAdmin.Header().Get("X-V1"))
+		assert.Equal(t, "root", recAdmin.Header().Get("X-Admin"))
+		assert.Empty(t, recAdmin.Header().Get("X-Auth"))
+		assert.Equal(t, []string{"v1-pi", "admin-pi"}, trace)
+	})
+
+	t.Run("Scope after compile freeze returns isolated dummy group without mutating parent", func(t *testing.T) {
+		app := newRouteRegistryTestApp()
+		v1 := app.Group("/api/v1")
+		v1.GET("/ok", func(c *Context) (any, error) { return "ok", nil })
+
+		app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
+
+		rootChildrenBefore := len(app.httpServer.registry.root.children)
+		v1ChildrenBefore := len(v1.node.children)
+
+		var callbackCalled bool
+		postRootScope := app.Scope(func(sub *RouteGroup) { callbackCalled = true })
+		assert.False(t, callbackCalled)
+		assert.NotSame(t, app.rootRouteGroup(), postRootScope)
+		assert.NotSame(t, app.httpServer.registry.root, postRootScope.node)
+		postRootScope.Use(headerMW("X-Late", "1")).GET("/late", func(c *Context) (any, error) { return "late", nil })
+
+		postV1Scope := v1.Scope()
+		assert.NotSame(t, v1, postV1Scope)
+		assert.NotSame(t, v1.node, postV1Scope.node)
+		postV1Scope.Use(headerMW("X-Late-V1", "1")).GET("/late", func(c *Context) (any, error) { return "late", nil })
+
+		assert.Len(t, app.httpServer.registry.root.children, rootChildrenBefore)
+		assert.Len(t, v1.node.children, v1ChildrenBefore)
+		assert.Empty(t, postRootScope.node.routes)
+		assert.Empty(t, postV1Scope.node.routes)
+	})
+}
+
+func TestUnifiedRoutes_LegacyHeadOptionsAndMaxBodyBytes(t *testing.T) {
+	app := newRouteRegistryTestApp()
+	app.HEAD("/ping", func(c *Context) (any, error) {
+		return map[string]string{"status": "ok"}, nil
+	})
+	app.OPTIONS("/ping", func(c *Context) (any, error) {
+		return map[string]string{"allow": "GET,HEAD,OPTIONS"}, nil
+	})
+
+	type customAction func(*Context) (any, error)
+	app.GET("/custom-type", customAction(func(c *Context) (any, error) {
+		return "custom-action", nil
+	}))
+
+	// Legacy endpoint max body override (> default 1 MiB) and small endpoint limit.
+	app.POST("/legacy-small", func(c *Context) (any, error) {
+		var payload map[string]any
+		if err := c.Bind(&payload); err != nil {
+			return nil, err
+		}
+		return payload, nil
+	}, WithEndpointMaxBodyBytes(16))
+
+	app.POST("/legacy-large", func(c *Context) (any, error) {
+		var payload map[string]any
+		if err := c.Bind(&payload); err != nil {
+			return nil, err
+		}
+		return len(payload["data"].(string)), nil
+	}, WithEndpointMaxBodyBytes(2<<20))
+
+	app.httpServer.registry.compile(app.httpServer.router.Mux(), app.kernel, 0)
+
+	recHead := httptest.NewRecorder()
+	app.httpServer.router.ServeHTTP(recHead, httptest.NewRequest(http.MethodHead, "/ping", http.NoBody))
+	assert.Equal(t, http.StatusOK, recHead.Code)
+	assert.Empty(t, recHead.Body.Bytes())
+
+	recOpt := httptest.NewRecorder()
+	app.httpServer.router.ServeHTTP(recOpt, httptest.NewRequest(http.MethodOptions, "/ping", http.NoBody))
+	assert.Equal(t, http.StatusOK, recOpt.Code)
+	assert.Contains(t, recOpt.Body.String(), "GET,HEAD,OPTIONS")
+
+	recCustom := httptest.NewRecorder()
+	app.httpServer.router.ServeHTTP(recCustom, httptest.NewRequest(http.MethodGet, "/custom-type", http.NoBody))
+	assert.Equal(t, http.StatusOK, recCustom.Code)
+	assert.Contains(t, recCustom.Body.String(), "custom-action")
+
+	smallReq := httptest.NewRequest(http.MethodPost, "/legacy-small", strings.NewReader(`{"data":"0123456789abcdef"}`))
+	smallReq.Header.Set("Content-Type", "application/json")
+	recSmall := httptest.NewRecorder()
+	app.httpServer.router.ServeHTTP(recSmall, smallReq)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, recSmall.Code)
+
+	largePayload := `{"data":"` + strings.Repeat("x", (1<<20)+1024) + `"}`
+	largeReq := httptest.NewRequest(http.MethodPost, "/legacy-large", strings.NewReader(largePayload))
+	largeReq.Header.Set("Content-Type", "application/json")
+	recLarge := httptest.NewRecorder()
+	app.httpServer.router.ServeHTTP(recLarge, largeReq)
+	assert.Equal(t, http.StatusCreated, recLarge.Code)
+}
+
+func TestRouteScope_UninitializedAndNonMutatingCompileAndStart(t *testing.T) {
+	t.Run("uninitialized RouteGroup.Scope and nil App.Scope return inert scope without mutating app", func(t *testing.T) {
+		app := &App{
+			httpServer: &httpServer{
+				router:   piHTTP.NewRouter(),
+				registry: newRouteRegistry(),
+				port:     8080,
+			},
+			kernel: newTestKernel(nil),
+			Config: config.NewMockConfig(nil),
+		}
+
+		uninitScope := (&RouteGroup{app: app}).Scope()
+		assert.NotNil(t, uninitScope)
+		assert.Nil(t, uninitScope.app)
+		assert.True(t, uninitScope.node.isScope)
+		uninitScope.GET("/should-not-attach", func(c *Context) (any, error) { return "x", nil })
+		assert.False(t, app.httpRegistered)
+		assert.Empty(t, app.httpServer.registry.root.children)
+
+		var nilApp *App
+		nilAppScope := nilApp.Scope()
+		assert.NotNil(t, nilAppScope)
+		assert.Nil(t, nilAppScope.app)
+		assert.True(t, nilAppScope.node.isScope)
+		assert.NotPanics(t, func() {
+			nilAppScope.Use(func(next http.Handler) http.Handler { return next }).
+				GET("/noop", func(c *Context) (any, error) { return "noop", nil })
+		})
+	})
+
+	t.Run("mergeChildrenByPrefix does not mutate persistent GroupNode slices or child parent", func(t *testing.T) {
+		reg := newRouteRegistry()
+		mux := chi.NewRouter()
+		container := newTestKernel(nil)
+
+		first := &GroupNode{prefix: "/api"}
+		first.routes = append(first.routes, RouteDef{
+			Method: http.MethodGet, Pattern: "/one",
+			Handler: func(c *Context) (any, error) { return "one", nil },
+		})
+		secondChild := &GroupNode{prefix: "/sub"}
+		second := &GroupNode{prefix: "/api", children: []*GroupNode{secondChild}}
+		secondChild.parent = second
+		secondChild.routes = append(secondChild.routes, RouteDef{
+			Method: http.MethodGet, Pattern: "/two",
+			Handler: func(c *Context) (any, error) { return "two", nil },
+		})
+
+		reg.root.children = append(reg.root.children, first, second)
+		reg.compile(mux, container, 0)
+
+		// Persistent GroupNodes remain unmutated after compile.
+		assert.Len(t, first.routes, 1)
+		assert.Empty(t, first.children)
+		assert.Same(t, second, secondChild.parent)
+
+		recOne := httptest.NewRecorder()
+		mux.ServeHTTP(recOne, httptest.NewRequest(http.MethodGet, "/api/one", http.NoBody))
+		assert.Equal(t, http.StatusOK, recOne.Code)
+
+		recTwo := httptest.NewRecorder()
+		mux.ServeHTTP(recTwo, httptest.NewRequest(http.MethodGet, "/api/sub/two", http.NoBody))
+		assert.Equal(t, http.StatusOK, recTwo.Code)
+	})
+
+	t.Run("standalone app.Scope().GET activates HTTPHandler and Start", func(t *testing.T) {
+		app, err := Build(
+			WithConfig(map[string]string{
+				"HTTP_ADDR":       "127.0.0.1:0",
+				"HTTP_ENABLED":    "true",
+				"GRPC_ENABLED":    "false",
+				"METRICS_ENABLED": "false",
+				"PI_TELEMETRY":    "false",
+				"LOG_LEVEL":       "ERROR",
+			}),
+		)
+		assert.NoError(t, err)
+
+		app.Scope().Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Scoped-App", "active")
+				next.ServeHTTP(w, r)
+			})
+		}).GET("/only-scope", func(c *Context) (any, error) {
+			return "scope-ok", nil
+		})
+
+		h, err := app.HTTPHandler()
+		assert.NoError(t, err)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/only-scope", http.NoBody))
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "active", rec.Header().Get("X-Scoped-App"))
+
+		assert.NoError(t, app.Start(t.Context()))
+		defer func() { _ = app.Stop(t.Context()) }()
+		assert.NotEmpty(t, app.HTTPAddress())
+
+		resp, err := http.Get("http://" + app.HTTPAddress() + "/only-scope")
+		assert.NoError(t, err)
+		if resp != nil {
+			_ = resp.Body.Close()
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Equal(t, "active", resp.Header.Get("X-Scoped-App"))
+		}
+	})
 }

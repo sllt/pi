@@ -39,11 +39,13 @@ type Tag struct {
 
 // PathItem describes the operations available on a single path.
 type PathItem struct {
-	Get    *Operation `json:"get,omitempty" yaml:"get,omitempty"`
-	Put    *Operation `json:"put,omitempty" yaml:"put,omitempty"`
-	Post   *Operation `json:"post,omitempty" yaml:"post,omitempty"`
-	Delete *Operation `json:"delete,omitempty" yaml:"delete,omitempty"`
-	Patch  *Operation `json:"patch,omitempty" yaml:"patch,omitempty"`
+	Get     *Operation `json:"get,omitempty" yaml:"get,omitempty"`
+	Put     *Operation `json:"put,omitempty" yaml:"put,omitempty"`
+	Post    *Operation `json:"post,omitempty" yaml:"post,omitempty"`
+	Delete  *Operation `json:"delete,omitempty" yaml:"delete,omitempty"`
+	Patch   *Operation `json:"patch,omitempty" yaml:"patch,omitempty"`
+	Options *Operation `json:"options,omitempty" yaml:"options,omitempty"`
+	Head    *Operation `json:"head,omitempty" yaml:"head,omitempty"`
 }
 
 // Operation describes a single API operation on a path.
@@ -188,11 +190,13 @@ func clonePathItem(p *PathItem) *PathItem {
 		return nil
 	}
 	return &PathItem{
-		Get:    cloneOperation(p.Get),
-		Put:    cloneOperation(p.Put),
-		Post:   cloneOperation(p.Post),
-		Delete: cloneOperation(p.Delete),
-		Patch:  cloneOperation(p.Patch),
+		Get:     cloneOperation(p.Get),
+		Put:     cloneOperation(p.Put),
+		Post:    cloneOperation(p.Post),
+		Delete:  cloneOperation(p.Delete),
+		Patch:   cloneOperation(p.Patch),
+		Options: cloneOperation(p.Options),
+		Head:    cloneOperation(p.Head),
 	}
 }
 

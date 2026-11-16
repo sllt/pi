@@ -15,7 +15,7 @@
 ## 核心特性
 
 - **运行时微内核与统一泛型适配器注册表（`pi.Build` + `pi.Use[T]`）** — 彻底移除传统巨型容器结构体；构造期纯内存零网络副作用，通过 `Owned` / `Borrowed`（`WithManagedDatasources`、`WithManagedSQL`、`WithManagedRedis`、`WithManagedPubSub`、`WithAdapter`）显式声明生命周期归属，提供对称只读访问方法（`ctx.SQL()`、`ctx.Redis()`、`ctx.PubSub()`、`ctx.File()`）与运行期无锁 O(1) 泛型检索（`pi.Use[T]`、`pi.Resolve[T]`、`pi.MustUse[T]`），自动探测 `ConnectContext` / `Shutdown` / `Close` / `HealthCheck` 并在部分启动失败或停机时完整逆序释放。
-- **泛型类型化路由与装配期预检** — 通过 `pi.Register[Req, Res]` 与 `pi.Meta` 结构体标签统一声明 `path`、`query`、`header`、`json` 四源输入与校验规则，请求热路径零 `reflect.Value.Call`。路由冲突、非法校验参数与不兼容的分组挂载在启动前即由 `app.RouteError()` 拦截。
+- **统一 HTTP 路由与装配期预检** — `*App` 与 `*RouteGroup` 的 `GET` / `POST` / `PUT` / `PATCH` / `DELETE` / `HEAD` / `OPTIONS` 统一支持强类型 `func(*pi.Context, *Req) (*Res, error)`（及零反射 `pi.H(fn)`）与传统 `func(*pi.Context) (any, error)`。通过可选 `pi.Meta` 标签与五源输入绑定（`path`、`query`、`header`、`json` 及 `form` Multipart 文件上传）配合原生 `*response.File` / `*response.XML` 响应，路由冲突、非法校验参数与不兼容挂载在启动前即由 `app.RouteError()` 拦截。
 - **零外部工具 OpenAPI 3.0.3 与内置离线 Scalar UI** — 无需手写 `swag` 注释或安装额外生成器，直接从真实注册路由导出或在线提供确定性的 OpenAPI 3.0.3 JSON/YAML，并内置 100% 离线预压缩的 Scalar API Reference 文档页（默认 `/.well-known/swagger`）。
 - **Tao Actor 受监督运行时** — 基于 `github.com/sllt/tao/actor` 隔离监督树，统一托管后台 Worker（`AddWorker` 支持 `SuperviseFatal` / `SuperviseRestart` / `SuperviseDegrade`）、防重入 Cron 定时调度（`AddCron`）、具备静态 `AckSemantics` 校验与 Ack/Nack 保护的 Pub/Sub 订阅器，以及服务端/客户端 WebSocket 会话。
 - **统一业务契约与安全边界** — `pkg/pi/apperror` 提供协议无关的业务错误模型，统一映射 HTTP 状态包络、gRPC 状态码与 CLI 退出码，自动对未知 5xx 错误脱敏；`pkg/pi/auth` 在跨协议边界安全传递已验证 `Principal` 主体，自定义认证校验器直接接收完整 `*pi.Context`（支持 `ctx.Header`、受限请求体与 gRPC Metadata）。
@@ -29,26 +29,27 @@
 ### 安装框架主模块
 
 ```bash
-go get github.com/sllt/pi@v0.5.2
+go get github.com/sllt/pi@v0.5.3
 ```
 
 ### 安装 Pi CLI
 
 ```bash
-go install github.com/sllt/pi/cmd/pi@v0.5.2
+go install github.com/sllt/pi/cmd/pi@v0.5.3
 ```
 
 基于 [pi-layout](https://github.com/sllt/pi-layout) 初始化并自动编译验证一个新项目：
 
 ```bash
 pi init --module example.com/acme/orders ./orders
+# 如需跳过初始 go mod download / go build 编译验证以秒级完成脚手架初始化，可追加 --skip-verify
 ```
 
 ---
 
 ## 快速开始
 
-使用 `pi.Meta` 定义强类型请求/响应 DTO，通过 `pi.Register` 注册处理函数，并一键启用 OpenAPI 3.0.3 与离线 Scalar 文档页面：
+定义强类型请求/响应 DTO，直接通过 `app.GET` / `app.POST` / ... 注册处理函数，并一键启用 OpenAPI 3.0.3 与离线 Scalar 文档页面（不需要额外 OpenAPI 元数据时 `pi.Meta` 本身可省略，`pi.Register` 仍完整兼容）：
 
 ```go
 package main
@@ -60,7 +61,7 @@ import (
 )
 
 type GreetRequest struct {
-	pi.Meta `path:"/greetings/{name}" method:"GET" tags:"问候接口" summary:"向指定用户发送问候"`
+	pi.Meta `tags:"问候接口" summary:"向指定用户发送问候"`
 	Name    string `path:"name" validate:"required" dc:"目标用户名"`
 	Title   string `query:"title" default:"friend" dc:"可选称谓"`
 }
@@ -94,7 +95,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := pi.Register(app, Greet); err != nil {
+	app.GET("/greetings/{name}", Greet)
+	if err := app.RouteError(); err != nil {
 		log.Fatal(err)
 	}
 
@@ -158,17 +160,17 @@ func GetOrder(ctx *pi.Context, req *GetOrderReq) (*OrderRes, error) {
 
 ### 2. 路由分组、中间件与 OpenAPI 安全声明
 
-分组可统一挂载中间件，并向组内路由继承 OpenAPI 标签与鉴权要求：
+分组可统一挂载中间件，并通过 `Scope()` 在同一前缀下隔离鉴权边界，同时继承父级 OpenAPI 标签与安全声明：
 
 ```go
 v1 := app.Group("/api/v1").WithDoc(pi.DocTags("用户模块"))
-_ = pi.Register(v1, userHandler.Login)
+v1.POST("/auth/login", userHandler.Login)
 
-authed := v1.Group("/users").
+authed := v1.Scope().
 	UseMiddleware(requireBearerMiddleware).
 	WithDoc(pi.DocSecurity("Bearer"))
-_ = pi.Register(authed, userHandler.GetProfile)
-_ = pi.Register(authed, userHandler.UpdateProfile)
+authed.GET("/users/profile", userHandler.GetProfile)
+authed.PUT("/users/profile", userHandler.UpdateProfile)
 
 if err := app.RouteError(); err != nil {
 	return err
@@ -231,9 +233,8 @@ func TestGreet(t *testing.T) {
 		pi.WithExplicitHTTPStatus(),
 		pi.WithAdapter("docs", &fakeDocStore{}, pi.Borrowed),
 	)
-	if err := pi.Register(app, Greet); err != nil {
-		t.Fatal(err)
-	}
+	app.GET("/greetings/{name}", Greet)
+	require.NoError(t, app.RouteError())
 
 	req := httptest.NewRequest(http.MethodGet, "/greetings/world", nil)
 	rec := testkit.Request(t, app, req)
@@ -247,7 +248,7 @@ func TestGreet(t *testing.T) {
 
 常用关系型数据库、Redis、本地文件系统与主流消息队列内置在主模块中；其余 25 个第三方驱动拆分为独立 Go 子模块（统一支持 `FromEnv`、`ConnectContext`、`Shutdown`/`Close` 与 `HealthCheck`），按需引入并通过 `pi.WithAdapter` 挂载，保持业务项目的 `go.mod` 精简干净。
 
-| 类别 | 主模块内置（`github.com/sllt/pi`） | 独立适配器子模块（`@v0.5.2`） |
+| 类别 | 主模块内置（`github.com/sllt/pi`） | 独立适配器子模块（`@v0.5.3`） |
 | --- | --- | --- |
 | **关系型数据库** | MySQL, PostgreSQL, SQLite | `oracle`, `dbresolver` |
 | **键值存储 / 缓存** | Redis | `kv-store/badger`, `kv-store/dynamodb`, `kv-store/nats` |
@@ -261,9 +262,9 @@ func TestGreet(t *testing.T) {
 按统一版本号按需安装独立子模块：
 
 ```bash
-go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.2
-go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.2
-go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.2
+go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.3
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.3
+go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.3
 ```
 
 ---

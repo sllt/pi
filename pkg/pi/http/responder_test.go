@@ -2,11 +2,15 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"math"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -819,4 +823,246 @@ func TestResponder_FileWithHeaders(t *testing.T) {
 	assert.Equal(t, "Accept-Encoding", result.Header.Get("Vary"))
 	assert.Empty(t, result.Header.Get("X-Empty-Value"))
 	assert.Equal(t, payload, recorder.Body.Bytes())
+}
+
+func TestResponder_HeadSuppressesAllBodies(t *testing.T) {
+	t.Run("json_success", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		NewResponder(rec, http.MethodHead).Respond(map[string]string{"hello": "world"}, nil)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+		assert.Empty(t, rec.Body.Bytes())
+	})
+
+	t.Run("json_error", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		NewResponder(rec, http.MethodHead).Respond(nil, ErrorInvalidRoute{})
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+		assert.Empty(t, rec.Body.Bytes())
+	})
+
+	t.Run("json_encode_error", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		NewResponder(rec, http.MethodHead).Respond(math.NaN(), nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+		assert.Empty(t, rec.Body.Bytes())
+	})
+
+	t.Run("file_and_xml", func(t *testing.T) {
+		recFile := httptest.NewRecorder()
+		NewResponder(recFile, http.MethodHead).Respond(resTypes.File{
+			Content:     []byte("binary"),
+			ContentType: "image/png",
+			Headers:     map[string]string{"Cache-Control": "max-age=60"},
+		}, nil)
+		assert.Equal(t, http.StatusOK, recFile.Code)
+		assert.Equal(t, "image/png", recFile.Header().Get("Content-Type"))
+		assert.Equal(t, "max-age=60", recFile.Header().Get("Cache-Control"))
+		assert.Empty(t, recFile.Body.Bytes())
+
+		recXML := httptest.NewRecorder()
+		NewResponder(recXML, http.MethodHead).Respond(&resTypes.XML{
+			Content:     []byte("<rss/>"),
+			ContentType: "application/rss+xml",
+			StatusCode:  http.StatusCreated,
+		}, nil)
+		assert.Equal(t, http.StatusCreated, recXML.Code)
+		assert.Equal(t, "application/rss+xml", recXML.Header().Get("Content-Type"))
+		assert.Empty(t, recXML.Body.Bytes())
+	})
+
+	t.Run("stream_and_template", func(t *testing.T) {
+		streamCalled := false
+		recStream := httptest.NewRecorder()
+		NewResponder(recStream, http.MethodHead).Respond(resTypes.Stream{
+			StatusCode:  http.StatusAccepted,
+			ContentType: "text/event-stream",
+			Run: func(ctx context.Context, w io.Writer) error {
+				streamCalled = true
+				_, err := w.Write([]byte("data: hi\n\n"))
+				return err
+			},
+		}, nil)
+		assert.Equal(t, http.StatusAccepted, recStream.Code)
+		assert.Equal(t, "text/event-stream", recStream.Header().Get("Content-Type"))
+		assert.False(t, streamCalled)
+		assert.Empty(t, recStream.Body.Bytes())
+
+		recTmpl := httptest.NewRecorder()
+		NewResponder(recTmpl, http.MethodHead).Respond(resTypes.Template{Name: "nonexistent.html"}, nil)
+		assert.Equal(t, http.StatusOK, recTmpl.Code)
+		assert.Equal(t, "text/html", recTmpl.Header().Get("Content-Type"))
+		assert.Empty(t, recTmpl.Body.Bytes())
+	})
+
+	t.Run("explicit_result_201", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		NewResponder(rec, http.MethodHead).Respond(resTypes.Result{
+			StatusCode: http.StatusCreated,
+			Data:       map[string]int{"id": 1},
+			Headers:    map[string]string{"X-Test": "ok"},
+		}, nil)
+		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Equal(t, "ok", rec.Header().Get("X-Test"))
+		assert.Empty(t, rec.Body.Bytes())
+	})
+
+	t.Run("no_content_stream_nil_raw_and_response", func(t *testing.T) {
+		rec204 := httptest.NewRecorder()
+		NewResponder(rec204, http.MethodHead).Respond(resTypes.NoContent(), nil)
+		assert.Equal(t, http.StatusNoContent, rec204.Code)
+		assert.Empty(t, rec204.Body.Bytes())
+
+		recNilStream := httptest.NewRecorder()
+		NewResponder(recNilStream, http.MethodHead).Respond(resTypes.Stream{Run: nil}, nil)
+		assert.Equal(t, http.StatusInternalServerError, recNilStream.Code)
+		assert.Equal(t, "application/json", recNilStream.Header().Get("Content-Type"))
+		assert.Empty(t, recNilStream.Body.Bytes())
+
+		recRaw := httptest.NewRecorder()
+		NewResponder(recRaw, http.MethodHead).Respond(resTypes.Raw{Data: map[string]string{"a": "b"}}, nil)
+		assert.Equal(t, http.StatusOK, recRaw.Code)
+		assert.Equal(t, "application/json", recRaw.Header().Get("Content-Type"))
+		assert.Empty(t, recRaw.Body.Bytes())
+
+		recResp := httptest.NewRecorder()
+		NewResponder(recResp, http.MethodHead).Respond(resTypes.Response{
+			Data:    "ok",
+			Headers: map[string]string{"X-Custom": "yes"},
+		}, nil)
+		assert.Equal(t, http.StatusOK, recResp.Code)
+		assert.Equal(t, "yes", recResp.Header().Get("X-Custom"))
+		assert.Equal(t, "application/json", recResp.Header().Get("Content-Type"))
+		assert.Empty(t, recResp.Body.Bytes())
+	})
+}
+
+func TestResponder_FileContentTypeAndPointerDefense(t *testing.T) {
+	t.Run("default_octet_stream", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		NewResponder(rec, http.MethodGet).Respond(resTypes.File{Content: []byte("abc")}, nil)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "application/octet-stream", rec.Header().Get("Content-Type"))
+		assert.Equal(t, []byte("abc"), rec.Body.Bytes())
+	})
+
+	t.Run("whitespace_content_type_falls_back_cleanly", func(t *testing.T) {
+		recFile := httptest.NewRecorder()
+		NewResponder(recFile, http.MethodGet).Respond(resTypes.File{
+			Content:     []byte("abc"),
+			ContentType: "   ",
+		}, nil)
+		assert.Equal(t, http.StatusOK, recFile.Code)
+		assert.Equal(t, "application/octet-stream", recFile.Header().Get("Content-Type"))
+		assert.Equal(t, []byte("abc"), recFile.Body.Bytes())
+
+		recFileHdr := httptest.NewRecorder()
+		NewResponder(recFileHdr, http.MethodGet).Respond(resTypes.File{
+			Content:     []byte("webp"),
+			ContentType: "   ",
+			Headers:     map[string]string{"content-type": "image/webp"},
+		}, nil)
+		assert.Equal(t, http.StatusOK, recFileHdr.Code)
+		assert.Equal(t, "image/webp", recFileHdr.Header().Get("Content-Type"))
+
+		recXML := httptest.NewRecorder()
+		NewResponder(recXML, http.MethodGet).Respond(resTypes.XML{
+			Content:     []byte("<ok/>"),
+			ContentType: "   ",
+		}, nil)
+		assert.Equal(t, http.StatusOK, recXML.Code)
+		assert.Equal(t, "application/xml", recXML.Header().Get("Content-Type"))
+		assert.Equal(t, []byte("<ok/>"), recXML.Body.Bytes())
+	})
+
+	t.Run("preserves_headers_content_type_when_field_empty", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		NewResponder(rec, http.MethodGet).Respond(resTypes.File{
+			Content: []byte("webp"),
+			Headers: map[string]string{"Content-Type": "image/webp"},
+		}, nil)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "image/webp", rec.Header().Get("Content-Type"))
+		assert.Equal(t, []byte("webp"), rec.Body.Bytes())
+	})
+
+	t.Run("non_nil_pointer_file_and_xml", func(t *testing.T) {
+		recFile := httptest.NewRecorder()
+		NewResponder(recFile, http.MethodPost).Respond(&resTypes.File{
+			Content:     []byte("ok"),
+			ContentType: "text/plain",
+			StatusCode:  http.StatusOK,
+		}, nil)
+		assert.Equal(t, http.StatusOK, recFile.Code)
+		assert.Equal(t, "text/plain", recFile.Header().Get("Content-Type"))
+		assert.Equal(t, []byte("ok"), recFile.Body.Bytes())
+
+		recXML := httptest.NewRecorder()
+		NewResponder(recXML, http.MethodPost).Respond(&resTypes.XML{
+			Content:    []byte("<ok/>"),
+			StatusCode: http.StatusAccepted,
+		}, nil)
+		assert.Equal(t, http.StatusAccepted, recXML.Code)
+		assert.Equal(t, "application/xml", recXML.Header().Get("Content-Type"))
+		assert.Equal(t, []byte("<ok/>"), recXML.Body.Bytes())
+	})
+
+	t.Run("nil_pointer_file_and_xml_fall_through_safely", func(t *testing.T) {
+		var nilFile *resTypes.File
+		recFile := httptest.NewRecorder()
+		NewResponder(recFile, http.MethodGet).Respond(nilFile, nil)
+		assert.Equal(t, http.StatusOK, recFile.Code)
+		assert.Equal(t, "application/json", recFile.Header().Get("Content-Type"))
+		assert.JSONEq(t, `{"code":0,"data":null,"message":"ok"}`, recFile.Body.String())
+
+		var nilXML *resTypes.XML
+		recXML := httptest.NewRecorder()
+		NewResponder(recXML, http.MethodGet).Respond(nilXML, nil)
+		assert.Equal(t, http.StatusOK, recXML.Code)
+		assert.Equal(t, "application/json", recXML.Header().Get("Content-Type"))
+		assert.JSONEq(t, `{"code":0,"data":null,"message":"ok"}`, recXML.Body.String())
+	})
+}
+
+func TestRequestRawBodyLimitAndRelease(t *testing.T) {
+	var nilReq *Request
+	nilReq.ReleaseRawBody()
+	got, err := nilReq.RawBodyBytesWithLimit(64)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// RawBodyBytesWithLimit uses passed limit when no snapshot or maxBodyBytes is set.
+	payload := strings.Repeat("a", 200)
+	reqOver := httptest.NewRequest(http.MethodPost, "/upload", strings.NewReader(payload))
+	piReqOver := NewRequest(reqOver)
+	_, err = piReqOver.RawBodyBytesWithLimit(100)
+	var maxErr *http.MaxBytesError
+	require.ErrorAs(t, err, &maxErr)
+
+	reqUnder := httptest.NewRequest(http.MethodPost, "/upload", strings.NewReader(payload))
+	piReqUnder := NewRequest(reqUnder)
+	gotUnder, err := piReqUnder.RawBodyBytesWithLimit(256)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(payload), gotUnder)
+
+	// Explicit maxBodyBytes on NewRequestWithSnapshotAndLimit takes precedence over limit param.
+	reqExplicit := httptest.NewRequest(http.MethodPost, "/upload", strings.NewReader(payload))
+	piReqExplicit := NewRequestWithSnapshotAndLimit(reqExplicit, nil, nil, false, 50)
+	_, err = piReqExplicit.RawBodyBytesWithLimit(500)
+	require.ErrorAs(t, err, &maxErr)
+
+	// ReleaseRawBody clears rawBody, resets Body to http.NoBody, and preserves MultipartForm.
+	mf := &multipart.Form{Value: map[string][]string{"title": {"demo"}}}
+	reqRel := httptest.NewRequest(http.MethodPost, "/upload", strings.NewReader("raw"))
+	reqRel.MultipartForm = mf
+	piReqRel := NewRequestWithSnapshotAndLimit(reqRel, nil, []byte("raw"), true, 1024)
+	piReqRel.ReleaseRawBody()
+
+	released, err := piReqRel.RawBodyBytes()
+	require.NoError(t, err)
+	assert.Nil(t, released)
+	assert.Equal(t, http.NoBody, reqRel.Body)
+	assert.Same(t, mf, reqRel.MultipartForm)
 }

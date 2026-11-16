@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"mime/multipart"
 	"net/http"
 	"reflect"
 	"sort"
@@ -374,6 +375,9 @@ func checkFieldValidationTagSyntax(rootType, enclosingStruct reflect.Type, f ref
 			continue
 
 		case "structonly", "nostructlevel":
+			if curType == multipartFileHeaderPtrType || isFileHeaderPtrSliceType(curType) {
+				return fmt.Errorf("field %s.%s cannot use %s on file type %s", typeDisplayName(enclosingStruct), f.Name, rule, typeDisplayName(curType))
+			}
 			base := curType
 			for base.Kind() == reflect.Ptr {
 				base = base.Elem()
@@ -399,6 +403,10 @@ func checkFieldValidationTagSyntax(rootType, enclosingStruct reflect.Type, f ref
 
 			name, param, hasEq := strings.Cut(branch, "=")
 			name = strings.TrimSpace(name)
+
+			if err := checkFileRuleAllowed(curType, enclosingStruct, f, name, branch); err != nil {
+				return err
+			}
 
 			isNilCond := isNilPassThroughConditionalRule(name)
 			if curType.Kind() == reflect.Ptr && sawNilPassThroughCond && !sawOmitOrDefault &&
@@ -486,8 +494,12 @@ func checkSingleRuleCrossRef(rootType, enclosingStruct reflect.Type, f reflect.S
 		if !hasEq || param == "" {
 			return fmt.Errorf("field %s.%s references unknown sibling field %q in %s", typeDisplayName(enclosingStruct), f.Name, param, name)
 		}
-		if _, ok := resolveStructFieldPathType(enclosingStruct, param); !ok {
+		targetType, ok := resolveStructFieldPathType(enclosingStruct, param)
+		if !ok {
 			return fmt.Errorf("field %s.%s references unknown sibling field %q in %s", typeDisplayName(enclosingStruct), f.Name, param, name)
+		}
+		if isFileHeaderType(targetType) {
+			return fmt.Errorf("field %s.%s cannot reference file field %q in %s", typeDisplayName(enclosingStruct), f.Name, param, name)
 		}
 		return nil
 	}
@@ -553,9 +565,55 @@ func checkSingleRuleCrossRef(rootType, enclosingStruct reflect.Type, f reflect.S
 		if !hasEq || param == "" {
 			return fmt.Errorf("field %s.%s references unknown struct field %q in %s", typeDisplayName(enclosingStruct), f.Name, param, name)
 		}
-		if _, ok := resolveStructFieldPathType(rootType, param); !ok {
+		targetType, ok := resolveStructFieldPathType(rootType, param)
+		if !ok {
 			return fmt.Errorf("field %s.%s references unknown struct field %q in %s", typeDisplayName(enclosingStruct), f.Name, param, name)
 		}
+		if isFileHeaderType(targetType) {
+			return fmt.Errorf("field %s.%s cannot reference file field %q in %s", typeDisplayName(enclosingStruct), f.Name, param, name)
+		}
+	}
+	return nil
+}
+
+func isFileHeaderPtrSliceType(t reflect.Type) bool {
+	return t != nil && t.Kind() == reflect.Slice && t.Elem() == multipartFileHeaderPtrType
+}
+
+func isFileHeaderType(t reflect.Type) bool {
+	base := unwrapPtrType(t)
+	if base == nil {
+		return false
+	}
+	if base == multipartFileHeaderType {
+		return true
+	}
+	if base.Kind() == reflect.Slice || base.Kind() == reflect.Array {
+		return unwrapPtrType(base.Elem()) == multipartFileHeaderType
+	}
+	return false
+}
+
+func checkFileRuleAllowed(curType, enclosingStruct reflect.Type, f reflect.StructField, name, branch string) error {
+	if curType == multipartFileHeaderPtrType {
+		switch name {
+		case "required", "isdefault":
+			return nil
+		}
+		if isNilPassThroughConditionalRule(name) {
+			return nil
+		}
+		return fmt.Errorf("field %s.%s validation rule %q is not supported on *multipart.FileHeader", typeDisplayName(enclosingStruct), f.Name, branch)
+	}
+	if isFileHeaderPtrSliceType(curType) {
+		switch name {
+		case "required", "isdefault", "min", "max", "len", "eq", "ne", "gt", "gte", "lt", "lte":
+			return nil
+		}
+		if isNilPassThroughConditionalRule(name) {
+			return nil
+		}
+		return fmt.Errorf("field %s.%s validation rule %q is not supported on []*multipart.FileHeader", typeDisplayName(enclosingStruct), f.Name, branch)
 	}
 	return nil
 }
@@ -589,6 +647,12 @@ func checkValidatorAsInt(lit string) error {
 
 func validateConditionalFieldLiteral(enclosingStruct reflect.Type, f reflect.StructField, ruleName, fieldPath string, targetType reflect.Type, lit string) error {
 	base := unwrapPtrType(targetType)
+	if base == multipartFileHeaderType {
+		if lit != "nil" {
+			return fmt.Errorf("field %s.%s rule %s targeting file field %s only supports literal \"nil\", got %q", typeDisplayName(enclosingStruct), f.Name, ruleName, fieldPath, lit)
+		}
+		return nil
+	}
 	switch base.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if err := checkValidatorAsInt(lit); err != nil {
@@ -831,7 +895,7 @@ func resolveStructFieldPathType(t reflect.Type, path string) (reflect.Type, bool
 		for cur.Kind() == reflect.Ptr {
 			cur = cur.Elem()
 		}
-		if cur.Kind() != reflect.Struct || cur == timeType || cur.ConvertibleTo(timeType) {
+		if cur.Kind() != reflect.Struct || cur == timeType || cur.ConvertibleTo(timeType) || cur == multipartFileHeaderType {
 			return nil, false
 		}
 		sf, ok := cur.FieldByName(seg)
@@ -843,16 +907,25 @@ func resolveStructFieldPathType(t reflect.Type, path string) (reflect.Type, bool
 	return cur, true
 }
 
+func newContractValidator(tagName string) *validator.Validate {
+	v := validator.New(validator.WithRequiredStructEnabled())
+	v.SetTagName(tagName)
+	v.RegisterStructValidationMapRules(map[string]string{
+		"Filename": "-",
+		"Header":   "-",
+		"Size":     "-",
+	}, multipart.FileHeader{})
+	return v
+}
+
 func buildOperationValidators(reqType reflect.Type, hasValidate, hasBinding bool) (*validator.Validate, *validator.Validate, error) {
 	var valV *validator.Validate
 	var bindV *validator.Validate
 	if hasValidate {
-		valV = validator.New(validator.WithRequiredStructEnabled())
-		valV.SetTagName("validate")
+		valV = newContractValidator("validate")
 	}
 	if hasBinding {
-		bindV = validator.New(validator.WithRequiredStructEnabled())
-		bindV.SetTagName("binding")
+		bindV = newContractValidator("binding")
 	}
 
 	var lazyValV, lazyBindV *validator.Validate
@@ -862,8 +935,7 @@ func buildOperationValidators(reqType reflect.Type, hasValidate, hasBinding bool
 				return bindV
 			}
 			if lazyBindV == nil {
-				lazyBindV = validator.New(validator.WithRequiredStructEnabled())
-				lazyBindV.SetTagName("binding")
+				lazyBindV = newContractValidator("binding")
 			}
 			return lazyBindV
 		}
@@ -871,8 +943,7 @@ func buildOperationValidators(reqType reflect.Type, hasValidate, hasBinding bool
 			return valV
 		}
 		if lazyValV == nil {
-			lazyValV = validator.New(validator.WithRequiredStructEnabled())
-			lazyValV.SetTagName("validate")
+			lazyValV = newContractValidator("validate")
 		}
 		return lazyValV
 	}
@@ -935,6 +1006,9 @@ func buildSyntheticValue(t reflect.Type, active map[reflect.Type]int) reflect.Va
 	case reflect.Struct:
 		if t == timeType {
 			return reflect.ValueOf(time.Unix(1700000000, 0).UTC())
+		}
+		if t == multipartFileHeaderType {
+			return reflect.ValueOf(multipart.FileHeader{Filename: "a.bin", Size: 1})
 		}
 		if active[t] >= 1 {
 			return reflect.Zero(t)

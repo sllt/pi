@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -45,7 +46,7 @@ func (op *CompiledOperation) BindAndValidate(
 	reqVal := rv.Elem()
 	rawReq := httpReq.HTTPRequest()
 
-	rawBody, bodyErr := httpReq.RawBodyBytes()
+	rawBody, bodyErr := httpReq.RawBodyBytesWithLimit(op.EffectiveMaxBodyBytes())
 	if bodyErr != nil {
 		var limit *http.MaxBytesError
 		if errors.As(bodyErr, &limit) {
@@ -54,13 +55,24 @@ func (op *CompiledOperation) BindAndValidate(
 		return newInvalidArgumentError("invalid request body", nil)
 	}
 
-	if op.HasBodyFields {
+	var (
+		formValues url.Values
+		formFiles  map[string][]*multipart.FileHeader
+	)
+	switch {
+	case op.HasBodyFields:
 		if len(rawBody) > 0 {
 			if !isJSONContentType(rawReq.Header.Get("Content-Type")) {
 				return unsupportedMediaTypeError{}
 			}
 		}
-	} else {
+	case op.HasFormFields:
+		var formErr error
+		formValues, formFiles, formErr = parseFormInputs(rawReq, rawBody, op.HasFileFields)
+		if formErr != nil {
+			return formErr
+		}
+	default:
 		if err := op.validateEmptyBodyContract(rawReq, rawBody); err != nil {
 			return err
 		}
@@ -181,6 +193,8 @@ func (op *CompiledOperation) BindAndValidate(
 				return err
 			}
 		}
+	} else if op.HasFormFields {
+		bindFormFields(op, reqVal, formValues, formFiles, &violations)
 	}
 
 	if len(violations) > 0 {
@@ -197,6 +211,12 @@ func (op *CompiledOperation) WrapResponse(resPtr any, err error) (any, error) {
 	}
 	if op == nil {
 		return nil, errors.New("compiled operation is nil")
+	}
+	if op.ResponseKind == ResponseKindFile {
+		return op.wrapFileResponse(resPtr)
+	}
+	if op.ResponseKind == ResponseKindXML {
+		return op.wrapXMLResponse(resPtr)
 	}
 	if op.Status == http.StatusNoContent {
 		return resTypes.NoContent(), nil
@@ -215,6 +235,337 @@ func (op *CompiledOperation) WrapResponse(resPtr any, err error) (any, error) {
 		return nil, fmt.Errorf("typed handler %s returned nil *%s without error", op.HandlerName, resName)
 	}
 	return resTypes.Result{StatusCode: op.Status, Data: resPtr}, nil
+}
+
+func (op *CompiledOperation) wrapFileResponse(resPtr any) (any, error) {
+	filePtr, ok := resPtr.(*resTypes.File)
+	if !ok || filePtr == nil {
+		return nil, fmt.Errorf("typed handler %s returned nil *response.File without error", op.HandlerName)
+	}
+	val := *filePtr
+	if val.StatusCode != 0 && val.StatusCode != op.Status {
+		return nil, fmt.Errorf("typed handler %s returned *response.File with StatusCode %d, expected 0 or %d", op.HandlerName, val.StatusCode, op.Status)
+	}
+	val.StatusCode = op.Status
+
+	ct := strings.TrimSpace(val.ContentType)
+	if ct == "" {
+		var hdrErr error
+		ct, hdrErr = lookupHeaderContentType(val.Headers)
+		if hdrErr != nil {
+			return nil, fmt.Errorf("typed handler %s returned *response.File with %w", op.HandlerName, hdrErr)
+		}
+	}
+	resolvedCT, err := op.validateAndResolveResponseContentType(ct, "application/octet-stream")
+	if err != nil {
+		return nil, err
+	}
+	val.ContentType = resolvedCT
+	return resTypes.Result{StatusCode: op.Status, Data: val}, nil
+}
+
+func (op *CompiledOperation) wrapXMLResponse(resPtr any) (any, error) {
+	xmlPtr, ok := resPtr.(*resTypes.XML)
+	if !ok || xmlPtr == nil {
+		return nil, fmt.Errorf("typed handler %s returned nil *response.XML without error", op.HandlerName)
+	}
+	val := *xmlPtr
+	if val.StatusCode != 0 && val.StatusCode != op.Status {
+		return nil, fmt.Errorf("typed handler %s returned *response.XML with StatusCode %d, expected 0 or %d", op.HandlerName, val.StatusCode, op.Status)
+	}
+	val.StatusCode = op.Status
+
+	ct := strings.TrimSpace(val.ContentType)
+	resolvedCT, err := op.validateAndResolveResponseContentType(ct, "application/xml")
+	if err != nil {
+		return nil, err
+	}
+	if ct == "" {
+		val.ContentType = resolvedCT
+	} else {
+		val.ContentType = ct
+	}
+	return resTypes.Result{StatusCode: op.Status, Data: val}, nil
+}
+
+func (op *CompiledOperation) validateAndResolveResponseContentType(ct, defaultCT string) (string, error) {
+	if ct != "" {
+		_, actualMT, actualParams, err := parseAndValidateMediaRange(ct, false)
+		if err != nil {
+			return "", fmt.Errorf("typed handler %s returned invalid Content-Type %q: %w", op.HandlerName, ct, err)
+		}
+		if op.hasExplicitProduces {
+			matched := false
+			for _, rng := range op.Produces {
+				if mediaRangeMatches(actualMT, actualParams, rng) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return "", fmt.Errorf("typed handler %s returned Content-Type %q which does not match declared produces %v", op.HandlerName, ct, op.Produces)
+			}
+		}
+		return ct, nil
+	}
+
+	if len(op.Produces) > 0 && !strings.Contains(op.Produces[0], "*") {
+		return op.Produces[0], nil
+	}
+	_, defMT, defParams, err := parseAndValidateMediaRange(defaultCT, false)
+	if err == nil {
+		for _, rng := range op.Produces {
+			if mediaRangeMatches(defMT, defParams, rng) {
+				return defaultCT, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("typed handler %s must specify ContentType matching produces %v", op.HandlerName, op.Produces)
+}
+
+func lookupHeaderContentType(headers map[string]string) (string, error) {
+	if len(headers) == 0 {
+		return "", nil
+	}
+	var found string
+	for k, v := range headers {
+		if !strings.EqualFold(k, "Content-Type") {
+			continue
+		}
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			continue
+		}
+		if found != "" && found != trimmed {
+			return "", fmt.Errorf("conflicting Content-Type header values %q and %q", found, trimmed)
+		}
+		found = trimmed
+	}
+	return found, nil
+}
+
+func parseFormInputs(rawReq *http.Request, rawBody []byte, hasFileFields bool) (url.Values, map[string][]*multipart.FileHeader, error) {
+	ct := rawReq.Header.Get("Content-Type")
+	trimmedCT := strings.TrimSpace(ct)
+	if len(rawBody) == 0 {
+		if trimmedCT == "" {
+			return nil, nil, nil
+		}
+		mediaType, _, ctErr := mime.ParseMediaType(ct)
+		if ctErr != nil {
+			return nil, nil, unsupportedMediaTypeError{}
+		}
+		mediaType = strings.ToLower(mediaType)
+		switch mediaType {
+		case "application/x-www-form-urlencoded":
+			if hasFileFields {
+				return nil, nil, unsupportedMediaTypeError{}
+			}
+			return nil, nil, nil
+		case "multipart/form-data":
+			return nil, nil, newInvalidArgumentError("invalid request body", nil)
+		default:
+			return nil, nil, unsupportedMediaTypeError{}
+		}
+	}
+
+	if trimmedCT == "" {
+		return nil, nil, unsupportedMediaTypeError{}
+	}
+	mediaType, params, ctErr := mime.ParseMediaType(ct)
+	if ctErr != nil {
+		return nil, nil, unsupportedMediaTypeError{}
+	}
+	mediaType = strings.ToLower(mediaType)
+	switch mediaType {
+	case "multipart/form-data":
+		boundary := params["boundary"]
+		if strings.TrimSpace(boundary) == "" {
+			return nil, nil, unsupportedMediaTypeError{}
+		}
+		mr := multipart.NewReader(bytes.NewReader(rawBody), boundary)
+		form, readErr := mr.ReadForm(int64(len(rawBody)) + 1024)
+		if readErr != nil {
+			if form != nil {
+				_ = form.RemoveAll()
+			}
+			if errors.Is(readErr, multipart.ErrMessageTooLarge) {
+				return nil, nil, piHTTP.ErrorPayloadTooLarge{}
+			}
+			return nil, nil, newInvalidArgumentError("invalid request body", nil)
+		}
+		if rawReq.MultipartForm == nil {
+			rawReq.MultipartForm = form
+		}
+		return url.Values(form.Value), form.File, nil
+	case "application/x-www-form-urlencoded":
+		if hasFileFields {
+			return nil, nil, unsupportedMediaTypeError{}
+		}
+		vals, parseErr := url.ParseQuery(string(rawBody))
+		if parseErr != nil {
+			return nil, nil, newInvalidArgumentError("invalid request body", nil)
+		}
+		return vals, nil, nil
+	default:
+		return nil, nil, unsupportedMediaTypeError{}
+	}
+}
+
+func bindFormFields(op *CompiledOperation, reqVal reflect.Value, formValues url.Values, formFiles map[string][]*multipart.FileHeader, violations *[]fieldViolation) {
+	for _, cf := range op.formFields {
+		files := formFiles[cf.externalName]
+		vals, exists := formValues[cf.externalName]
+		if cf.isFile {
+			hasNonEmptyVal := false
+			for _, v := range vals {
+				if v != "" {
+					hasNonEmptyVal = true
+					break
+				}
+			}
+			if hasNonEmptyVal {
+				*violations = append(*violations, fieldViolation{
+					Field: cf.errField,
+					Rule:  "type",
+				})
+				continue
+			}
+			if cf.fileKind == fileSingle && len(files) > 0 && len(vals) > 0 {
+				*violations = append(*violations, fieldViolation{
+					Field: cf.errField,
+					Rule:  "single_value",
+				})
+				continue
+			}
+			if len(files) == 0 {
+				continue
+			}
+			if cf.fileKind == fileSingle && len(files) > 1 {
+				*violations = append(*violations, fieldViolation{
+					Field: cf.errField,
+					Rule:  "single_value",
+				})
+				continue
+			}
+			badFilename := false
+			for _, fh := range files {
+				if !isSafeUploadFileHeader(fh) {
+					*violations = append(*violations, fieldViolation{
+						Field: cf.errField,
+						Rule:  "format",
+					})
+					badFilename = true
+					break
+				}
+			}
+			if badFilename {
+				continue
+			}
+			if cf.fileKind == fileSingle {
+				reqVal.FieldByIndex(cf.indexChain).Set(reflect.ValueOf(files[0]))
+			} else {
+				sliceVal := reflect.MakeSlice(cf.fieldType, len(files), len(files))
+				for idx, fh := range files {
+					sliceVal.Index(idx).Set(reflect.ValueOf(fh))
+				}
+				reqVal.FieldByIndex(cf.indexChain).Set(sliceVal)
+			}
+			continue
+		}
+
+		if len(files) > 0 {
+			*violations = append(*violations, fieldViolation{
+				Field: cf.errField,
+				Rule:  "type",
+			})
+			continue
+		}
+		if !exists {
+			if cf.hasDefault {
+				setScalarField(reqVal.FieldByIndex(cf.indexChain), cf.defaultVal, cf.scalar.isPtr)
+			}
+			continue
+		}
+		if cf.isSlice {
+			sliceVal := reflect.MakeSlice(cf.fieldType, len(vals), len(vals))
+			sliceOK := true
+			for idx, item := range vals {
+				elemRV, err := parseScalarReflectValue(item, cf.scalar)
+				if err != nil {
+					*violations = append(*violations, fieldViolation{
+						Field: fmt.Sprintf("%s[%d]", cf.errField, idx),
+						Rule:  "type",
+					})
+					sliceOK = false
+					continue
+				}
+				sliceVal.Index(idx).Set(elemRV)
+			}
+			if sliceOK {
+				reqVal.FieldByIndex(cf.indexChain).Set(sliceVal)
+			}
+			continue
+		}
+		if len(vals) > 1 {
+			*violations = append(*violations, fieldViolation{
+				Field: cf.errField,
+				Rule:  "single_value",
+			})
+			continue
+		}
+		if len(vals) == 1 {
+			parsedRV, err := parseScalarReflectValue(vals[0], cf.scalar)
+			if err != nil {
+				*violations = append(*violations, fieldViolation{
+					Field: cf.errField,
+					Rule:  "type",
+				})
+				continue
+			}
+			setScalarField(reqVal.FieldByIndex(cf.indexChain), parsedRV, cf.scalar.isPtr)
+		}
+	}
+
+	if op.StrictJSON {
+		for key := range formValues {
+			if _, known := op.formByName[key]; !known {
+				*violations = append(*violations, fieldViolation{
+					Field: key,
+					Rule:  "unknown_field",
+				})
+			}
+		}
+		for key := range formFiles {
+			if _, known := op.formByName[key]; !known {
+				*violations = append(*violations, fieldViolation{
+					Field: key,
+					Rule:  "unknown_field",
+				})
+			}
+		}
+	}
+}
+
+func isSafeUploadFileHeader(fh *multipart.FileHeader) bool {
+	if fh == nil || !isSafeUploadFilename(fh.Filename) {
+		return false
+	}
+	if cd := fh.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, err := mime.ParseMediaType(cd); err == nil {
+			if rawName, ok := params["filename"]; ok && !isSafeUploadFilename(rawName) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isSafeUploadFilename(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	return !strings.ContainsAny(name, "/\\\x00")
 }
 
 func isNilResponseValue(v any) bool {
@@ -247,7 +598,7 @@ func (op *CompiledOperation) validateEmptyBodyContract(rawReq *http.Request, raw
 	if len(trimmed) == 0 {
 		return nil
 	}
-	if op.Method == http.MethodGet || op.Method == http.MethodDelete {
+	if isBodylessMethod(op.Method) {
 		return newInvalidArgumentError("invalid request body", nil)
 	}
 	if ct := rawReq.Header.Get("Content-Type"); (op.Method == http.MethodPost || op.Method == http.MethodPut || op.Method == http.MethodPatch) &&

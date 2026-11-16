@@ -553,3 +553,60 @@ func TestRenderUIHTML(t *testing.T) {
 	_, err = RenderSwaggerUIHTML("/docs", "/openapi.json", "/docs", nil)
 	require.Error(t, err)
 }
+
+func TestPathItemHeadAndOptionsCloneAndMarshal(t *testing.T) {
+	emptySec := []SecurityRequirement{}
+	doc := &Document{
+		OpenAPI: Version303,
+		Info:    Info{Title: "HeadOptions", Version: "1.0.0"},
+		Paths: map[string]*PathItem{
+			"/probe": {
+				Head: &Operation{
+					OperationID: "headProbe",
+					Summary:     "Check resource existence",
+				},
+				Options: &Operation{
+					OperationID: "optionsProbe",
+					Summary:     "Describe allowed methods",
+					Security:    &emptySec,
+				},
+			},
+		},
+	}
+
+	cloned := doc.Clone()
+	require.NotNil(t, cloned.Paths["/probe"].Head)
+	require.NotNil(t, cloned.Paths["/probe"].Options)
+	cloned.Paths["/probe"].Head.Summary = "Mutated"
+	cloned.Paths["/probe"].Options.Summary = "Mutated"
+	assert.Equal(t, "Check resource existence", doc.Paths["/probe"].Head.Summary)
+	assert.Equal(t, "Describe allowed methods", doc.Paths["/probe"].Options.Summary)
+
+	jsonBytes, err := doc.MarshalJSONBytes()
+	require.NoError(t, err)
+	yamlBytes, err := doc.MarshalYAMLBytes()
+	require.NoError(t, err)
+
+	assert.Contains(t, string(jsonBytes), `"head":`)
+	assert.Contains(t, string(jsonBytes), `"options":`)
+	assert.Contains(t, string(yamlBytes), "head:")
+	assert.Contains(t, string(yamlBytes), "options:")
+
+	var fromJSON Document
+	require.NoError(t, json.Unmarshal(jsonBytes, &fromJSON))
+	var fromYAML Document
+	require.NoError(t, yaml.Unmarshal(yamlBytes, &fromYAML))
+
+	for _, parsed := range []Document{fromJSON, fromYAML} {
+		item := parsed.Paths["/probe"]
+		require.NotNil(t, item)
+		require.NotNil(t, item.Head)
+		assert.Equal(t, "headProbe", item.Head.OperationID)
+		assert.NotNil(t, item.Head.Responses)
+		require.NotNil(t, item.Options)
+		assert.Equal(t, "optionsProbe", item.Options.OperationID)
+		assert.NotNil(t, item.Options.Responses)
+		require.NotNil(t, item.Options.Security)
+		assert.Empty(t, *item.Options.Security)
+	}
+}
