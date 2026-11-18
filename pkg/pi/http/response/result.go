@@ -24,6 +24,7 @@ func NoContent() Result        { return Result{StatusCode: 204} }
 type Stream struct {
 	StatusCode  int
 	ContentType string
+	Headers     map[string]string
 	Run         func(context.Context, io.Writer) error
 }
 

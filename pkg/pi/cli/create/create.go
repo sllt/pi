@@ -100,7 +100,7 @@ func generateWithOptions(name string, kinds []string, opts Options) (string, err
 		if outDir == "" {
 			outDir = defaultOutputDir(kind)
 		}
-		file := filepath.Join(outDir, strings.ToLower(base)+".go")
+		file := filepath.Join(outDir, data.StructNameSnakeCase+".go")
 		if _, err = os.Lstat(file); err == nil {
 			if opts.DryRun {
 				messages = append(messages, "Would preserve: "+file)

@@ -166,22 +166,39 @@ func (c *Context) AppVersion() string {
 	return c.rt.getAppVersion()
 }
 
+func (c *Context) httpRequest() *http.Request {
+	if c == nil || c.Request == nil {
+		return nil
+	}
+	if httpReq, ok := c.Request.(*piHTTP.Request); ok {
+		if httpReq == nil {
+			return nil
+		}
+		return httpReq.HTTPRequest()
+	}
+	if rawProvider, ok := c.Request.(interface{ HTTPRequest() *http.Request }); ok {
+		return rawProvider.HTTPRequest()
+	}
+	return nil
+}
+
+// Method returns the HTTP request method (for example "GET", "HEAD", or "POST"),
+// or "" when the context is nil or does not wrap an HTTP request.
+func (c *Context) Method() string {
+	if r := c.httpRequest(); r != nil {
+		return r.Method
+	}
+	return ""
+}
+
 // Header reads a request header (HTTP) or incoming metadata value (gRPC) case-insensitively.
 func (c *Context) Header(key string) string {
 	trimmed := strings.TrimSpace(key)
 	if c == nil || trimmed == "" {
 		return ""
 	}
-	if c.Request != nil {
-		if httpReq, ok := c.Request.(*piHTTP.Request); ok && httpReq != nil {
-			if r := httpReq.HTTPRequest(); r != nil {
-				return r.Header.Get(trimmed)
-			}
-		} else if rawProvider, ok := c.Request.(interface{ HTTPRequest() *http.Request }); ok {
-			if r := rawProvider.HTTPRequest(); r != nil {
-				return r.Header.Get(trimmed)
-			}
-		}
+	if r := c.httpRequest(); r != nil {
+		return r.Header.Get(trimmed)
 	}
 	metaCtx := c.Context
 	if metaCtx == nil && c.Request != nil {
@@ -372,4 +389,11 @@ func (c *Context) GetCorrelationID() string {
 		return ""
 	}
 	return trace.SpanFromContext(c.Context).SpanContext().TraceID().String()
+}
+
+func baseContext(c *Context) context.Context {
+	if c == nil || c.Context == nil {
+		return context.Background()
+	}
+	return c.Context
 }

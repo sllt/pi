@@ -71,6 +71,9 @@ func (a *App) initRuntimeContextsLocked(runtimeParent, valuesSource context.Cont
 		a.intakeStopAfter()
 		a.intakeStopAfter = nil
 	}
+	if a.kernel != nil {
+		a.kernel.ResetStoppingChan()
+	}
 
 	runtimeCtx, runtimeCancel := context.WithCancelCause(runtimeParent)
 	intakeCtx, intakeCancel := context.WithCancelCause(runtimeCtx)
@@ -111,6 +114,9 @@ func (a *App) closeIntakeGate() {
 	a.taskGateMu.Lock()
 	a.intakeClosed = true
 	a.taskGateMu.Unlock()
+	if a.kernel != nil {
+		a.kernel.MarkStopping()
+	}
 }
 
 func (a *App) isIntakeClosed() bool {

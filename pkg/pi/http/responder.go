@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"reflect"
 	"strings"
@@ -22,13 +23,22 @@ func NewResponder(w http.ResponseWriter, method string) *Responder {
 	return &Responder{w: w, method: method}
 }
 
+// RawReplay writes a pre-captured HTTP response (status, headers, and body)
+// without JSON envelope wrapping, used by middleware such as Idempotency.
+type RawReplay struct {
+	StatusCode int
+	Headers    map[string][]string
+	Body       []byte
+}
+
 // Responder encapsulates an http.ResponseWriter and is responsible for crafting structured responses.
 type Responder struct {
-	w        http.ResponseWriter
-	method   string
-	ctx      context.Context
-	policy   StatusPolicy
-	override int
+	w             http.ResponseWriter
+	method        string
+	ctx           context.Context
+	streamBaseCtx context.Context
+	policy        StatusPolicy
+	override      int
 }
 
 type StatusPolicy uint8
@@ -40,6 +50,20 @@ const (
 
 func NewResponderForRequest(w http.ResponseWriter, r *http.Request, policy StatusPolicy) *Responder {
 	return &Responder{w: w, method: r.Method, ctx: r.Context(), policy: policy}
+}
+
+// SetHeader sets a response header on the underlying http.ResponseWriter.
+func (r *Responder) SetHeader(key, value string) {
+	if r != nil && r.w != nil && key != "" {
+		r.w.Header().Set(key, value)
+	}
+}
+
+// SetStreamBaseContext sets the base context passed to Stream.Run and SSE.Run.
+func (r *Responder) SetStreamBaseContext(ctx context.Context) {
+	if r != nil {
+		r.streamBaseCtx = ctx
+	}
 }
 
 // Respond sends a response with the given data and handles potential errors, setting appropriate
@@ -68,7 +92,7 @@ func (r Responder) Respond(data any, err error) {
 		if _, ok := data.(resTypes.Handled); ok {
 			return
 		}
-		if r.getHTTPStatusCode(data, nil) == http.StatusNoContent {
+		if !isRawReplay(data) && r.getHTTPStatusCode(data, nil) == http.StatusNoContent {
 			r.w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -163,23 +187,22 @@ func (r Responder) handleSpecialResponseTypes(data any, err error) bool {
 
 	switch v := data.(type) {
 	case resTypes.Stream:
-		if v.Run == nil {
-			r.Respond(nil, errors.New("stream callback is nil"))
-			return true
+		r.writeStreamResponse(v, statusCode)
+		return true
+	case *resTypes.Stream:
+		if v == nil {
+			return false
 		}
-		contentType := v.ContentType
-		if contentType == "" {
-			contentType = "application/octet-stream"
+		r.writeStreamResponse(*v, statusCode)
+		return true
+	case resTypes.SSE:
+		r.writeSSEResponse(v, statusCode)
+		return true
+	case *resTypes.SSE:
+		if v == nil {
+			return false
 		}
-		r.w.Header().Set("Content-Type", contentType)
-		r.w.WriteHeader(statusCode)
-		if r.method != http.MethodHead {
-			ctx := r.ctx
-			if ctx == nil {
-				ctx = context.Background()
-			}
-			_ = v.Run(ctx, r.w)
-		}
+		r.writeSSEResponse(*v, statusCode)
 		return true
 	case resTypes.File:
 		r.writeFileResponse(v, statusCode)
@@ -221,9 +244,157 @@ func (r Responder) handleSpecialResponseTypes(data any, err error) bool {
 		r.w.WriteHeader(redirectStatusCode)
 
 		return true
+
+	case RawReplay:
+		r.writeReplayResponse(v, statusCode)
+		return true
+	case *RawReplay:
+		if v == nil {
+			return false
+		}
+		r.writeReplayResponse(*v, statusCode)
+		return true
 	}
 
 	return false
+}
+
+func isRawReplay(data any) bool {
+	switch v := data.(type) {
+	case RawReplay:
+		return true
+	case *RawReplay:
+		return v != nil
+	default:
+		return false
+	}
+}
+
+func (r Responder) writeReplayResponse(v RawReplay, statusCode int) {
+	for k, vals := range v.Headers {
+		if k == "" || len(vals) == 0 {
+			continue
+		}
+		canonKey := http.CanonicalHeaderKey(k)
+		if canonKey == "Vary" {
+			mergeHeaderTokens(r.w.Header(), "Vary", vals)
+			continue
+		}
+		r.w.Header().Del(canonKey)
+		for _, val := range vals {
+			r.w.Header().Add(canonKey, val)
+		}
+	}
+	r.w.WriteHeader(statusCode)
+	if r.method != http.MethodHead && statusCode != http.StatusNoContent && statusCode != http.StatusNotModified && len(v.Body) > 0 {
+		_, _ = r.w.Write(v.Body)
+	}
+}
+
+func mergeHeaderTokens(dst http.Header, key string, incoming []string) {
+	seen := make(map[string]struct{})
+	for _, existing := range dst.Values(key) {
+		for _, part := range strings.Split(existing, ",") {
+			token := strings.TrimSpace(part)
+			if token == "" {
+				continue
+			}
+			seen[strings.ToLower(token)] = struct{}{}
+		}
+	}
+	for _, val := range incoming {
+		for _, part := range strings.Split(val, ",") {
+			token := strings.TrimSpace(part)
+			if token == "" {
+				continue
+			}
+			lower := strings.ToLower(token)
+			if _, ok := seen[lower]; ok {
+				continue
+			}
+			seen[lower] = struct{}{}
+			dst.Add(key, token)
+		}
+	}
+}
+
+func (r Responder) writeStreamResponse(v resTypes.Stream, statusCode int) {
+	if v.Run == nil {
+		r.Respond(nil, errors.New("stream callback is nil"))
+		return
+	}
+	r.writeStreamingResponse(v.Headers, v.ContentType, "application/octet-stream", statusCode, true, func(ctx context.Context, w io.Writer, _ http.Flusher) error {
+		return v.Run(ctx, w)
+	})
+}
+
+func (r Responder) writeSSEResponse(v resTypes.SSE, statusCode int) {
+	if v.Run == nil {
+		r.Respond(nil, errors.New("sse callback is nil"))
+		return
+	}
+	r.writeStreamingResponse(v.Headers, "", "text/event-stream; charset=utf-8", statusCode, false, v.Run)
+}
+
+func (r Responder) writeStreamingResponse(
+	headers map[string]string,
+	explicitContentType string,
+	fallbackContentType string,
+	statusCode int,
+	autoFlush bool,
+	run func(context.Context, io.Writer, http.Flusher) error,
+) {
+	for k, val := range headers {
+		if k != "" && val != "" {
+			r.w.Header().Set(k, val)
+		}
+	}
+	contentType := strings.TrimSpace(explicitContentType)
+	if contentType == "" {
+		contentType = strings.TrimSpace(r.w.Header().Get("Content-Type"))
+	}
+	if contentType == "" {
+		contentType = fallbackContentType
+	}
+	r.w.Header().Set("Content-Type", contentType)
+	r.w.WriteHeader(statusCode)
+	rc := http.NewResponseController(r.w)
+	_ = rc.Flush()
+	if r.method != http.MethodHead {
+		ctx := r.streamBaseCtx
+		if ctx == nil {
+			ctx = r.ctx
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		sw := streamResponseWriter{ResponseWriter: r.w, rc: rc, autoFlush: autoFlush}
+		_ = run(ctx, sw, sw)
+	}
+}
+
+type streamResponseWriter struct {
+	http.ResponseWriter
+	rc        *http.ResponseController
+	autoFlush bool
+}
+
+func (sw streamResponseWriter) Write(p []byte) (int, error) {
+	n, err := sw.ResponseWriter.Write(p)
+	if sw.autoFlush && n > 0 && sw.rc != nil {
+		_ = sw.rc.Flush()
+	}
+	return n, err
+}
+
+func (sw streamResponseWriter) Flush() {
+	if sw.rc != nil {
+		_ = sw.rc.Flush()
+	}
+}
+
+func (sw streamResponseWriter) Unwrap() http.ResponseWriter {
+	return sw.ResponseWriter
 }
 
 func (r Responder) writeFileResponse(v resTypes.File, statusCode int) {
@@ -288,6 +459,28 @@ func getCustomStatusCode(data any) (int, bool) {
 		statusCode = v.StatusCode
 	case resTypes.Stream:
 		statusCode = v.StatusCode
+	case *resTypes.Stream:
+		if v == nil {
+			return 0, false
+		}
+		statusCode = v.StatusCode
+	case resTypes.SSE:
+		return http.StatusOK, true
+	case *resTypes.SSE:
+		if v == nil {
+			return 0, false
+		}
+		return http.StatusOK, true
+	case RawReplay:
+		if v.StatusCode != 0 {
+			return v.StatusCode, true
+		}
+		return 0, false
+	case *RawReplay:
+		if v == nil || v.StatusCode == 0 {
+			return 0, false
+		}
+		return v.StatusCode, true
 	default:
 		return 0, false
 	}

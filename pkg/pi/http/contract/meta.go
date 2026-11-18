@@ -24,6 +24,7 @@ var forbiddenResponseTypes = map[string]struct{}{
 	"Response": {},
 	"Raw":      {},
 	"Stream":   {},
+	"SSE":      {},
 	"File":     {},
 	"Template": {},
 	"XML":      {},
@@ -212,6 +213,10 @@ func validateReqResPtrTypes(reqPtrType, resPtrType reflect.Type) (reflect.Type, 
 			resKind = ResponseKindFile
 		case "XML":
 			resKind = ResponseKindXML
+		case "Stream":
+			resKind = ResponseKindStream
+		case "SSE":
+			resKind = ResponseKindSSE
 		default:
 			if _, forbidden := forbiddenResponseTypes[resType.Name()]; forbidden {
 				return nil, nil, ResponseKindJSON, fmt.Errorf("response type %s.%s is a control response type and cannot be used as a typed handler response", resType.PkgPath(), resType.Name())
@@ -499,25 +504,37 @@ func extractAndValidateMeta(reqType reflect.Type, opts CompileOptions, resKind R
 	switch resKind {
 	case ResponseKindJSON:
 		if hasProduces {
-			return nil, fmt.Errorf("request struct %s pi.Meta produces tag is only supported for *response.File or *response.XML responses", typeDisplayName(reqType))
+			return nil, fmt.Errorf("request struct %s pi.Meta produces tag is only supported for *response.File, *response.XML, *response.Stream, or *response.SSE responses", typeDisplayName(reqType))
 		}
-	case ResponseKindFile, ResponseKindXML:
-		if status == http.StatusNoContent {
-			return nil, fmt.Errorf("request struct %s status 204 is not supported for *response.File or *response.XML responses", typeDisplayName(reqType))
+	case ResponseKindFile, ResponseKindXML, ResponseKindStream, ResponseKindSSE:
+		if status == http.StatusNoContent || status == http.StatusResetContent || status == http.StatusNotModified {
+			return nil, fmt.Errorf("request struct %s status %d is not supported for *response.File, *response.XML, *response.Stream, or *response.SSE responses", typeDisplayName(reqType), status)
 		}
 		if nullableRes {
-			return nil, fmt.Errorf("request struct %s nullable:\"true\" is not supported for *response.File or *response.XML responses", typeDisplayName(reqType))
+			return nil, fmt.Errorf("request struct %s nullable:\"true\" is not supported for *response.File, *response.XML, *response.Stream, or *response.SSE responses", typeDisplayName(reqType))
 		}
 		if hasProduces {
 			produces, err = parseProducesTag(rawProduces, reqType)
 			if err != nil {
 				return nil, err
 			}
+			if resKind == ResponseKindSSE {
+				for _, rng := range produces {
+					if !mediaRangeMatches("text/event-stream", map[string]string{"charset": "utf-8"}, rng) {
+						return nil, fmt.Errorf("request struct %s pi.Meta produces %q is incompatible with *response.SSE (expected text/event-stream)", typeDisplayName(reqType), rng)
+					}
+				}
+			}
 			hasExplicitProduces = true
-		} else if resKind == ResponseKindFile {
-			produces = []string{"application/octet-stream"}
 		} else {
-			produces = []string{"application/xml"}
+			switch resKind {
+			case ResponseKindXML:
+				produces = []string{"application/xml"}
+			case ResponseKindSSE:
+				produces = []string{"text/event-stream"}
+			default:
+				produces = []string{"application/octet-stream"}
+			}
 		}
 	}
 

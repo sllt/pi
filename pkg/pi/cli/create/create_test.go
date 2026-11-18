@@ -65,14 +65,20 @@ func TestAllWithOptionsDryRunWriteAndPreserve(t *testing.T) {
 	assert.Contains(t, string(dtoSrc), "GetUserProfileRes")
 	assert.Contains(t, string(dtoSrc), "CreateUserProfileReq")
 	assert.Contains(t, string(dtoSrc), "CreateUserProfileRes")
+	assert.Contains(t, string(dtoSrc), `ID int64`+" `"+`path:"id" validate:"required,min=1" dc:"UserProfile ID"`+"`")
+	assert.NotContains(t, string(dtoSrc), "uint")
 
 	handlerSrc, err := os.ReadFile(expectedPaths[1])
 	require.NoError(t, err)
 	assert.NotContains(t, string(handlerSrc), "@Summary")
 	assert.NotContains(t, string(handlerSrc), "@Router")
+	assert.NotContains(t, string(handlerSrc), "apperror")
+	assert.NotContains(t, string(handlerSrc), "net/http")
+	assert.NotContains(t, string(handlerSrc), "if item == nil")
 	assert.Contains(t, string(handlerSrc), "func (h *UserProfileHandler) GetUserProfile(ctx *pi.Context, req *v1.GetUserProfileReq) (*v1.GetUserProfileRes, error)")
+	assert.Contains(t, string(handlerSrc), "h.userProfileService.GetUserProfile(ctx, req.ID)")
 	assert.Contains(t, string(handlerSrc), "func (h *UserProfileHandler) CreateUserProfile(ctx *pi.Context, _ *v1.CreateUserProfileReq) (*v1.CreateUserProfileRes, error)")
-	assert.Contains(t, string(handlerSrc), "apperror.New(apperror.NotFound, http.StatusNotFound")
+	assert.Contains(t, string(handlerSrc), "h.userProfileService.CreateUserProfile(ctx, item)")
 
 	routerSrc, err := os.ReadFile(expectedPaths[2])
 	require.NoError(t, err)
@@ -82,6 +88,21 @@ func TestAllWithOptionsDryRunWriteAndPreserve(t *testing.T) {
 	assert.Contains(t, string(routerSrc), `group.POST("", h.CreateUserProfile)`)
 	assert.Contains(t, string(routerSrc), "return deps.App.RouteError()")
 	assert.NotContains(t, string(routerSrc), "pi.Register")
+
+	serviceSrc, err := os.ReadFile(expectedPaths[3])
+	require.NoError(t, err)
+	assert.Contains(t, string(serviceSrc), "GetUserProfile(ctx context.Context, id int64) (*model.UserProfile, error)")
+
+	repoSrc, err := os.ReadFile(expectedPaths[4])
+	require.NoError(t, err)
+	assert.Contains(t, string(repoSrc), "GetUserProfile(ctx context.Context, id int64) (*model.UserProfile, error)")
+	assert.Contains(t, string(repoSrc), `apperror.New(apperror.NotFound, http.StatusNotFound, "userProfile not found")`)
+	assert.Contains(t, string(repoSrc), "userProfile.Id = id")
+	assert.NotContains(t, string(repoSrc), "uint(id)")
+
+	modelSrc, err := os.ReadFile(expectedPaths[5])
+	require.NoError(t, err)
+	assert.Contains(t, string(modelSrc), `Id        int64     `+"`"+`db:"id"`+"`")
 
 	// 3. Re-running must preserve handwritten edits in both dry-run and write modes.
 	handwritten := "// handwritten business logic\npackage handler\n"
@@ -135,4 +156,26 @@ func TestSingleComponentHelpersAndErrors(t *testing.T) {
 
 	_, err = CreateComponent("order", "unknown")
 	require.ErrorIs(t, err, ErrInvalidType)
+}
+
+func TestCamelCaseInputUsesSnakeCaseFilenames(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	require.NoError(t, os.WriteFile("go.mod", []byte("module example.com/shop\n\ngo 1.27.0\n"), 0644))
+
+	out, err := AllWithOptions("OrderItem", Options{DryRun: false})
+	require.NoError(t, err)
+	for _, p := range []string{
+		filepath.Join("api", "v1", "order_item.go"),
+		filepath.Join("internal", "handler", "order_item.go"),
+		filepath.Join("internal", "router", "order_item.go"),
+		filepath.Join("internal", "service", "order_item.go"),
+		filepath.Join("internal", "repository", "order_item.go"),
+		filepath.Join("internal", "model", "order_item.go"),
+	} {
+		assert.Contains(t, out, "Created: "+p)
+		_, statErr := os.Stat(p)
+		assert.NoError(t, statErr)
+	}
 }

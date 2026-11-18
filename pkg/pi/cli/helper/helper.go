@@ -1,29 +1,34 @@
 package helper
 
 import (
-	"fmt"
+	"bufio"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
 )
 
 // GetProjectName reads go.mod and extracts the module name.
 func GetProjectName(dir string) string {
-	modPath := dir + "/go.mod"
+	modPath := filepath.Join(dir, "go.mod")
 	modFile, err := os.Open(modPath)
 	if err != nil {
-		fmt.Println("go.mod does not exist:", err)
 		return ""
 	}
 	defer modFile.Close()
 
-	var moduleName string
-	_, err = fmt.Fscanf(modFile, "module %s", &moduleName)
-	if err != nil {
-		fmt.Println("read go mod error:", err)
-		return ""
+	scanner := bufio.NewScanner(modFile)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if idx := strings.Index(line, "//"); idx >= 0 {
+			line = line[:idx]
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "module" {
+			return strings.Trim(fields[1], `"`)
+		}
 	}
-	return moduleName
+	return ""
 }
 
 // ToCamelCase converts a string to CamelCase (e.g., "user_profile" -> "UserProfile").
@@ -51,13 +56,18 @@ func ToLowerFirst(s string) string {
 	return string(r)
 }
 
-// ToSnakeCase converts a string to snake_case (e.g., "UserProfile" -> "user_profile").
+// ToSnakeCase converts a string to snake_case (e.g., "UserProfile" -> "user_profile",
+// "OrderID" -> "order_id", "HTTPServer" -> "http_server").
 func ToSnakeCase(s string) string {
+	runes := []rune(s)
 	var result strings.Builder
-	for i, r := range s {
+	for i, r := range runes {
 		if unicode.IsUpper(r) {
 			if i > 0 {
-				result.WriteRune('_')
+				prev := runes[i-1]
+				if prev != '_' && (!unicode.IsUpper(prev) || (i+1 < len(runes) && unicode.IsLower(runes[i+1]))) {
+					result.WriteRune('_')
+				}
 			}
 			result.WriteRune(unicode.ToLower(r))
 		} else {

@@ -15,7 +15,8 @@ Pair Pi with the official [pi-layout](https://github.com/sllt/pi-layout) Fx scaf
 ## Highlights
 
 - **Runtime Microkernel & Generic Adapter Registry (`pi.Build` + `pi.Use[T]`)** — Side-effect-free construction with explicit `Owned` / `Borrowed` ownership (`WithManagedDatasources`, `WithManagedSQL`, `WithManagedRedis`, `WithManagedPubSub`, `WithAdapter`), symmetric read-only accessors (`ctx.SQL()`, `ctx.Redis()`, `ctx.PubSub()`, `ctx.File()`), lock-free O(1) generic resolution (`pi.Use[T]`, `pi.Resolve[T]`, `pi.MustUse[T]`), automatic capability probing (`ConnectContext`, `Shutdown`, `Close`, `HealthCheck`), and deterministic reverse-order rollback/shutdown.
-- **Unified HTTP Routing & Pre-flight Validation** — `GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`HEAD`/`OPTIONS` on `*App` and `*RouteGroup` support both strongly-typed `func(*pi.Context, *Req) (*Res, error)` (or zero-reflection `pi.H(fn)`) and classic `func(*pi.Context) (any, error)`. Optional `pi.Meta` tags and five isolated input sources (`path`, `query`, `header`, `json`, and `form` multipart file upload) pair with native `*response.File` / `*response.XML` responses, while route conflicts, invalid validation rules, and incompatible mounts are caught before serving via `app.RouteError()`.
+- **Unified HTTP Routing, Streaming & SPA Hosting** — `GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`HEAD`/`OPTIONS` on `*App` and `*RouteGroup` support both strongly-typed `func(*pi.Context, *Req) (*Res, error)` (or zero-reflection `pi.H(fn)`) and classic `func(*pi.Context) (any, error)`. Optional `pi.Meta` tags and five isolated input sources (`path`, `query`, `header`, `json`, and `form` multipart file upload) pair with native `*response.File`, `*response.XML`, `*response.Stream`, and first-class `*response.SSE` (`response.NewSSE`) responses, `app.StaticFS("/", embeddedFS, pi.WithStaticSubDir("dist"), pi.WithSPAFallback())` single-binary frontend hosting, and zero-config `Idempotency-Key` middleware (`UseIdempotency()` / `WithEndpointIdempotency()`), while route conflicts and invalid contracts are caught before serving via `app.RouteError()`.
+- **Stampede-Safe Generic Cache (`pkg/pi/cache`)** — Goroutine-free `cache.NewMemory`, `cache.NewRedis`, and `cache.NewTiered` stores with unified options (`WithMaxEntries`, `WithKeyPrefix`, `WithJitter`, `WithNotFoundTTL`) paired with `cache.Remember[T]` / `cache.Delete`: refcounted context-detached singleflight, uniform TTL jitter, `*apperror.Error`-preserving negative caching, nil-safe pass-through, and fail-open resilience.
 - **Zero-Tooling OpenAPI 3.0.3 & Offline Scalar UI** — Export or serve deterministic OpenAPI 3.0.3 JSON/YAML directly from registered routes—no `swag` comment annotations or external codegen required. Includes a 100% air-gapped, pre-compressed Scalar API Reference UI (`/.well-known/swagger`).
 - **Actor-Supervised Runtime** — Powered by `github.com/sllt/tao/actor`, Pi supervises background workers (`AddWorker` with `SuperviseFatal`, `SuperviseRestart`, `SuperviseDegrade`), overlap-protected Cron jobs (`AddCron`), resilient Pub/Sub subscribers with static `AckSemantics` validation and Ack/Nack safety, and managed WebSocket sessions.
 - **Unified Business Contracts & Security** — Protocol-agnostic `pkg/pi/apperror` maps cleanly across HTTP, gRPC, and CLI exit codes while sanitizing internal failures. `pkg/pi/auth` propagates verified `Principal` identities across transports; custom auth validators receive a full `*pi.Context` (`ctx.Header`, bounded request body, gRPC incoming metadata).
@@ -29,13 +30,13 @@ Pair Pi with the official [pi-layout](https://github.com/sllt/pi-layout) Fx scaf
 ### Framework Module
 
 ```bash
-go get github.com/sllt/pi@v0.5.3
+go get github.com/sllt/pi@v0.5.4
 ```
 
 ### Pi CLI
 
 ```bash
-go install github.com/sllt/pi/cmd/pi@v0.5.3
+go install github.com/sllt/pi/cmd/pi@v0.5.4
 ```
 
 Scaffold a new production-ready project from [pi-layout](https://github.com/sllt/pi-layout):
@@ -192,12 +193,12 @@ err := app.AddWorker("outbox-relay", pi.WorkerPolicy{
 	MaxRestarts:   5,
 	RestartWindow: time.Minute,
 }, func(ctx *pi.Context) error {
-	return relayOutbox(ctx.Context)
+	return relayOutbox(ctx)
 })
 
 // Overlap-protected Cron job drained gracefully before resources close
 err = app.AddCron("0 */5 * * * *", "cleanup-expired-sessions", func(ctx *pi.Context) error {
-	return cleanupSessions(ctx.Context)
+	return cleanupSessions(ctx)
 }, pi.CronJobOptions{
 	Overlap:  pi.CronSkipIfRunning,
 	Location: time.UTC,
@@ -210,13 +211,13 @@ Define domain errors once with `pkg/pi/apperror` and enforce authorization in yo
 
 ```go
 var ErrEmailTaken = apperror.New(
-	apperror.KindConflict,
-	"USER_EMAIL_TAKEN",
+	apperror.Conflict,
+	1001,
 	"email address is already registered",
 )
 
 // Transport-neutral authorization check (self or explicit permission)
-if err := auth.AuthorizeSubject(ctx, targetUserID, "users:write:any"); err != nil {
+if _, err := auth.AuthorizeSubject(ctx, targetUserID, "users:write:any"); err != nil {
 	return err
 }
 ```
@@ -243,13 +244,46 @@ func TestGreet(t *testing.T) {
 }
 ```
 
+### 6. SSE Streaming, Single-Binary SPA Hosting, Cache & Idempotency
+
+Serve Server-Sent Events via first-class `*response.SSE` (`response.NewSSE`, zero `pi.Meta` needed for OpenAPI `text/event-stream`), embed a compiled SPA with `StaticFS`, protect mutations with zero-config `WithEndpointIdempotency()`, and coalesce cache misses via `cache.Remember[T]`:
+
+```go
+// Typed SSE endpoint with automatic text/event-stream OpenAPI schema, keepalive, and shutdown drain
+app.GET("/events", func(ctx *pi.Context, _ *EventsReq) (*response.SSE, error) {
+	return response.NewSSE(func(sctx context.Context, sse *response.SSEWriter) error {
+		return sse.SendEvent("ready", map[string]string{"status": "ok"})
+	}, response.WithSSEKeepAlive(15*time.Second)), nil
+})
+
+// Single-binary SPA hosting (sub-roots dist/, defaults to index.html, excludes /api and /.well-known)
+app.StaticFS("/", embeddedFS,
+	pi.WithStaticSubDir("dist"),
+	pi.WithSPAFallback(),
+	pi.WithStaticExclude("/api"),
+)
+
+// Endpoint-level Idempotency-Key deduplication (auto-uses app.Redis() when configured, else shared memory store)
+app.POST("/orders", orderHandler.Create, pi.WithEndpointIdempotency())
+
+// Stampede-safe generic cache with unified options, singleflight, jitter, and automatic 404 negative caching
+memCache := cache.NewMemory(
+	cache.WithMaxEntries(5000),
+	cache.WithJitter(0.1),
+	cache.WithNotFoundTTL(30*time.Second),
+)
+order, err := cache.Remember(ctx, memCache, "order:"+id, 5*time.Minute, func(c context.Context) (*Order, error) {
+	return repo.FindByID(c, id)
+})
+```
+
 ---
 
 ## Datasources & Adapter Submodules
 
 Pi keeps core SQL, Redis, local filesystem, and standard messaging contracts in the root module while isolating 25 third-party drivers in independent Go submodules (`FromEnv` + `ConnectContext` + `Shutdown`/`Close` + `HealthCheck`) so your `go.mod` stays lean.
 
-| Category | Built-in (`github.com/sllt/pi`) | Independent Adapter Submodules (`@v0.5.3`) |
+| Category | Built-in (`github.com/sllt/pi`) | Independent Adapter Submodules (`@v0.5.4`) |
 | --- | --- | --- |
 | **Relational SQL** | MySQL, PostgreSQL, SQLite | `oracle`, `dbresolver` |
 | **Key-Value / Cache** | Redis | `kv-store/badger`, `kv-store/dynamodb`, `kv-store/nats` |
@@ -263,9 +297,9 @@ Pi keeps core SQL, Redis, local filesystem, and standard messaging contracts in 
 Install any independent adapter submodule and mount it via `pi.WithAdapter`:
 
 ```bash
-go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.3
-go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.3
-go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.3
+go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.4
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.4
+go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.4
 ```
 
 ---
@@ -278,6 +312,7 @@ pi/
 ├── pkg/pi/                  # Runtime microkernel, adapter registry, typed router & supervision
 │   ├── apperror/            # Protocol-agnostic business error model
 │   ├── auth/                # Verified Principal propagation & authorization helpers
+│   ├── cache/               # Stampede-safe generic cache (Memory, Redis, Tiered)
 │   ├── cli/                 # CLI subcommand & template generators
 │   ├── config/              # Deterministic env/config snapshot loader & redaction
 │   ├── datasource/          # Core SQL/Redis/PubSub/File contracts + 25 adapter submodules

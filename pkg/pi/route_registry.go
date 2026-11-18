@@ -36,10 +36,11 @@ type docConfig struct {
 }
 
 type routeMeta struct {
-	isSystem bool
-	httpMWs  []func(http.Handler) http.Handler
-	piMWs    []PiMiddleware
-	typed    *typedRouteEntry
+	isSystem      bool
+	httpMWs       []func(http.Handler) http.Handler
+	piMWs         []PiMiddleware
+	typed         *typedRouteEntry
+	staticHandler *staticFSHandler
 }
 
 // GroupNode is a node in the route group tree.
@@ -69,6 +70,7 @@ type RouteRegistry struct {
 	compiled     bool
 	revision     uint64
 	declErrors   []error
+	staticMounts map[string]struct{}
 	cachedDoc    *openapi.Document
 	cachedRev    uint64
 	hasCachedDoc bool
@@ -537,22 +539,32 @@ func (reg *RouteRegistry) registerRoutes(
 			}
 		}
 
-		composedFn := composePiMiddleware(routePiMWs, rd.Handler)
-
-		h := handler{
-			function:       composedFn,
-			rt:             rt,
-			requestTimeout: timeout,
-			maxBodyBytes:   rd.MaxBodyBytes,
-		}
-
 		var providerFn func() trace.TracerProvider
 		isolateMetrics := false
 		if rt != nil {
 			providerFn = rt.getTracerProvider
 			isolateMetrics = rt.shouldIsolateMetrics()
 		}
-		var routeHTTP http.Handler = piHTTP.NewRouteHTTPHandler(h, "pi-router", providerFn, isolateMetrics)
+		var routeHTTP http.Handler
+		if meta != nil && meta.staticHandler != nil {
+			routeHTTP = piHTTP.NewRouteHTTPHandler(
+				staticRouteHTTPHandler(meta.staticHandler, rt, routePiMWs),
+				"pi-router",
+				providerFn,
+				isolateMetrics,
+			)
+		} else {
+			composedFn := composePiMiddleware(routePiMWs, rd.Handler)
+
+			h := handler{
+				function:       composedFn,
+				rt:             rt,
+				requestTimeout: timeout,
+				maxBodyBytes:   rd.MaxBodyBytes,
+			}
+
+			routeHTTP = piHTTP.NewRouteHTTPHandler(h, "pi-router", providerFn, isolateMetrics)
+		}
 		if meta != nil && len(meta.httpMWs) > 0 {
 			for j := len(meta.httpMWs) - 1; j >= 0; j-- {
 				if meta.httpMWs[j] != nil {

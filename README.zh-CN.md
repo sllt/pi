@@ -15,7 +15,8 @@
 ## 核心特性
 
 - **运行时微内核与统一泛型适配器注册表（`pi.Build` + `pi.Use[T]`）** — 彻底移除传统巨型容器结构体；构造期纯内存零网络副作用，通过 `Owned` / `Borrowed`（`WithManagedDatasources`、`WithManagedSQL`、`WithManagedRedis`、`WithManagedPubSub`、`WithAdapter`）显式声明生命周期归属，提供对称只读访问方法（`ctx.SQL()`、`ctx.Redis()`、`ctx.PubSub()`、`ctx.File()`）与运行期无锁 O(1) 泛型检索（`pi.Use[T]`、`pi.Resolve[T]`、`pi.MustUse[T]`），自动探测 `ConnectContext` / `Shutdown` / `Close` / `HealthCheck` 并在部分启动失败或停机时完整逆序释放。
-- **统一 HTTP 路由与装配期预检** — `*App` 与 `*RouteGroup` 的 `GET` / `POST` / `PUT` / `PATCH` / `DELETE` / `HEAD` / `OPTIONS` 统一支持强类型 `func(*pi.Context, *Req) (*Res, error)`（及零反射 `pi.H(fn)`）与传统 `func(*pi.Context) (any, error)`。通过可选 `pi.Meta` 标签与五源输入绑定（`path`、`query`、`header`、`json` 及 `form` Multipart 文件上传）配合原生 `*response.File` / `*response.XML` 响应，路由冲突、非法校验参数与不兼容挂载在启动前即由 `app.RouteError()` 拦截。
+- **统一 HTTP 路由、流式响应与单二进制前端托管** — `*App` 与 `*RouteGroup` 的 `GET` / `POST` / `PUT` / `PATCH` / `DELETE` / `HEAD` / `OPTIONS` 统一支持强类型 `func(*pi.Context, *Req) (*Res, error)`（及零反射 `pi.H(fn)`）与传统 `func(*pi.Context) (any, error)`。可选 `pi.Meta` 标签与五源输入绑定（`path`、`query`、`header`、`json`、`form` Multipart 文件上传）配合原生 `*response.File`、`*response.XML`、`*response.Stream` 与一等 `*response.SSE`（`response.NewSSE`）响应、`app.StaticFS("/", embeddedFS, pi.WithStaticSubDir("dist"), pi.WithSPAFallback())` 单二进制 SPA 托管与零配置 `Idempotency-Key` 幂等中间件（`UseIdempotency()` / `WithEndpointIdempotency()`），路由冲突与非法契约在启动前即由 `app.RouteError()` 拦截。
+- **防击穿泛型缓存（`pkg/pi/cache`）** — 无后台协程的 `cache.NewMemory`、`cache.NewRedis` 与 `cache.NewTiered` 统一选项构造（`WithMaxEntries`、`WithKeyPrefix`、`WithJitter`、`WithNotFoundTTL`），配合 `cache.Remember[T]` 与 `cache.Delete`：支持引用计数上下文隔离 Singleflight、均匀随机抖动、自动保留 `*apperror.Error` 的负缓存、nil 安全直通与降级（Fail-Open）。
 - **零外部工具 OpenAPI 3.0.3 与内置离线 Scalar UI** — 无需手写 `swag` 注释或安装额外生成器，直接从真实注册路由导出或在线提供确定性的 OpenAPI 3.0.3 JSON/YAML，并内置 100% 离线预压缩的 Scalar API Reference 文档页（默认 `/.well-known/swagger`）。
 - **Tao Actor 受监督运行时** — 基于 `github.com/sllt/tao/actor` 隔离监督树，统一托管后台 Worker（`AddWorker` 支持 `SuperviseFatal` / `SuperviseRestart` / `SuperviseDegrade`）、防重入 Cron 定时调度（`AddCron`）、具备静态 `AckSemantics` 校验与 Ack/Nack 保护的 Pub/Sub 订阅器，以及服务端/客户端 WebSocket 会话。
 - **统一业务契约与安全边界** — `pkg/pi/apperror` 提供协议无关的业务错误模型，统一映射 HTTP 状态包络、gRPC 状态码与 CLI 退出码，自动对未知 5xx 错误脱敏；`pkg/pi/auth` 在跨协议边界安全传递已验证 `Principal` 主体，自定义认证校验器直接接收完整 `*pi.Context`（支持 `ctx.Header`、受限请求体与 gRPC Metadata）。
@@ -29,13 +30,13 @@
 ### 安装框架主模块
 
 ```bash
-go get github.com/sllt/pi@v0.5.3
+go get github.com/sllt/pi@v0.5.4
 ```
 
 ### 安装 Pi CLI
 
 ```bash
-go install github.com/sllt/pi/cmd/pi@v0.5.3
+go install github.com/sllt/pi/cmd/pi@v0.5.4
 ```
 
 基于 [pi-layout](https://github.com/sllt/pi-layout) 初始化并自动编译验证一个新项目：
@@ -191,12 +192,12 @@ err := app.AddWorker("outbox-relay", pi.WorkerPolicy{
 	MaxRestarts:   5,
 	RestartWindow: time.Minute,
 }, func(ctx *pi.Context) error {
-	return relayOutbox(ctx.Context)
+	return relayOutbox(ctx)
 })
 
 // 防重入 Cron 定时任务，停机时等待在途执行结束后再关闭底层数据源
 err = app.AddCron("0 */5 * * * *", "cleanup-expired-sessions", func(ctx *pi.Context) error {
-	return cleanupSessions(ctx.Context)
+	return cleanupSessions(ctx)
 }, pi.CronJobOptions{
 	Overlap:  pi.CronSkipIfRunning,
 	Location: time.UTC,
@@ -209,13 +210,13 @@ err = app.AddCron("0 */5 * * * *", "cleanup-expired-sessions", func(ctx *pi.Cont
 
 ```go
 var ErrEmailTaken = apperror.New(
-	apperror.KindConflict,
-	"USER_EMAIL_TAKEN",
+	apperror.Conflict,
+	1001,
 	"该邮箱已被注册",
 )
 
 // 业务层执行本人校验或指定管理权限放行
-if err := auth.AuthorizeSubject(ctx, targetUserID, "users:write:any"); err != nil {
+if _, err := auth.AuthorizeSubject(ctx, targetUserID, "users:write:any"); err != nil {
 	return err
 }
 ```
@@ -242,13 +243,46 @@ func TestGreet(t *testing.T) {
 }
 ```
 
+### 6. SSE 流式响应、单二进制 SPA 托管、泛型缓存与幂等中间件
+
+通过一等 `*response.SSE`（`response.NewSSE`，无需 `pi.Meta` 即可自动生成 `text/event-stream` OpenAPI 规范）输出 Server-Sent Events，使用 `StaticFS` 内嵌前端资源，通过零配置 `WithEndpointIdempotency()` 防重放，并使用 `cache.Remember[T]` 合并并发回源：
+
+```go
+// 类型化 SSE 端点（零 pi.Meta 自动推导 text/event-stream，内置心跳保活与停机优雅排空）
+app.GET("/events", func(ctx *pi.Context, _ *EventsReq) (*response.SSE, error) {
+	return response.NewSSE(func(sctx context.Context, sse *response.SSEWriter) error {
+		return sse.SendEvent("ready", map[string]string{"status": "ok"})
+	}, response.WithSSEKeepAlive(15*time.Second)), nil
+})
+
+// 单二进制 SPA 静态托管（内置提取 dist 子目录、默认回退 index.html，自动排除 /api 与 /.well-known）
+app.StaticFS("/", embeddedFS,
+	pi.WithStaticSubDir("dist"),
+	pi.WithSPAFallback(),
+	pi.WithStaticExclude("/api"),
+)
+
+// 单接口级 Idempotency-Key 幂等去重（省略参数时自动使用 app.Redis()，未配置时回退共享内存存储）
+app.POST("/orders", orderHandler.Create, pi.WithEndpointIdempotency())
+
+// 防击穿泛型缓存（统一选项 + Singleflight + TTL 抖动 + 自动 404 负缓存，无需手写 ErrNotFound 转换）
+memCache := cache.NewMemory(
+	cache.WithMaxEntries(5000),
+	cache.WithJitter(0.1),
+	cache.WithNotFoundTTL(30*time.Second),
+)
+order, err := cache.Remember(ctx, memCache, "order:"+id, 5*time.Minute, func(c context.Context) (*Order, error) {
+	return repo.FindByID(c, id)
+})
+```
+
 ---
 
 ## 数据源与独立适配器子模块
 
 常用关系型数据库、Redis、本地文件系统与主流消息队列内置在主模块中；其余 25 个第三方驱动拆分为独立 Go 子模块（统一支持 `FromEnv`、`ConnectContext`、`Shutdown`/`Close` 与 `HealthCheck`），按需引入并通过 `pi.WithAdapter` 挂载，保持业务项目的 `go.mod` 精简干净。
 
-| 类别 | 主模块内置（`github.com/sllt/pi`） | 独立适配器子模块（`@v0.5.3`） |
+| 类别 | 主模块内置（`github.com/sllt/pi`） | 独立适配器子模块（`@v0.5.4`） |
 | --- | --- | --- |
 | **关系型数据库** | MySQL, PostgreSQL, SQLite | `oracle`, `dbresolver` |
 | **键值存储 / 缓存** | Redis | `kv-store/badger`, `kv-store/dynamodb`, `kv-store/nats` |
@@ -262,9 +296,9 @@ func TestGreet(t *testing.T) {
 按统一版本号按需安装独立子模块：
 
 ```bash
-go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.3
-go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.3
-go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.3
+go get github.com/sllt/pi/pkg/pi/datasource/mongo@v0.5.4
+go get github.com/sllt/pi/pkg/pi/datasource/pubsub/nats@v0.5.4
+go get github.com/sllt/pi/pkg/pi/datasource/file/s3@v0.5.4
 ```
 
 ---
@@ -277,6 +311,7 @@ pi/
 ├── pkg/pi/                  # 运行时微内核、泛型适配器注册表、类型化路由与监督树
 │   ├── apperror/            # 协议无关的业务错误模型
 │   ├── auth/                # 已验证 Principal 传递与业务层授权辅助函数
+│   ├── cache/               # 防击穿泛型缓存（Memory / Redis / Tiered）
 │   ├── cli/                 # CLI 子命令与代码模板生成器
 │   ├── config/              # 确定性配置快照加载与敏感字段脱敏
 │   ├── datasource/          # 核心 SQL/Redis/PubSub/File 契约及 25 个独立数据源子模块

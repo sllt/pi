@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -36,8 +37,10 @@ type handler struct {
 }
 
 type handlerResult struct {
-	data any
-	err  error
+	data       any
+	err        error
+	ctx        context.Context
+	streamDone func()
 }
 
 type ErrorLogEntry struct {
@@ -129,6 +132,7 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	piReq := piHTTP.NewRequestWithSnapshotAndLimit(r, validate, snapshotBytes, hasSnapshot, max)
 	snapshotBytes = nil
 	c := newContext(responder, piReq, h.rt)
+	rawReqCtx := r.Context()
 
 	if websocket.IsWebSocketUpgrade(r) {
 		// If the request is a WebSocket upgrade, do not apply the timeout
@@ -159,23 +163,45 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	responseDone := make(chan struct{})
 	defer close(responseDone)
 
+	var (
+		handoffMu sync.Mutex
+		timedOut  bool
+	)
+
 	doneHandler := h.rt.BeginHandlerExecution()
 	go func() {
 		defer doneHandler()
 		defer func() {
-			<-responseDone
 			if r.MultipartForm != nil {
+				<-responseDone
 				_ = r.MultipartForm.RemoveAll()
 			}
 		}()
 		// Buffering lets a late Handler finish even after the response has timed out.
-		results <- h.execute(c, traceID)
+		execRes := h.execute(c, traceID)
+		handoffMu.Lock()
+		if !timedOut && execRes.err == nil && r.Method != http.MethodHead && hasActiveStreamResponse(execRes.data) && h.rt != nil {
+			execRes.streamDone = h.rt.BeginHandlerExecution()
+		}
+		results <- execRes
+		handoffMu.Unlock()
 	}()
 
 	var result handlerResult
 
 	select {
 	case <-requestCtx.Done():
+		handoffMu.Lock()
+		timedOut = true
+		select {
+		case late := <-results:
+			if late.streamDone != nil {
+				late.streamDone()
+			}
+		default:
+		}
+		handoffMu.Unlock()
+
 		// Handle different context cancellation scenarios
 		ctxErr := requestCtx.Err()
 
@@ -188,37 +214,195 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	case result = <-results:
 	}
+	if result.streamDone != nil {
+		defer result.streamDone()
+	}
 	if result.err == nil {
-		result.data = h.guardStream(result.data, traceID)
+		if result.ctx != nil {
+			responder.SetStreamBaseContext(context.WithoutCancel(result.ctx))
+		}
+		result.data = h.guardStream(result.data, traceID, rawReqCtx, result.streamDone)
 	}
 
 	// Handler function completed
 	responder.Respond(result.data, result.err)
 }
 
-// Explicit status envelopes retain the same stream ownership and error logging.
-func (h handler) guardStream(data any, traceID string) any {
+func hasActiveStreamResponse(data any) bool {
 	switch value := data.(type) {
 	case response.Result:
-		value.Data = h.guardStream(value.Data, traceID)
+		if value.StatusCode == http.StatusNoContent {
+			return false
+		}
+		return hasActiveStreamResponse(value.Data)
+	case response.Stream:
+		return value.Run != nil
+	case *response.Stream:
+		return value != nil && value.Run != nil
+	case response.SSE:
+		return value.Run != nil
+	case *response.SSE:
+		return value != nil && value.Run != nil
+	default:
+		return false
+	}
+}
+
+// Explicit status envelopes retain the same stream ownership and error logging.
+func (h handler) guardStream(data any, traceID string, cancelCtx context.Context, streamDone func()) any {
+	switch value := data.(type) {
+	case response.Result:
+		value.Data = h.guardStream(value.Data, traceID, cancelCtx, streamDone)
 		return value
 	case response.Stream:
 		if value.Run == nil {
 			return value
 		}
-		run := value.Run
-		value.Run = func(ctx context.Context, w io.Writer) (err error) {
-			defer func() {
-				if p := recover(); p != nil {
-					err = fmt.Errorf("stream panicked: %v", p)
-				}
-				h.logError(traceID, err)
-			}()
-			return run(ctx, w)
-		}
+		value.Run = h.wrapStreamRunWithCancel(value.Run, traceID, cancelCtx, streamDone)
 		return value
+	case *response.Stream:
+		if value == nil || value.Run == nil {
+			return value
+		}
+		cp := *value
+		cp.Run = h.wrapStreamRunWithCancel(cp.Run, traceID, cancelCtx, streamDone)
+		return &cp
+	case response.SSE:
+		if value.Run == nil {
+			return value
+		}
+		value.Run = h.wrapSSERunWithCancel(value.Run, traceID, cancelCtx, streamDone)
+		return value
+	case *response.SSE:
+		if value == nil || value.Run == nil {
+			return value
+		}
+		cp := *value
+		cp.Run = h.wrapSSERunWithCancel(cp.Run, traceID, cancelCtx, streamDone)
+		return &cp
 	}
 	return data
+}
+
+func (h handler) wrapStreamRun(run func(context.Context, io.Writer) error, traceID string) func(context.Context, io.Writer) error {
+	return h.wrapStreamRunWithCancel(run, traceID, nil, nil)
+}
+
+func (h handler) wrapStreamRunWithCancel(
+	run func(context.Context, io.Writer) error,
+	traceID string,
+	cancelCtx context.Context,
+	streamDone func(),
+) func(context.Context, io.Writer) error {
+	return func(ctx context.Context, w io.Writer) error {
+		return h.runGuardedStream(ctx, traceID, cancelCtx, streamDone, func(streamCtx context.Context) error {
+			return run(streamCtx, w)
+		})
+	}
+}
+
+func (h handler) wrapSSERunWithCancel(
+	run func(context.Context, io.Writer, http.Flusher) error,
+	traceID string,
+	cancelCtx context.Context,
+	streamDone func(),
+) func(context.Context, io.Writer, http.Flusher) error {
+	return func(ctx context.Context, w io.Writer, flusher http.Flusher) error {
+		return h.runGuardedStream(ctx, traceID, cancelCtx, streamDone, func(streamCtx context.Context) error {
+			return run(streamCtx, w, flusher)
+		})
+	}
+}
+
+func (h handler) runGuardedStream(
+	ctx context.Context,
+	traceID string,
+	cancelCtx context.Context,
+	streamDone func(),
+	fn func(context.Context) error,
+) (err error) {
+	if streamDone != nil {
+		defer streamDone()
+	} else if h.rt != nil {
+		doneStream := h.rt.BeginHandlerExecution()
+		defer doneStream()
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	streamCtx := ctx
+	var stopCh <-chan struct{}
+	if h.rt != nil {
+		stopCh = h.rt.StoppingChan()
+	}
+	var cancel context.CancelFunc
+	if stopCh != nil || (cancelCtx != nil && cancelCtx != ctx) {
+		streamCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("stream panicked: %v", p)
+			if h.rt != nil {
+				h.rt.getLogger().Error(panicLog{
+					Error:      fmt.Sprint(p),
+					StackTrace: string(debug.Stack()),
+				})
+			}
+			return
+		}
+		if err != nil && errors.Is(err, context.Canceled) && streamCtx.Err() != nil {
+			return
+		}
+		h.logError(traceID, err)
+	}()
+
+	if cancel != nil {
+		alreadyCanceled := false
+		if stopCh != nil {
+			select {
+			case <-stopCh:
+				cancel()
+				alreadyCanceled = true
+			default:
+			}
+		}
+		if !alreadyCanceled && cancelCtx != nil && cancelCtx != ctx {
+			select {
+			case <-cancelCtx.Done():
+				cancel()
+				alreadyCanceled = true
+			default:
+			}
+		}
+		if !alreadyCanceled {
+			stopWatch := make(chan struct{})
+			var watchDone sync.WaitGroup
+			watchDone.Add(1)
+			var cancelDone <-chan struct{}
+			if cancelCtx != nil && cancelCtx != ctx {
+				cancelDone = cancelCtx.Done()
+			}
+			go func() {
+				defer watchDone.Done()
+				select {
+				case <-stopCh:
+					cancel()
+				case <-cancelDone:
+					cancel()
+				case <-streamCtx.Done():
+				case <-stopWatch:
+				}
+			}()
+			defer func() {
+				close(stopWatch)
+				watchDone.Wait()
+			}()
+		}
+	}
+
+	return fn(streamCtx)
 }
 
 func (h handler) execute(c *Context, traceID string) (result handlerResult) {
@@ -235,6 +419,7 @@ func (h handler) execute(c *Context, traceID string) (result handlerResult) {
 	}()
 
 	result.data, result.err = h.function(c)
+	result.ctx = c.Context
 	h.logError(traceID, result.err)
 
 	return result

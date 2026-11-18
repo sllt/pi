@@ -95,6 +95,8 @@ type App struct {
 	rateLimitMetricsOnce  sync.Once
 	ownedTracerShutdown   func(context.Context) error
 	middlewareClosers     []func() error
+	defaultIdemMu         sync.Mutex
+	defaultIdemStore      *middleware.MemoryIdempotencyStore
 
 	runtimeCtx      context.Context
 	runtimeCancel   context.CancelCauseFunc
@@ -1092,6 +1094,8 @@ func contains(elems []string, v string) bool {
 // server. The `filePath` specifies the directory containing the static files.
 // If `filePath` starts with "./", it will be interpreted as a relative path
 // to the current working directory.
+//
+// Deprecated: Prefer App.StaticFS with embed.FS or os.DirFS.
 func (a *App) AddStaticFiles(endpoint, filePath string) {
 	a.httpRegistered = true
 

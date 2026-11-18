@@ -169,6 +169,33 @@ func (op *CompiledOperation) BuildOpenAPIOperation(sr *SchemaRegistry) *openapi.
 			Description: statusDescription(op.Status),
 			Content:     content,
 		}
+	case ResponseKindStream:
+		content := make(map[string]*openapi.MediaType, len(op.Produces))
+		for _, mt := range op.Produces {
+			schema := &openapi.Schema{Type: "string"}
+			baseMT := strings.ToLower(strings.TrimSpace(strings.SplitN(mt, ";", 2)[0]))
+			if baseMT == "application/octet-stream" {
+				schema.Format = "binary"
+			}
+			content[mt] = &openapi.MediaType{
+				Schema: schema,
+			}
+		}
+		out.Responses[statusKey] = &openapi.Response{
+			Description: statusDescription(op.Status),
+			Content:     content,
+		}
+	case ResponseKindSSE:
+		content := make(map[string]*openapi.MediaType, len(op.Produces))
+		for _, mt := range op.Produces {
+			content[mt] = &openapi.MediaType{
+				Schema: &openapi.Schema{Type: "string"},
+			}
+		}
+		out.Responses[statusKey] = &openapi.Response{
+			Description: statusDescription(op.Status),
+			Content:     content,
+		}
 	default:
 		if op.Status == http.StatusNoContent {
 			out.Responses[statusKey] = &openapi.Response{

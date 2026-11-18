@@ -65,6 +65,8 @@ const (
 	ResponseKindJSON ResponseKind = iota
 	ResponseKindFile
 	ResponseKindXML
+	ResponseKindStream
+	ResponseKindSSE
 )
 
 // CompileOptions supplies group/endpoint inheritance and strict JSON configuration

@@ -87,7 +87,7 @@ func TestInitSkipVerifyAndCommitHashFallback(t *testing.T) {
 	ctx := t.Context()
 	repo := t.TempDir()
 	files := map[string]string{
-		"go.mod":               "module github.com/sllt/pi-layout\n\ngo 1.24.0\n\nrequire github.com/sllt/pi v0.5.3\n",
+		"go.mod":               "module github.com/sllt/pi-layout\n\ngo 1.24.0\n\nrequire github.com/sllt/pi v0.5.4\n",
 		"main.go":              "package main\nfunc main() {}\n",
 		"configs/.env.example": "HTTP_PORT=8000\nJWT_SECRET=replace-with-a-strong-random-secret\n",
 		"storage/.gitkeep":     "",

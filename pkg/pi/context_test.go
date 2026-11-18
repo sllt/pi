@@ -363,3 +363,37 @@ func TestContext_GetCorrelationID(t *testing.T) {
 		assert.Equal(t, expected, correlationID, "Expected empty TraceID when no span present")
 	})
 }
+
+type customHTTPReqProvider struct {
+	noopRequest
+	req *http.Request
+}
+
+func (p customHTTPReqProvider) HTTPRequest() *http.Request {
+	return p.req
+}
+
+func TestContext_Method(t *testing.T) {
+	var nilCtx *Context
+	assert.Equal(t, "", nilCtx.Method())
+
+	emptyCtx := &Context{}
+	assert.Equal(t, "", emptyCtx.Method())
+
+	noopCtx := &Context{Request: noopRequest{ctx: t.Context()}}
+	assert.Equal(t, "", noopCtx.Method())
+
+	var nilPIReq *piHTTP.Request
+	typedNilCtx := &Context{Request: nilPIReq}
+	assert.Equal(t, "", typedNilCtx.Method())
+
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+		req := httptest.NewRequest(method, "/items", http.NoBody)
+		c := &Context{Request: piHTTP.NewRequest(req)}
+		assert.Equal(t, method, c.Method())
+	}
+
+	customReq := httptest.NewRequest(http.MethodPatch, "/items", http.NoBody)
+	customCtx := &Context{Request: customHTTPReqProvider{req: customReq}}
+	assert.Equal(t, http.MethodPatch, customCtx.Method())
+}

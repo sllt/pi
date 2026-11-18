@@ -12,11 +12,11 @@ import (
 type Get{{ .StructName }}Req struct {
 	pi.Meta ` + "`summary:\"Get {{ .StructName }}\"`" + `
 
-	ID string ` + "`path:\"id\" validate:\"required\" dc:\"{{ .StructName }} ID\"`" + `
+	ID int64 ` + "`path:\"id\" validate:\"required,min=1\" dc:\"{{ .StructName }} ID\"`" + `
 }
 
 type Get{{ .StructName }}Res struct {
-	ID        uint      ` + "`json:\"id\"`" + `
+	ID        int64     ` + "`json:\"id\"`" + `
 	CreatedAt time.Time ` + "`json:\"createdAt\"`" + `
 	UpdatedAt time.Time ` + "`json:\"updatedAt\"`" + `
 }
@@ -26,7 +26,7 @@ type Create{{ .StructName }}Req struct {
 }
 
 type Create{{ .StructName }}Res struct {
-	ID uint ` + "`json:\"id\"`" + `
+	ID int64 ` + "`json:\"id\"`" + `
 }
 `
 
@@ -34,13 +34,10 @@ type Create{{ .StructName }}Res struct {
 const handlerTemplate = `package handler
 
 import (
-	"net/http"
-
 	v1 "{{ .ProjectName }}/api/v1"
 	"{{ .ProjectName }}/internal/model"
 	"{{ .ProjectName }}/internal/service"
 	"github.com/sllt/pi/pkg/pi"
-	"github.com/sllt/pi/pkg/pi/apperror"
 )
 
 type {{ .StructName }}Handler struct {
@@ -62,9 +59,6 @@ func (h *{{ .StructName }}Handler) Get{{ .StructName }}(ctx *pi.Context, req *v1
 	item, err := h.{{ .StructNameLowerFirst }}Service.Get{{ .StructName }}(ctx, req.ID)
 	if err != nil {
 		return nil, err
-	}
-	if item == nil {
-		return nil, apperror.New(apperror.NotFound, http.StatusNotFound, "{{ .StructNameLowerFirst }} not found")
 	}
 	return &v1.Get{{ .StructName }}Res{
 		ID:        item.Id,
@@ -111,7 +105,7 @@ import (
 )
 
 type {{ .StructName }}Service interface {
-	Get{{ .StructName }}(ctx context.Context, id string) (*model.{{ .StructName }}, error)
+	Get{{ .StructName }}(ctx context.Context, id int64) (*model.{{ .StructName }}, error)
 	Create{{ .StructName }}(ctx context.Context, {{ .StructNameLowerFirst }} *model.{{ .StructName }}) error
 }
 
@@ -130,7 +124,7 @@ type {{ .StructNameLowerFirst }}Service struct {
 	{{ .StructNameLowerFirst }}Repository repository.{{ .StructName }}Repository
 }
 
-func (s *{{ .StructNameLowerFirst }}Service) Get{{ .StructName }}(ctx context.Context, id string) (*model.{{ .StructName }}, error) {
+func (s *{{ .StructNameLowerFirst }}Service) Get{{ .StructName }}(ctx context.Context, id int64) (*model.{{ .StructName }}, error) {
 	return s.{{ .StructNameLowerFirst }}Repository.Get{{ .StructName }}(ctx, id)
 }
 
@@ -146,13 +140,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
 	"time"
 
 	"{{ .ProjectName }}/internal/model"
+	"github.com/sllt/pi/pkg/pi/apperror"
 )
 
 type {{ .StructName }}Repository interface {
-	Get{{ .StructName }}(ctx context.Context, id string) (*model.{{ .StructName }}, error)
+	Get{{ .StructName }}(ctx context.Context, id int64) (*model.{{ .StructName }}, error)
 	Create{{ .StructName }}(ctx context.Context, {{ .StructNameLowerFirst }} *model.{{ .StructName }}) error
 }
 
@@ -168,7 +164,7 @@ type {{ .StructNameLowerFirst }}Repository struct {
 	*Repository
 }
 
-func (r *{{ .StructNameLowerFirst }}Repository) Get{{ .StructName }}(ctx context.Context, id string) (*model.{{ .StructName }}, error) {
+func (r *{{ .StructNameLowerFirst }}Repository) Get{{ .StructName }}(ctx context.Context, id int64) (*model.{{ .StructName }}, error) {
 	var {{ .StructNameLowerFirst }} model.{{ .StructName }}
 	q := r.GetQuerier(ctx)
 	err := q.Select(ctx, &{{ .StructNameLowerFirst }},
@@ -177,7 +173,7 @@ func (r *{{ .StructNameLowerFirst }}Repository) Get{{ .StructName }}(ctx context
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
+			return nil, apperror.New(apperror.NotFound, http.StatusNotFound, "{{ .StructNameLowerFirst }} not found")
 		}
 		return nil, err
 	}
@@ -200,7 +196,7 @@ func (r *{{ .StructNameLowerFirst }}Repository) Create{{ .StructName }}(ctx cont
 
 	id, err := result.LastInsertId()
 	if err == nil {
-		{{ .StructNameLowerFirst }}.Id = uint(id)
+		{{ .StructNameLowerFirst }}.Id = id
 	}
 
 	return nil
@@ -213,7 +209,7 @@ const modelTemplate = `package model
 import "time"
 
 type {{ .StructName }} struct {
-	Id        uint      ` + "`db:\"id\"`" + `
+	Id        int64     ` + "`db:\"id\"`" + `
 	CreatedAt time.Time ` + "`db:\"created_at\"`" + `
 	UpdatedAt time.Time ` + "`db:\"updated_at\"`" + `
 }

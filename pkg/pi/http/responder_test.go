@@ -1066,3 +1066,296 @@ func TestRequestRawBodyLimitAndRelease(t *testing.T) {
 	assert.Equal(t, http.NoBody, reqRel.Body)
 	assert.Same(t, mf, reqRel.MultipartForm)
 }
+
+type unwrappedTestResponseWriter struct {
+	inner     *httptest.ResponseRecorder
+	flushes   int
+	writeHook func()
+}
+
+func (u *unwrappedTestResponseWriter) Header() http.Header {
+	return u.inner.Header()
+}
+
+func (u *unwrappedTestResponseWriter) Write(p []byte) (int, error) {
+	if u.writeHook != nil {
+		u.writeHook()
+	}
+	return u.inner.Write(p)
+}
+
+func (u *unwrappedTestResponseWriter) WriteHeader(code int) {
+	u.inner.WriteHeader(code)
+}
+
+func (u *unwrappedTestResponseWriter) Flush() {
+	u.flushes++
+	u.inner.Flush()
+}
+
+func (u *unwrappedTestResponseWriter) Unwrap() http.ResponseWriter {
+	return u.inner
+}
+
+type wrappingOnlyResponseWriter struct {
+	inner http.ResponseWriter
+}
+
+func (w *wrappingOnlyResponseWriter) Header() http.Header {
+	return w.inner.Header()
+}
+
+func (w *wrappingOnlyResponseWriter) Write(p []byte) (int, error) {
+	return w.inner.Write(p)
+}
+
+func (w *wrappingOnlyResponseWriter) WriteHeader(code int) {
+	w.inner.WriteHeader(code)
+}
+
+func (w *wrappingOnlyResponseWriter) Unwrap() http.ResponseWriter {
+	return w.inner
+}
+
+func TestResponder_StreamPointerHeadersFlushAndSSE(t *testing.T) {
+	t.Run("non_nil_pointer_stream_with_headers_and_immediate_flush", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		var flushedBeforeRun bool
+		var sawFlusher, sawRC bool
+
+		inner := &unwrappedTestResponseWriter{inner: rec}
+		wrapped := &wrappingOnlyResponseWriter{inner: inner}
+		NewResponder(wrapped, http.MethodPost).Respond(&resTypes.Stream{
+			StatusCode: http.StatusAccepted,
+			Headers: map[string]string{
+				"X-Stream":     "yes",
+				"content-type": "text/plain; charset=utf-8",
+				"":             "ignored",
+				"X-Empty":      "",
+			},
+			Run: func(ctx context.Context, w io.Writer) error {
+				flushedBeforeRun = rec.Flushed
+				if f, ok := w.(http.Flusher); ok {
+					sawFlusher = true
+					f.Flush()
+				}
+				if rw, ok := w.(http.ResponseWriter); ok {
+					if err := http.NewResponseController(rw).Flush(); err == nil {
+						sawRC = true
+					}
+				}
+				_, err := io.WriteString(w, "chunk-1")
+				return err
+			},
+		}, nil)
+
+		assert.True(t, flushedBeforeRun, "headers must be flushed before Stream.Run executes")
+		assert.True(t, sawFlusher, "stream writer must implement http.Flusher")
+		assert.True(t, sawRC, "stream writer must support http.NewResponseController")
+		assert.Equal(t, 4, inner.flushes, "expected initial header flush + explicit flushes + auto-flush on Write")
+		assert.Equal(t, http.StatusAccepted, rec.Code)
+		assert.Equal(t, "text/plain; charset=utf-8", rec.Header().Get("Content-Type"))
+		assert.Equal(t, "yes", rec.Header().Get("X-Stream"))
+		assert.Empty(t, rec.Header().Get("X-Empty"))
+		assert.Equal(t, "chunk-1", rec.Body.String())
+	})
+
+	t.Run("nil_pointer_stream_falls_through_safely", func(t *testing.T) {
+		var nilStream *resTypes.Stream
+		rec := httptest.NewRecorder()
+		r := NewResponder(rec, http.MethodGet)
+		assert.Equal(t, http.StatusOK, r.getStatusCodeForSpecialResponse(nilStream, nil))
+		r.Respond(nilStream, nil)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+		assert.JSONEq(t, `{"code":0,"data":null,"message":"ok"}`, rec.Body.String())
+	})
+
+	t.Run("non_nil_pointer_stream_nil_run_returns_500", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		NewResponder(rec, http.MethodGet).Respond(&resTypes.Stream{StatusCode: http.StatusCreated, Run: nil}, nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	})
+
+	t.Run("new_sse_get_and_head", func(t *testing.T) {
+		recGet := httptest.NewRecorder()
+		sseStream := resTypes.NewSSE(
+			func(ctx context.Context, sse *resTypes.SSEWriter) error {
+				return sse.Send(resTypes.SSEEvent{ID: "1", Event: "msg", Data: "hello"})
+			},
+			resTypes.WithSSEKeepAlive(0),
+			resTypes.WithSSEHeaders(map[string]string{"X-Custom": "sse"}),
+		)
+		NewResponder(recGet, http.MethodGet).Respond(sseStream, nil)
+		assert.Equal(t, http.StatusOK, recGet.Code)
+		assert.Equal(t, "text/event-stream; charset=utf-8", recGet.Header().Get("Content-Type"))
+		assert.Equal(t, "no-cache, no-transform", recGet.Header().Get("Cache-Control"))
+		assert.Empty(t, recGet.Header().Get("Connection"))
+		assert.Equal(t, "no", recGet.Header().Get("X-Accel-Buffering"))
+		assert.Equal(t, "sse", recGet.Header().Get("X-Custom"))
+		assert.True(t, recGet.Flushed)
+		assert.Equal(t, "id: 1\nevent: msg\ndata: hello\n\n", recGet.Body.String())
+
+		called := false
+		recHead := httptest.NewRecorder()
+		NewResponder(recHead, http.MethodHead).Respond(resTypes.NewSSE(func(ctx context.Context, sse *resTypes.SSEWriter) error {
+			called = true
+			return sse.SendData("ignored")
+		}), nil)
+		assert.False(t, called)
+		assert.Equal(t, http.StatusOK, recHead.Code)
+		assert.Equal(t, "text/event-stream; charset=utf-8", recHead.Header().Get("Content-Type"))
+		assert.Empty(t, recHead.Body.Bytes())
+	})
+
+	t.Run("raw_sse_value_and_pointer_defaults_and_nil_guards", func(t *testing.T) {
+		recPost := httptest.NewRecorder()
+		var gotFlusher bool
+		NewResponder(recPost, http.MethodPost).Respond(resTypes.SSE{
+			Run: func(ctx context.Context, w io.Writer, flusher http.Flusher) error {
+				gotFlusher = flusher != nil
+				_, err := io.WriteString(w, "data: post-sse\n\n")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return err
+			},
+		}, nil)
+		assert.True(t, gotFlusher)
+		assert.Equal(t, http.StatusOK, recPost.Code)
+		assert.Equal(t, "text/event-stream; charset=utf-8", recPost.Header().Get("Content-Type"))
+		assert.Equal(t, "data: post-sse\n\n", recPost.Body.String())
+
+		var nilSSE *resTypes.SSE
+		recNil := httptest.NewRecorder()
+		NewResponder(recNil, http.MethodGet).Respond(nilSSE, nil)
+		assert.Equal(t, http.StatusOK, recNil.Code)
+		assert.Equal(t, "application/json", recNil.Header().Get("Content-Type"))
+		assert.JSONEq(t, `{"code":0,"data":null,"message":"ok"}`, recNil.Body.String())
+
+		recNilRun := httptest.NewRecorder()
+		NewResponder(recNilRun, http.MethodGet).Respond(&resTypes.SSE{Run: nil}, nil)
+		assert.Equal(t, http.StatusInternalServerError, recNilRun.Code)
+		assert.Equal(t, "application/json", recNilRun.Header().Get("Content-Type"))
+	})
+
+	t.Run("set_stream_base_context_reaches_stream_and_sse", func(t *testing.T) {
+		type ctxKey string
+		const k ctxKey = "mw-key"
+
+		req := httptest.NewRequest(http.MethodGet, "/events", http.NoBody)
+		rec := httptest.NewRecorder()
+		resp := NewResponderForRequest(rec, req, LegacyStatus)
+		resp.SetStreamBaseContext(context.WithValue(context.Background(), k, "mw-val"))
+
+		var gotVal any
+		resp.Respond(resTypes.NewSSE(func(ctx context.Context, sse *resTypes.SSEWriter) error {
+			gotVal = ctx.Value(k)
+			return sse.SendData("ok")
+		}, resTypes.WithSSEKeepAlive(0)), nil)
+
+		assert.Equal(t, "mw-val", gotVal)
+	})
+}
+
+func TestResponder_RawReplayAndSetHeader(t *testing.T) {
+	t.Run("preserves_outer_vary_and_request_id_and_uses_canonical_headers", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		rec.Header().Set("X-Request-ID", "fresh-req-id")
+		rec.Header().Set("Vary", "Origin")
+
+		NewResponder(rec, http.MethodPost).Respond(RawReplay{
+			StatusCode: http.StatusCreated,
+			Headers: http.Header{
+				"content-type": {"application/json"},
+				"Vary":         {"Origin, Accept-Encoding"},
+				"X-Custom":     {"v1", "v2"},
+			},
+			Body: []byte(`{"id":"ord-1"}` + "\n"),
+		}, nil)
+
+		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Equal(t, "fresh-req-id", rec.Header().Get("X-Request-ID"))
+		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+		assert.Equal(t, []string{"Origin", "Accept-Encoding"}, rec.Header().Values("Vary"))
+		assert.Equal(t, []string{"v1", "v2"}, rec.Header().Values("X-Custom"))
+		assert.Equal(t, `{"id":"ord-1"}`+"\n", rec.Body.String())
+	})
+
+	t.Run("pointer_raw_replay_and_nil_pointer", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		NewResponder(rec, http.MethodPost).Respond(&RawReplay{
+			StatusCode: http.StatusAccepted,
+			Headers:    map[string][]string{"Content-Type": {"text/plain"}},
+			Body:       []byte("ptr-ok"),
+		}, nil)
+		assert.Equal(t, http.StatusAccepted, rec.Code)
+		assert.Equal(t, "text/plain", rec.Header().Get("Content-Type"))
+		assert.Equal(t, "ptr-ok", rec.Body.String())
+
+		var nilReplay *RawReplay
+		recNil := httptest.NewRecorder()
+		NewResponder(recNil, http.MethodGet).Respond(nilReplay, nil)
+		assert.Equal(t, http.StatusOK, recNil.Code)
+		assert.JSONEq(t, `{"code":0,"data":null,"message":"ok"}`, recNil.Body.String())
+	})
+
+	t.Run("suppresses_body_on_204_304_and_head_while_preserving_headers", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			method string
+			status int
+		}{
+			{name: "204_no_content", method: http.MethodDelete, status: http.StatusNoContent},
+			{name: "304_not_modified", method: http.MethodGet, status: http.StatusNotModified},
+			{name: "head_200", method: http.MethodHead, status: http.StatusOK},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				NewResponder(rec, tc.method).Respond(RawReplay{
+					StatusCode: tc.status,
+					Headers: http.Header{
+						"X-Idempotent-Replay": {"true"},
+						"Content-Type":        {"application/json"},
+					},
+					Body: []byte(`{"should":"not-be-written"}`),
+				}, nil)
+
+				assert.Equal(t, tc.status, rec.Code)
+				assert.Equal(t, "true", rec.Header().Get("X-Idempotent-Replay"))
+				assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+				assert.Empty(t, rec.Body.Bytes())
+			})
+		}
+	})
+
+	t.Run("zero_status_falls_back_to_policy_status", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r := NewResponder(rec, http.MethodPost)
+		assert.Equal(t, http.StatusCreated, r.getStatusCodeForSpecialResponse(RawReplay{Body: []byte("ok")}, nil))
+		r.Respond(RawReplay{
+			Headers: http.Header{"Content-Type": {"text/plain"}},
+			Body:    []byte("ok"),
+		}, nil)
+		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Equal(t, "text/plain", rec.Header().Get("Content-Type"))
+		assert.Equal(t, "ok", rec.Body.String())
+	})
+
+	t.Run("set_header_guards_nil_and_empty_key", func(t *testing.T) {
+		var nilResp *Responder
+		require.NotPanics(t, func() {
+			nilResp.SetHeader("X-Test", "1")
+			(&Responder{}).SetHeader("X-Test", "1")
+		})
+
+		rec := httptest.NewRecorder()
+		resp := NewResponder(rec, http.MethodGet)
+		resp.SetHeader("", "ignored")
+		resp.SetHeader("X-Idempotent-Replayed", "false")
+		resp.Respond("ok", nil)
+		assert.Equal(t, "false", rec.Header().Get("X-Idempotent-Replayed"))
+		assert.Empty(t, rec.Header().Get(""))
+	})
+}

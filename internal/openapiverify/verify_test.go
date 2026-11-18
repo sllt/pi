@@ -1144,3 +1144,122 @@ func TestVerifyUnifiedRoutingMultipartFileXMLAndHeadOptions(t *testing.T) {
 		t.Fatalf("GET /rss.xml status=%d ct=%q body=%q", recRSS.Code, recRSS.Header().Get("Content-Type"), recRSS.Body.String())
 	}
 }
+
+func TestVerifyTypedStreamAndSSEOpenAPIParity(t *testing.T) {
+	type sseReq struct {
+		Topic string `query:"topic" default:"all"`
+	}
+	type binStreamReq struct {
+		pi.Meta `summary:"Binary stream"`
+	}
+
+	app := newVerifyApp(t)
+	app.GET("/events", func(ctx *pi.Context, req *sseReq) (*response.SSE, error) {
+		return response.NewSSE(func(_ context.Context, sse *response.SSEWriter) error {
+			return sse.Send(response.SSEEvent{ID: "1", Event: "topic", Data: req.Topic})
+		}, response.WithSSEKeepAlive(0)), nil
+	})
+	app.HEAD("/events", func(ctx *pi.Context, req *sseReq) (*response.SSE, error) {
+		return response.NewSSE(func(_ context.Context, sse *response.SSEWriter) error {
+			return sse.SendData("never-sent")
+		}, response.WithSSEKeepAlive(0)), nil
+	})
+	app.GET("/stream", func(ctx *pi.Context, _ *binStreamReq) (*response.Stream, error) {
+		return &response.Stream{
+			Run: func(_ context.Context, w io.Writer) error {
+				_, err := io.WriteString(w, "raw-bytes")
+				return err
+			},
+		}, nil
+	})
+
+	if err := app.RouteError(); err != nil {
+		t.Fatalf("RouteError failed: %v", err)
+	}
+
+	jsonBytes, err := app.OpenAPIJSON()
+	if err != nil {
+		t.Fatalf("OpenAPIJSON failed: %v", err)
+	}
+	yamlBytes, err := app.OpenAPIYAML()
+	if err != nil {
+		t.Fatalf("OpenAPIYAML failed: %v", err)
+	}
+
+	jsonDoc := loadAndValidateDoc(t, jsonBytes)
+	yamlDoc := loadAndValidateDoc(t, yamlBytes)
+
+	for _, doc := range []*openapi3.T{jsonDoc, yamlDoc} {
+		if doc.Components != nil && doc.Components.Schemas != nil {
+			if _, leaked := doc.Components.Schemas["Stream"]; leaked {
+				t.Fatalf("response.Stream must not appear in components.schemas")
+			}
+			if _, leaked := doc.Components.Schemas["SSE"]; leaked {
+				t.Fatalf("response.SSE must not appear in components.schemas")
+			}
+		}
+
+		eventsOp := operationFor(t, doc, "/events", http.MethodGet)
+		resp200 := eventsOp.Responses.Value("200")
+		if resp200 == nil || resp200.Value == nil {
+			t.Fatalf("missing 200 response on GET /events")
+		}
+		mtSSE := resp200.Value.Content.Get("text/event-stream")
+		if mtSSE == nil || mtSSE.Schema == nil || mtSSE.Schema.Value == nil {
+			t.Fatalf("missing text/event-stream schema on GET /events")
+		}
+		if !mtSSE.Schema.Value.Type.Is("string") || mtSSE.Schema.Value.Format != "" {
+			t.Fatalf("expected type=string format=\"\" for text/event-stream, got type=%v format=%q", mtSSE.Schema.Value.Type, mtSSE.Schema.Value.Format)
+		}
+		_ = operationFor(t, doc, "/events", http.MethodHead)
+
+		streamOp := operationFor(t, doc, "/stream", http.MethodGet)
+		stream200 := streamOp.Responses.Value("200")
+		if stream200 == nil || stream200.Value == nil {
+			t.Fatalf("missing 200 response on GET /stream")
+		}
+		mtBin := stream200.Value.Content.Get("application/octet-stream")
+		if mtBin == nil || mtBin.Schema == nil || mtBin.Schema.Value == nil {
+			t.Fatalf("missing application/octet-stream schema on GET /stream")
+		}
+		if !mtBin.Schema.Value.Type.Is("string") || mtBin.Schema.Value.Format != "binary" {
+			t.Fatalf("expected type=string format=binary for /stream, got type=%v format=%q", mtBin.Schema.Value.Type, mtBin.Schema.Value.Format)
+		}
+	}
+
+	recSSE := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/events?topic=orders", nil))
+	if recSSE.Code != http.StatusOK ||
+		recSSE.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" ||
+		recSSE.Header().Get("Cache-Control") != "no-cache, no-transform" ||
+		recSSE.Header().Get("Connection") != "" ||
+		recSSE.Body.String() != "id: 1\nevent: topic\ndata: orders\n\n" {
+		t.Fatalf("GET /events unexpected response: status=%d hdr=%v body=%q", recSSE.Code, recSSE.Header(), recSSE.Body.String())
+	}
+
+	recHead := testkit.Request(t, app, httptest.NewRequest(http.MethodHead, "/events", nil))
+	if recHead.Code != http.StatusOK ||
+		recHead.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" ||
+		recHead.Body.Len() != 0 {
+		t.Fatalf("HEAD /events unexpected response: status=%d ct=%q len=%d", recHead.Code, recHead.Header().Get("Content-Type"), recHead.Body.Len())
+	}
+
+	recBin := testkit.Request(t, app, httptest.NewRequest(http.MethodGet, "/stream", nil))
+	if recBin.Code != http.StatusOK ||
+		recBin.Header().Get("Content-Type") != "application/octet-stream" ||
+		recBin.Body.String() != "raw-bytes" {
+		t.Fatalf("GET /stream unexpected response: status=%d ct=%q body=%q", recBin.Code, recBin.Header().Get("Content-Type"), recBin.Body.String())
+	}
+
+	t.Run("rejects_incompatible_explicit_produces_on_sse", func(t *testing.T) {
+		type badSSEReq struct {
+			pi.Meta `produces:"application/json"`
+		}
+		badApp := newVerifyApp(t)
+		badApp.GET("/bad-sse", func(_ *pi.Context, _ *badSSEReq) (*response.SSE, error) {
+			return response.NewSSE(func(_ context.Context, _ *response.SSEWriter) error { return nil }), nil
+		})
+		if err := badApp.RouteError(); err == nil {
+			t.Fatalf("expected RouteError for *response.SSE with produces:\"application/json\"")
+		}
+	})
+}

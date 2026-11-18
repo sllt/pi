@@ -218,6 +218,12 @@ func (op *CompiledOperation) WrapResponse(resPtr any, err error) (any, error) {
 	if op.ResponseKind == ResponseKindXML {
 		return op.wrapXMLResponse(resPtr)
 	}
+	if op.ResponseKind == ResponseKindStream {
+		return op.wrapStreamResponse(resPtr)
+	}
+	if op.ResponseKind == ResponseKindSSE {
+		return op.wrapSSEResponse(resPtr)
+	}
 	if op.Status == http.StatusNoContent {
 		return resTypes.NoContent(), nil
 	}
@@ -284,6 +290,83 @@ func (op *CompiledOperation) wrapXMLResponse(resPtr any) (any, error) {
 		val.ContentType = resolvedCT
 	} else {
 		val.ContentType = ct
+	}
+	return resTypes.Result{StatusCode: op.Status, Data: val}, nil
+}
+
+func (op *CompiledOperation) wrapStreamResponse(resPtr any) (any, error) {
+	streamPtr, ok := resPtr.(*resTypes.Stream)
+	if !ok || streamPtr == nil {
+		return nil, fmt.Errorf("typed handler %s returned nil *response.Stream without error", op.HandlerName)
+	}
+	if streamPtr.Run == nil {
+		return nil, fmt.Errorf("typed handler %s returned *response.Stream with nil Run callback", op.HandlerName)
+	}
+	val := *streamPtr
+	if val.StatusCode != 0 && val.StatusCode != op.Status {
+		return nil, fmt.Errorf("typed handler %s returned *response.Stream with StatusCode %d, expected 0 or %d", op.HandlerName, val.StatusCode, op.Status)
+	}
+	val.StatusCode = op.Status
+
+	ct := strings.TrimSpace(val.ContentType)
+	if ct == "" {
+		var hdrErr error
+		ct, hdrErr = lookupHeaderContentType(val.Headers)
+		if hdrErr != nil {
+			return nil, fmt.Errorf("typed handler %s returned *response.Stream with %w", op.HandlerName, hdrErr)
+		}
+	}
+	resolvedCT, err := op.validateAndResolveResponseContentType(ct, "application/octet-stream")
+	if err != nil {
+		return nil, err
+	}
+	val.ContentType = resolvedCT
+	return resTypes.Result{StatusCode: op.Status, Data: val}, nil
+}
+
+func (op *CompiledOperation) wrapSSEResponse(resPtr any) (any, error) {
+	ssePtr, ok := resPtr.(*resTypes.SSE)
+	if !ok || ssePtr == nil {
+		return nil, fmt.Errorf("typed handler %s returned nil *response.SSE without error", op.HandlerName)
+	}
+	if ssePtr.Run == nil {
+		return nil, fmt.Errorf("typed handler %s returned *response.SSE with nil Run callback", op.HandlerName)
+	}
+	val := *ssePtr
+	if len(ssePtr.Headers) > 0 {
+		cloned := make(map[string]string, len(ssePtr.Headers))
+		for k, v := range ssePtr.Headers {
+			cloned[k] = v
+		}
+		val.Headers = cloned
+	}
+
+	ct, hdrErr := lookupHeaderContentType(val.Headers)
+	if hdrErr != nil {
+		return nil, fmt.Errorf("typed handler %s returned *response.SSE with %w", op.HandlerName, hdrErr)
+	}
+	if ct != "" {
+		_, actualMT, actualParams, err := parseAndValidateMediaRange(ct, false)
+		if err != nil {
+			return nil, fmt.Errorf("typed handler %s returned invalid Content-Type %q: %w", op.HandlerName, ct, err)
+		}
+		if !mediaRangeMatches(actualMT, actualParams, "text/event-stream") {
+			return nil, fmt.Errorf("typed handler %s returned Content-Type %q which is incompatible with *response.SSE", op.HandlerName, ct)
+		}
+	}
+	resolvedCT, err := op.validateAndResolveResponseContentType(ct, "text/event-stream; charset=utf-8")
+	if err != nil {
+		return nil, err
+	}
+	if ct == "" {
+		if val.Headers == nil {
+			val.Headers = make(map[string]string, 1)
+		}
+		if !op.hasExplicitProduces {
+			val.Headers["Content-Type"] = "text/event-stream; charset=utf-8"
+		} else {
+			val.Headers["Content-Type"] = resolvedCT
+		}
 	}
 	return resTypes.Result{StatusCode: op.Status, Data: val}, nil
 }

@@ -26,6 +26,8 @@ func Test_NewMockLogger(t *testing.T) {
 
 		logger.Debug("DEBUG Log")
 		logger.Debugf("Debug Log with Format Value: %v", "debugf")
+
+		logger.Info("multi", "args")
 	})
 
 	assert.Contains(t, logs, "INFO Log")
@@ -42,6 +44,8 @@ func Test_NewMockLogger(t *testing.T) {
 
 	assert.Contains(t, logs, "DEBUG Log")
 	assert.Contains(t, logs, "Debug Log with Format Value: debugf")
+	assert.Contains(t, logs, "[multi args]\n")
+	assert.NotContains(t, logs, "EXTRA")
 }
 
 func Test_NewMockLoggerErrorLogs(t *testing.T) {
@@ -50,8 +54,12 @@ func Test_NewMockLoggerErrorLogs(t *testing.T) {
 
 		logger.Error("ERROR Log")
 		logger.Errorf("error Log with Format Value: %v", "errorf")
+		logger.Fatal("FATAL Log")
+		logger.Fatalf("fatal Log with Format Value: %v", "fatalf")
 	})
 
 	assert.Contains(t, logs, "ERROR Log")
 	assert.Contains(t, logs, "error Log with Format Value: errorf")
+	assert.Contains(t, logs, "FATAL Log")
+	assert.Contains(t, logs, "fatal Log with Format Value: fatalf")
 }

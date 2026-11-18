@@ -12,6 +12,7 @@ import (
 
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/contract"
+	"github.com/sllt/pi/pkg/pi/http/middleware"
 )
 
 // Meta is embedded anonymously as the top-level field of a typed request DTO
@@ -138,13 +139,26 @@ type typedEndpointConfig struct {
 	maxBodyBytes   int64
 	piMWs          []PiMiddleware
 	httpMWs        []func(http.Handler) http.Handler
+	closers        []func() error
 	doc            docConfig
 	hasEndpointDoc bool
 	strictOverride *bool
+	hasIdempotency bool
+	idempotencyCfg middleware.IdempotencyConfig
+	idempotencyPos int
 }
 
 // EndpointOption configures per-endpoint runtime and OpenAPI behavior on route registration.
 type EndpointOption func(*typedEndpointConfig) error
+
+func withEndpointCloser(fn func() error) EndpointOption {
+	return func(cfg *typedEndpointConfig) error {
+		if fn != nil {
+			cfg.closers = append(cfg.closers, fn)
+		}
+		return nil
+	}
+}
 
 // WithEndpointTimeout sets a per-endpoint request timeout overriding the global REQUEST_TIMEOUT.
 func WithEndpointTimeout(d time.Duration) EndpointOption {
@@ -309,6 +323,10 @@ func Register[Req, Res any](
 			return err
 		}
 	}
+	app.resolveEndpointIdempotency(&epCfg)
+	for _, c := range epCfg.closers {
+		app.registerMiddlewareCloser(c)
+	}
 
 	cand := typedBindCandidate{
 		handlerName: runtimeFuncName(fn),
@@ -457,6 +475,7 @@ func (g *RouteGroup) addUnifiedRoute(method, pattern string, rawHandler any, opt
 				return g
 			}
 		}
+		g.app.resolveEndpointIdempotency(&epCfg)
 		if legacyFn, matched, isNil := matchLegacyHandler(rawHandler); matched && !isNil && !epCfg.hasEndpointDoc && epCfg.strictOverride == nil {
 			idx := len(g.node.routes)
 			g.node.routes = append(g.node.routes, RouteDef{
@@ -493,6 +512,10 @@ func (g *RouteGroup) addUnifiedRoute(method, pattern string, rawHandler any, opt
 			g.app.recordRouteErrorLocked(err)
 			return g
 		}
+	}
+	g.app.resolveEndpointIdempotency(&epCfg)
+	for _, c := range epCfg.closers {
+		g.app.registerMiddlewareCloser(c)
 	}
 
 	switch th := rawHandler.(type) {
@@ -979,7 +1002,7 @@ func (a *App) syncAndValidateRoutesLocked(checkSecuritySchemes bool) error {
 	walkGroupNodesLocked(reg.root, "", docConfig{}, func(node *GroupNode, fullPrefix string, _ docConfig) {
 		for i, rd := range node.routes {
 			meta := node.routeMetaAt(i)
-			if meta != nil && meta.isSystem {
+			if meta != nil && meta.isSystem && meta.staticHandler == nil {
 				continue
 			}
 
@@ -990,6 +1013,13 @@ func (a *App) syncAndValidateRoutesLocked(checkSecuritySchemes bool) error {
 				canonicalPath = op.CanonicalPath
 				shape = op.ConflictShape
 				source = "typed route " + meta.typed.handlerName
+			} else if meta != nil && meta.staticHandler != nil {
+				method = strings.ToUpper(strings.TrimSpace(rd.Method))
+				canonicalPath, shape = contract.NormalizeRouteConflict(fullPrefix, method, rd.Pattern)
+				source = fmt.Sprintf("static FS route %s %s", method, canonicalPath)
+				if a.hasOpenAPIConfig && a.openAPI.ServeUI && a.openAPI.UIPath != "" && isDirectChildRoute(a.openAPI.UIPath, canonicalPath) {
+					errs = append(errs, fmt.Errorf("%s conflicts with OpenAPI UI asset route GET %s", source, swaggerAssetRoutePattern(a.openAPI.UIPath)))
+				}
 			} else {
 				method = strings.ToUpper(strings.TrimSpace(rd.Method))
 				canonicalPath, shape = contract.NormalizeRouteConflict(fullPrefix, method, rd.Pattern)
@@ -1074,7 +1104,7 @@ func (a *App) buildRouteIndexLocked() (shapes map[string]routeConflictEntry, opI
 	walkGroupNodesLocked(a.httpServer.registry.root, "", docConfig{}, func(node *GroupNode, fullPrefix string, _ docConfig) {
 		for i, rd := range node.routes {
 			meta := node.routeMetaAt(i)
-			if meta != nil && meta.isSystem {
+			if meta != nil && meta.isSystem && meta.staticHandler == nil {
 				continue
 			}
 
@@ -1100,6 +1130,10 @@ func (a *App) buildRouteIndexLocked() (shapes map[string]routeConflictEntry, opI
 						source:        source,
 					}
 				}
+			} else if meta != nil && meta.staticHandler != nil {
+				method = strings.ToUpper(strings.TrimSpace(rd.Method))
+				canonicalPath, shape = contract.NormalizeRouteConflict(fullPrefix, method, rd.Pattern)
+				source = fmt.Sprintf("static FS route %s %s", method, canonicalPath)
 			} else {
 				method = strings.ToUpper(strings.TrimSpace(rd.Method))
 				canonicalPath, shape = contract.NormalizeRouteConflict(fullPrefix, method, rd.Pattern)

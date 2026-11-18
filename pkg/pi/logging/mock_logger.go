@@ -22,7 +22,7 @@ func NewMockLogger(level Level) Logger {
 	}
 }
 
-func (m *MockLogger) logf(level Level, format string, args ...any) {
+func (m *MockLogger) targetWriter(level Level) (io.Writer, bool) {
 	m.mu.RLock()
 	currLevel := m.level
 	out := m.out
@@ -30,31 +30,45 @@ func (m *MockLogger) logf(level Level, format string, args ...any) {
 	m.mu.RUnlock()
 
 	if level < currLevel {
-		return
+		return nil, false
 	}
 
-	if level == ERROR {
+	if level >= ERROR {
 		out = errOut
 	}
+	return out, true
+}
 
-	var message any
-
-	switch {
-	case len(args) == 1 && format == "":
-		message = args[0]
-	case len(args) != 1 && format == "":
-		message = args
-	case format != "":
-		message = fmt.Sprintf(format, args...)
-	}
-
+func (m *MockLogger) writeMessage(out io.Writer, message any) {
 	m.mu.Lock()
 	fmt.Fprintf(out, "%v\n", message)
 	m.mu.Unlock()
 }
 
+func (m *MockLogger) logArgs(level Level, args ...any) {
+	out, ok := m.targetWriter(level)
+	if !ok {
+		return
+	}
+	var message any
+	if len(args) == 1 {
+		message = args[0]
+	} else {
+		message = args
+	}
+	m.writeMessage(out, message)
+}
+
+func (m *MockLogger) logf(level Level, format string, args ...any) {
+	out, ok := m.targetWriter(level)
+	if !ok {
+		return
+	}
+	m.writeMessage(out, fmt.Sprintf(format, args...))
+}
+
 func (m *MockLogger) Debug(args ...any) {
-	m.logf(DEBUG, "%v", args...) // Add "%v" formatting directive
+	m.logArgs(DEBUG, args...)
 }
 
 func (m *MockLogger) Debugf(format string, args ...any) {
@@ -62,7 +76,7 @@ func (m *MockLogger) Debugf(format string, args ...any) {
 }
 
 func (m *MockLogger) Info(args ...any) {
-	m.logf(INFO, "%v", args...) // Add "%v" formatting directive
+	m.logArgs(INFO, args...)
 }
 
 func (m *MockLogger) Infof(format string, args ...any) {
@@ -70,7 +84,7 @@ func (m *MockLogger) Infof(format string, args ...any) {
 }
 
 func (m *MockLogger) Notice(args ...any) {
-	m.logf(NOTICE, "%v", args...) // Add "%v" formatting directive
+	m.logArgs(NOTICE, args...)
 }
 
 func (m *MockLogger) Noticef(format string, args ...any) {
@@ -78,7 +92,7 @@ func (m *MockLogger) Noticef(format string, args ...any) {
 }
 
 func (m *MockLogger) Warn(args ...any) {
-	m.logf(WARN, "%v", args...)
+	m.logArgs(WARN, args...)
 }
 
 func (m *MockLogger) Warnf(format string, args ...any) {
@@ -86,7 +100,7 @@ func (m *MockLogger) Warnf(format string, args ...any) {
 }
 
 func (m *MockLogger) Error(args ...any) {
-	m.logf(ERROR, "%v", args...)
+	m.logArgs(ERROR, args...)
 }
 
 func (m *MockLogger) Errorf(format string, args ...any) {
@@ -94,7 +108,7 @@ func (m *MockLogger) Errorf(format string, args ...any) {
 }
 
 func (m *MockLogger) Fatal(args ...any) {
-	m.logf(FATAL, "%v", args...)
+	m.logArgs(FATAL, args...)
 }
 
 func (m *MockLogger) Fatalf(format string, args ...any) {
@@ -102,7 +116,7 @@ func (m *MockLogger) Fatalf(format string, args ...any) {
 }
 
 func (m *MockLogger) Log(args ...any) {
-	m.logf(INFO, "%v", args...)
+	m.logArgs(INFO, args...)
 }
 
 func (m *MockLogger) Logf(format string, args ...any) {

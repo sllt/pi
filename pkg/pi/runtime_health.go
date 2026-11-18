@@ -32,6 +32,8 @@ type kernelHealthState struct {
 	inFlight        map[string]*inFlightHealthCall
 	activeHandlers  int
 	handlersIdleCh  chan struct{}
+	stoppingCh      chan struct{}
+	stoppingClosed  bool
 }
 
 func newKernelHealthState() *kernelHealthState {
@@ -40,6 +42,7 @@ func newKernelHealthState() *kernelHealthState {
 		admissionCtx:    admCtx,
 		admissionCancel: admCancel,
 		inFlight:        make(map[string]*inFlightHealthCall),
+		stoppingCh:      make(chan struct{}),
 	}
 }
 
@@ -182,6 +185,46 @@ func (k *runtimeKernel) WaitHandlersAll() {
 		return
 	}
 	<-k.healthState.handlersIdleChan()
+}
+
+func (k *runtimeKernel) MarkStopping() {
+	if k == nil || k.healthState == nil {
+		return
+	}
+	hs := k.healthState
+	hs.mu.Lock()
+	if !hs.stoppingClosed {
+		if hs.stoppingCh == nil {
+			hs.stoppingCh = make(chan struct{})
+		}
+		close(hs.stoppingCh)
+		hs.stoppingClosed = true
+	}
+	hs.mu.Unlock()
+}
+
+func (k *runtimeKernel) ResetStoppingChan() {
+	if k == nil || k.healthState == nil {
+		return
+	}
+	hs := k.healthState
+	hs.mu.Lock()
+	if hs.stoppingCh == nil || hs.stoppingClosed {
+		hs.stoppingCh = make(chan struct{})
+		hs.stoppingClosed = false
+	}
+	hs.mu.Unlock()
+}
+
+func (k *runtimeKernel) StoppingChan() <-chan struct{} {
+	if k == nil || k.healthState == nil {
+		return nil
+	}
+	hs := k.healthState
+	hs.mu.Lock()
+	ch := hs.stoppingCh
+	hs.mu.Unlock()
+	return ch
 }
 
 func downHealthDetails(err error, timedOut bool) map[string]any {

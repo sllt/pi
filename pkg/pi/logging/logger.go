@@ -66,8 +66,12 @@ type logEntry struct {
 	PiVersion string    `json:"piVersion"`
 }
 
+func (l *logger) logArgs(level Level, args ...any) {
+	l.logArgsWithSkip(3, level, "", args...)
+}
+
 func (l *logger) logf(level Level, format string, args ...any) {
-	l.logfWithSkip(3, level, format, args...)
+	l.logfWithSkip(3, level, "", format, args...)
 }
 
 func resolveCaller(skip int) (string, int, bool) {
@@ -93,34 +97,39 @@ func resolveCaller(skip int) (string, int, bool) {
 	return "", 0, false
 }
 
-func (l *logger) logfWithSkip(skip int, level Level, format string, args ...any) {
+func (l *logger) shouldLog(level Level) (showCaller bool, out, errorOut io.Writer, isTerminal, ok bool) {
 	l.mu.RLock()
 	currLevel := l.level
-	showCaller := l.showCaller
+	showCaller = l.showCaller
 	normalOut := l.normalOut
-	errorOut := l.errorOut
-	isTerminal := l.isTerminal
+	errorOut = l.errorOut
+	isTerminal = l.isTerminal
 	l.mu.RUnlock()
 
 	if level < currLevel {
 		if level == FATAL {
-			if f, ok := errorOut.(*os.File); ok {
+			if f, isFile := errorOut.(*os.File); isFile {
 				_ = f.Sync()
 			}
 			//nolint:revive // exit status is 1 as it denotes failure as signified by Fatal log
 			os.Exit(1)
 		}
-		return
+		return false, nil, nil, false, false
 	}
 
-	out := normalOut
+	out = normalOut
 	if level >= ERROR {
 		out = errorOut
 	}
+	return showCaller, out, errorOut, isTerminal, true
+}
 
+func (l *logger) emitEntry(skip int, level Level, traceID string, showCaller bool, out, errorOut io.Writer, isTerminal bool, message any) {
 	entry := logEntry{
 		Level:     level,
 		Time:      time.Now(),
+		TraceID:   traceID,
+		Message:   message,
 		PiVersion: version.Framework,
 	}
 
@@ -129,18 +138,6 @@ func (l *logger) logfWithSkip(skip int, level Level, format string, args ...any)
 		if file, line, ok := resolveCaller(skip); ok {
 			entry.Caller = fmt.Sprintf("%s:%d", filepath.Base(file), line)
 		}
-	}
-
-	traceID, filteredArgs := extractTraceIDAndFilterArgs(args)
-	entry.TraceID = traceID
-
-	switch {
-	case len(filteredArgs) == 1 && format == "":
-		entry.Message = filteredArgs[0]
-	case len(filteredArgs) != 1 && format == "":
-		entry.Message = filteredArgs
-	case format != "":
-		entry.Message = fmt.Sprintf(format, filteredArgs...)
 	}
 
 	if isTerminal {
@@ -160,8 +157,30 @@ func (l *logger) logfWithSkip(skip int, level Level, format string, args ...any)
 	}
 }
 
+func (l *logger) logArgsWithSkip(skip int, level Level, traceID string, args ...any) {
+	showCaller, out, errorOut, isTerminal, ok := l.shouldLog(level)
+	if !ok {
+		return
+	}
+	var message any
+	if len(args) == 1 {
+		message = args[0]
+	} else {
+		message = args
+	}
+	l.emitEntry(skip, level, traceID, showCaller, out, errorOut, isTerminal, message)
+}
+
+func (l *logger) logfWithSkip(skip int, level Level, traceID string, format string, args ...any) {
+	showCaller, out, errorOut, isTerminal, ok := l.shouldLog(level)
+	if !ok {
+		return
+	}
+	l.emitEntry(skip, level, traceID, showCaller, out, errorOut, isTerminal, fmt.Sprintf(format, args...))
+}
+
 func (l *logger) Debug(args ...any) {
-	l.logf(DEBUG, "", args...)
+	l.logArgs(DEBUG, args...)
 }
 
 func (l *logger) Debugf(format string, args ...any) {
@@ -169,7 +188,7 @@ func (l *logger) Debugf(format string, args ...any) {
 }
 
 func (l *logger) Info(args ...any) {
-	l.logf(INFO, "", args...)
+	l.logArgs(INFO, args...)
 }
 
 func (l *logger) Infof(format string, args ...any) {
@@ -177,7 +196,7 @@ func (l *logger) Infof(format string, args ...any) {
 }
 
 func (l *logger) Notice(args ...any) {
-	l.logf(NOTICE, "", args...)
+	l.logArgs(NOTICE, args...)
 }
 
 func (l *logger) Noticef(format string, args ...any) {
@@ -185,7 +204,7 @@ func (l *logger) Noticef(format string, args ...any) {
 }
 
 func (l *logger) Warn(args ...any) {
-	l.logf(WARN, "", args...)
+	l.logArgs(WARN, args...)
 }
 
 func (l *logger) Warnf(format string, args ...any) {
@@ -193,7 +212,7 @@ func (l *logger) Warnf(format string, args ...any) {
 }
 
 func (l *logger) Log(args ...any) {
-	l.logf(INFO, "", args...)
+	l.logArgs(INFO, args...)
 }
 
 func (l *logger) Logf(format string, args ...any) {
@@ -201,7 +220,7 @@ func (l *logger) Logf(format string, args ...any) {
 }
 
 func (l *logger) Error(args ...any) {
-	l.logf(ERROR, "", args...)
+	l.logArgs(ERROR, args...)
 }
 
 func (l *logger) Errorf(format string, args ...any) {
@@ -209,27 +228,11 @@ func (l *logger) Errorf(format string, args ...any) {
 }
 
 func (l *logger) Fatal(args ...any) {
-	l.logf(FATAL, "", args...)
-
-	// Flush output before exiting
-	if f, ok := l.errorOut.(*os.File); ok {
-		_ = f.Sync() // Ignore sync error as we're about to exit
-	}
-
-	//nolint:revive // exit status is 1 as it denotes failure as signified by Fatal log
-	os.Exit(1)
+	l.logArgs(FATAL, args...)
 }
 
 func (l *logger) Fatalf(format string, args ...any) {
 	l.logf(FATAL, format, args...)
-
-	// Flush output before exiting
-	if f, ok := l.errorOut.(*os.File); ok {
-		_ = f.Sync() // Ignore sync error as we're about to exit
-	}
-
-	//nolint:revive // exit status is 1 as it denotes failure as signified by Fatal log
-	os.Exit(1)
 }
 
 func (l *logger) prettyPrint(e *logEntry, out io.Writer) {
@@ -394,23 +397,29 @@ func GetLogLevelForError(err error) Level {
 	return level
 }
 
-// extractTraceIDAndFilterArgs checks if any of the arguments contain a trace ID
-// under the key "__trace_id__" and returns the extracted trace ID along with
-// the remaining arguments excluding the trace metadata.
-func extractTraceIDAndFilterArgs(args []any) (traceID string, filtered []any) {
-	filtered = make([]any, 0, len(args))
+type noopLogger struct{}
 
-	for _, arg := range args {
-		if m, ok := arg.(map[string]any); ok {
-			if tid, exists := m["__trace_id__"].(string); exists && traceID == "" {
-				traceID = tid
+func (noopLogger) Debug(...any)                                    {}
+func (noopLogger) Debugf(string, ...any)                           {}
+func (noopLogger) Log(...any)                                      {}
+func (noopLogger) Logf(string, ...any)                             {}
+func (noopLogger) Info(...any)                                     {}
+func (noopLogger) Infof(string, ...any)                            {}
+func (noopLogger) Notice(...any)                                   {}
+func (noopLogger) Noticef(string, ...any)                          {}
+func (noopLogger) Warn(...any)                                     {}
+func (noopLogger) Warnf(string, ...any)                            {}
+func (noopLogger) Error(...any)                                    {}
+func (noopLogger) Errorf(string, ...any)                           {}
+func (noopLogger) Fatal(...any)                                    {}
+func (noopLogger) Fatalf(string, ...any)                           {}
+func (noopLogger) ChangeLevel(Level)                               {}
+func (noopLogger) logArgsWithSkip(int, Level, string, ...any)      {}
+func (noopLogger) logfWithSkip(int, Level, string, string, ...any) {}
 
-				continue
-			}
-		}
+var defaultNoopLogger Logger = noopLogger{}
 
-		filtered = append(filtered, arg)
-	}
-
-	return traceID, filtered
+// Noop returns a zero-allocation singleton Logger that discards all log output.
+func Noop() Logger {
+	return defaultNoopLogger
 }

@@ -167,8 +167,15 @@ func TestCompileOperation_MetaPathAndConflictRules(t *testing.T) {
 			pi.Meta `path:"/x" method:"POST"`
 			F       *resTypes.File `json:"f"`
 		}
+		type nestedStreamInReq struct {
+			pi.Meta `path:"/x" method:"POST"`
+			S       *resTypes.Stream `json:"s"`
+		}
 		type nestedXMLInRes struct {
 			X *resTypes.XML `json:"x"`
+		}
+		type nestedStreamInRes struct {
+			S *resTypes.Stream `json:"s"`
 		}
 
 		cases := []struct {
@@ -185,11 +192,12 @@ func TestCompileOperation_MetaPathAndConflictRules(t *testing.T) {
 			{"nil_req_type", nil, reflect.TypeOf((*emptyRes)(nil))},
 			{"non_ptr_req_type", reflect.TypeOf(okReq{}), reflect.TypeOf((*emptyRes)(nil))},
 			{"forbidden_res_result", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Result)(nil))},
-			{"forbidden_res_stream", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Stream)(nil))},
 			{"nested_file_in_req", reflect.TypeOf((*nestedFileInReq)(nil)), reflect.TypeOf((*emptyRes)(nil))},
+			{"nested_stream_in_req", reflect.TypeOf((*nestedStreamInReq)(nil)), reflect.TypeOf((*emptyRes)(nil))},
 			{"forbidden_res_raw", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Raw)(nil))},
 			{"forbidden_res_template", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Template)(nil))},
 			{"nested_xml_in_res", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*nestedXMLInRes)(nil))},
+			{"nested_stream_in_res", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*nestedStreamInRes)(nil))},
 			{"forbidden_res_redirect", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Redirect)(nil))},
 			{"forbidden_res_response", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Response)(nil))},
 			{"forbidden_res_handled", reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*resTypes.Handled)(nil))},
@@ -3036,5 +3044,285 @@ func TestResponseFileAndXMLContracts(t *testing.T) {
 			}, contract.NewSchemaRegistry())
 			assert.Error(t, err, "expected compile error for request type %v", reqT)
 		}
+	})
+}
+
+func TestResponseStreamContracts(t *testing.T) {
+	noopRun := func(context.Context, io.Writer) error { return nil }
+
+	t.Run("compile_time_stream_restrictions", func(t *testing.T) {
+		type stream204 struct {
+			pi.Meta `path:"/s" method:"GET" status:"204"`
+		}
+		type streamNullable struct {
+			pi.Meta `path:"/s" method:"GET" nullable:"true"`
+		}
+		type streamBadProduces struct {
+			pi.Meta `path:"/s" method:"GET" produces:"event-stream"`
+		}
+		type anonStreamReq struct{ resTypes.Stream }
+		type ignoredStreamReq struct {
+			S *resTypes.Stream `json:"-"`
+		}
+		type anonStreamRes struct{ resTypes.Stream }
+		type ignoredStreamRes struct {
+			S *resTypes.Stream `json:"-"`
+		}
+		type okReq struct {
+			pi.Meta `path:"/s" method:"GET"`
+		}
+
+		for _, tc := range []struct {
+			req reflect.Type
+			res reflect.Type
+		}{
+			{reflect.TypeOf((*stream204)(nil)), reflect.TypeOf((*resTypes.Stream)(nil))},
+			{reflect.TypeOf((*streamNullable)(nil)), reflect.TypeOf((*resTypes.Stream)(nil))},
+			{reflect.TypeOf((*streamBadProduces)(nil)), reflect.TypeOf((*resTypes.Stream)(nil))},
+			{reflect.TypeOf((*anonStreamReq)(nil)), reflect.TypeOf((*emptyRes)(nil))},
+			{reflect.TypeOf((*ignoredStreamReq)(nil)), reflect.TypeOf((*emptyRes)(nil))},
+			{reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*anonStreamRes)(nil))},
+			{reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*ignoredStreamRes)(nil))},
+		} {
+			_, err := contract.CompileOperation("h", tc.req, tc.res, contract.CompileOptions{}, contract.NewSchemaRegistry())
+			assert.Error(t, err)
+		}
+	})
+
+	t.Run("default_stream_without_produces_allows_custom_sse_stream_and_octet_stream", func(t *testing.T) {
+		type streamReq struct{}
+		op, sr := compileOp[streamReq, resTypes.Stream](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/stream",
+		})
+		assert.Equal(t, contract.ResponseKindStream, op.ResponseKind)
+		assert.Equal(t, []string{"application/octet-stream"}, op.Produces)
+		assert.Empty(t, sr.Schemas())
+
+		oasOp := op.BuildOpenAPIOperation(sr)
+		mt := oasOp.Responses["200"].Content["application/octet-stream"]
+		require.NotNil(t, mt)
+		assert.Equal(t, "string", mt.Schema.Type)
+		assert.Equal(t, "binary", mt.Schema.Format)
+		assert.Empty(t, sr.Schemas())
+
+		sharedStream := &resTypes.Stream{
+			ContentType: "text/event-stream; charset=utf-8",
+			Headers:     map[string]string{"Cache-Control": "no-cache"},
+			Run:         noopRun,
+		}
+		wrappedSSE, err := op.WrapResponse(sharedStream, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 0, sharedStream.StatusCode)
+		sseVal, ok := wrappedSSE.(resTypes.Result).Data.(resTypes.Stream)
+		require.True(t, ok)
+		assert.Equal(t, 200, sseVal.StatusCode)
+		assert.Equal(t, "text/event-stream; charset=utf-8", sseVal.ContentType)
+		assert.Equal(t, "no-cache", sseVal.Headers["Cache-Control"])
+
+		wrappedDefault, err := op.WrapResponse(&resTypes.Stream{Run: noopRun}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "application/octet-stream", wrappedDefault.(resTypes.Result).Data.(resTypes.Stream).ContentType)
+	})
+
+	t.Run("explicit_sse_produces_validation_and_openapi", func(t *testing.T) {
+		type sseReq struct {
+			pi.Meta `produces:"text/event-stream, application/octet-stream" summary:"Event stream"`
+		}
+		op, sr := compileOp[sseReq, resTypes.Stream](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/events",
+		})
+		assert.Equal(t, contract.ResponseKindStream, op.ResponseKind)
+		assert.Equal(t, []string{"text/event-stream", "application/octet-stream"}, op.Produces)
+
+		oasOp := op.BuildOpenAPIOperation(sr)
+		mtSSE := oasOp.Responses["200"].Content["text/event-stream"]
+		require.NotNil(t, mtSSE)
+		assert.Equal(t, "string", mtSSE.Schema.Type)
+		assert.Empty(t, mtSSE.Schema.Format)
+
+		mtBin := oasOp.Responses["200"].Content["application/octet-stream"]
+		require.NotNil(t, mtBin)
+		assert.Equal(t, "string", mtBin.Schema.Type)
+		assert.Equal(t, "binary", mtBin.Schema.Format)
+		assert.Empty(t, sr.Schemas())
+
+		// Stream with charset parameter matches produces:"text/event-stream".
+		wrapped, err := op.WrapResponse(&resTypes.Stream{
+			ContentType: "text/event-stream; charset=utf-8",
+			Run:         noopRun,
+		}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "text/event-stream; charset=utf-8", wrapped.(resTypes.Result).Data.(resTypes.Stream).ContentType)
+
+		// Empty ContentType with Headers["content-type"] works.
+		wrappedHdr, err := op.WrapResponse(&resTypes.Stream{
+			Headers: map[string]string{"content-type": "text/event-stream"},
+			Run:     noopRun,
+		}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "text/event-stream", wrappedHdr.(resTypes.Result).Data.(resTypes.Stream).ContentType)
+
+		// Nil pointer, nil Run, mismatched status, mismatched ContentType, conflicting headers all fail.
+		_, err = op.WrapResponse((*resTypes.Stream)(nil), nil)
+		require.Error(t, err)
+
+		_, err = op.WrapResponse(&resTypes.Stream{Run: nil}, nil)
+		require.Error(t, err)
+
+		_, err = op.WrapResponse(&resTypes.Stream{StatusCode: http.StatusCreated, Run: noopRun}, nil)
+		require.Error(t, err)
+
+		_, err = op.WrapResponse(&resTypes.Stream{ContentType: "application/json", Run: noopRun}, nil)
+		require.Error(t, err)
+
+		_, err = op.WrapResponse(&resTypes.Stream{
+			Headers: map[string]string{
+				"Content-Type": "text/event-stream",
+				"content-type": "application/octet-stream",
+			},
+			Run: noopRun,
+		}, nil)
+		require.Error(t, err)
+	})
+}
+
+func TestResponseSSEContracts(t *testing.T) {
+	noopSSERun := func(context.Context, io.Writer, http.Flusher) error { return nil }
+
+	t.Run("compile_time_sse_restrictions", func(t *testing.T) {
+		type sse204 struct {
+			pi.Meta `path:"/events" method:"GET" status:"204"`
+		}
+		type sseNullable struct {
+			pi.Meta `path:"/events" method:"GET" nullable:"true"`
+		}
+		type sseBadProduces struct {
+			pi.Meta `path:"/events" method:"GET" produces:"event-stream"`
+		}
+		type sseJSONProduces struct {
+			pi.Meta `path:"/events" method:"GET" produces:"application/json"`
+		}
+		type sseMixedProduces struct {
+			pi.Meta `path:"/events" method:"GET" produces:"text/event-stream, application/json"`
+		}
+		type anonSSEReq struct{ resTypes.SSE }
+		type ignoredSSEReq struct {
+			S *resTypes.SSE `json:"-"`
+		}
+		type anonSSERes struct{ resTypes.SSE }
+		type ignoredSSERes struct {
+			S *resTypes.SSE `json:"-"`
+		}
+		type okReq struct {
+			pi.Meta `path:"/events" method:"GET"`
+		}
+
+		for _, tc := range []struct {
+			req reflect.Type
+			res reflect.Type
+		}{
+			{reflect.TypeOf((*sse204)(nil)), reflect.TypeOf((*resTypes.SSE)(nil))},
+			{reflect.TypeOf((*sseNullable)(nil)), reflect.TypeOf((*resTypes.SSE)(nil))},
+			{reflect.TypeOf((*sseBadProduces)(nil)), reflect.TypeOf((*resTypes.SSE)(nil))},
+			{reflect.TypeOf((*sseJSONProduces)(nil)), reflect.TypeOf((*resTypes.SSE)(nil))},
+			{reflect.TypeOf((*sseMixedProduces)(nil)), reflect.TypeOf((*resTypes.SSE)(nil))},
+			{reflect.TypeOf((*anonSSEReq)(nil)), reflect.TypeOf((*emptyRes)(nil))},
+			{reflect.TypeOf((*ignoredSSEReq)(nil)), reflect.TypeOf((*emptyRes)(nil))},
+			{reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*anonSSERes)(nil))},
+			{reflect.TypeOf((*okReq)(nil)), reflect.TypeOf((*ignoredSSERes)(nil))},
+		} {
+			_, err := contract.CompileOperation("h", tc.req, tc.res, contract.CompileOptions{}, contract.NewSchemaRegistry())
+			assert.Error(t, err, "expected compile error for req=%v res=%v", tc.req, tc.res)
+		}
+	})
+
+	t.Run("zero_meta_sse_defaults_produces_text_event_stream_and_string_schema", func(t *testing.T) {
+		type sseNoMetaReq struct {
+			Topic string `query:"topic" default:"all"`
+		}
+		op, sr := compileOp[sseNoMetaReq, resTypes.SSE](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/events",
+		})
+		assert.Equal(t, contract.ResponseKindSSE, op.ResponseKind)
+		assert.Equal(t, []string{"text/event-stream"}, op.Produces)
+		assert.Empty(t, sr.Schemas())
+
+		oasOp := op.BuildOpenAPIOperation(sr)
+		mt := oasOp.Responses["200"].Content["text/event-stream"]
+		require.NotNil(t, mt)
+		assert.Equal(t, "string", mt.Schema.Type)
+		assert.Empty(t, mt.Schema.Format)
+		assert.Empty(t, sr.Schemas())
+
+		sharedSSE := resTypes.NewSSE(func(ctx context.Context, sse *resTypes.SSEWriter) error {
+			return sse.SendData("hi")
+		})
+		wrappedSSE, err := op.WrapResponse(sharedSSE, nil)
+		require.NoError(t, err)
+		resVal, ok := wrappedSSE.(resTypes.Result)
+		require.True(t, ok)
+		assert.Equal(t, http.StatusOK, resVal.StatusCode)
+		sseVal, ok := resVal.Data.(resTypes.SSE)
+		require.True(t, ok)
+		assert.Equal(t, "text/event-stream; charset=utf-8", sseVal.Headers["Content-Type"])
+		assert.Equal(t, "no-cache, no-transform", sseVal.Headers["Cache-Control"])
+		assert.NotContains(t, sseVal.Headers, "Connection")
+
+		wrappedDirect, err := op.WrapResponse(&resTypes.SSE{Run: noopSSERun}, nil)
+		require.NoError(t, err)
+		directSSE := wrappedDirect.(resTypes.Result).Data.(resTypes.SSE)
+		assert.Equal(t, "text/event-stream; charset=utf-8", directSSE.Headers["Content-Type"])
+
+		// WrapResponse runtime validation errors.
+		_, err = op.WrapResponse((*resTypes.SSE)(nil), nil)
+		require.Error(t, err)
+
+		_, err = op.WrapResponse(&resTypes.SSE{Run: nil}, nil)
+		require.Error(t, err)
+
+		_, err = op.WrapResponse(&resTypes.SSE{
+			Headers: map[string]string{"Content-Type": "application/json"},
+			Run:     noopSSERun,
+		}, nil)
+		require.Error(t, err)
+
+		_, err = op.WrapResponse(&resTypes.SSE{
+			Headers: map[string]string{
+				"Content-Type": "text/event-stream",
+				"content-type": "text/event-stream; charset=utf-8",
+			},
+			Run: noopSSERun,
+		}, nil)
+		require.Error(t, err)
+	})
+
+	t.Run("explicit_compatible_sse_produces", func(t *testing.T) {
+		type sseWithMetaReq struct {
+			pi.Meta `produces:"text/event-stream; charset=utf-8" summary:"Typed SSE"`
+		}
+		op, sr := compileOp[sseWithMetaReq, resTypes.SSE](t, contract.CompileOptions{
+			HasExplicitRoute: true,
+			ExplicitMethod:   http.MethodGet,
+			ExplicitPattern:  "/sse-meta",
+		})
+		assert.Equal(t, contract.ResponseKindSSE, op.ResponseKind)
+		assert.Equal(t, []string{"text/event-stream; charset=utf-8"}, op.Produces)
+
+		oasOp := op.BuildOpenAPIOperation(sr)
+		mt := oasOp.Responses["200"].Content["text/event-stream; charset=utf-8"]
+		require.NotNil(t, mt)
+		assert.Equal(t, "string", mt.Schema.Type)
+		assert.Empty(t, mt.Schema.Format)
+		assert.Empty(t, sr.Schemas())
+
+		wrapped, err := op.WrapResponse(resTypes.NewSSE(func(context.Context, *resTypes.SSEWriter) error { return nil }), nil)
+		require.NoError(t, err)
+		assert.Equal(t, "text/event-stream; charset=utf-8", wrapped.(resTypes.Result).Data.(resTypes.SSE).Headers["Content-Type"])
 	})
 }
