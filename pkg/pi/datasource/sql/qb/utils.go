@@ -17,7 +17,62 @@ var (
 	errInvalidJSONPathValue    = errors.New(`[builder] json path cannot be empty`)
 	errUnsupportedJSONType     = errors.New(`[builder] json value contains unsupported type`)
 	errUnsupportedJSONMapKey   = errors.New(`[builder] json object map key must be string`)
+	errNilExecutor             = errors.New(`[builder] query executor is nil`)
 )
+
+// QueryRowExecutor executes a single-row SQL query. Both sql.Client and *sql.Tx
+// (as well as *stdsql.DB and *stdsql.Tx) satisfy this interface.
+type QueryRowExecutor interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// Aggregate executes an aggregate query against any QueryRowExecutor (such as app.SQL() or *sql.Tx).
+// If exec implements DialectProvider, its dialect is detected automatically.
+func Aggregate(ctx context.Context, exec QueryRowExecutor, table string, where map[string]interface{}, aggregate interface{}) (ResultResolver, error) {
+	if exec == nil {
+		return resultResolve{0}, errNilExecutor
+	}
+	if dp, ok := exec.(DialectProvider); ok {
+		if d := strings.TrimSpace(dp.Dialect()); d != "" {
+			b, err := New(d)
+			if err != nil {
+				return resultResolve{0}, err
+			}
+			return b.Aggregate(ctx, exec, table, where, aggregate)
+		}
+	}
+	return defaultBuilder.Aggregate(ctx, exec, table, where, aggregate)
+}
+
+// Aggregate executes an aggregate query using the builder's dialect.
+func (b Builder) Aggregate(ctx context.Context, exec QueryRowExecutor, table string, where map[string]interface{}, aggregate interface{}) (ResultResolver, error) {
+	if exec == nil {
+		return resultResolve{0}, errNilExecutor
+	}
+	symbol, err := resolveAggregateSymbol(aggregate)
+	if err != nil {
+		return resultResolve{0}, err
+	}
+
+	cond, vals, err := b.BuildSelect(table, where, []string{symbol})
+	if err != nil {
+		return resultResolve{0}, err
+	}
+
+	row := exec.QueryRowContext(ctx, cond, vals...)
+	if row == nil {
+		return resultResolve{0}, errNilExecutor
+	}
+
+	var result interface{}
+	if err := row.Scan(&result); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return resultResolve{nil}, nil
+		}
+		return resultResolve{0}, err
+	}
+	return resultResolve{result}, nil
+}
 
 // AggregateQuery is a helper function to execute the aggregate query and return the result
 func AggregateQuery(ctx context.Context, db *sql.DB, table string, where map[string]interface{}, aggregate interface{}) (ResultResolver, error) {

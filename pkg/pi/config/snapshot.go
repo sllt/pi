@@ -58,6 +58,11 @@ func (s *Snapshot) GetOrDefault(k, d string) string {
 	}
 	return d
 }
+
+// Env reads key from the Snapshot as a zero-allocation Value.
+func (s *Snapshot) Env(key string) Value {
+	return Value(s.Get(key))
+}
 func (s *Snapshot) Values() map[string]string {
 	m := map[string]string{}
 	if s != nil {

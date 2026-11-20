@@ -71,6 +71,12 @@ func (r *Responder) SetStreamBaseContext(ctx context.Context) {
 func (r Responder) Respond(data any, err error) {
 	if err != nil {
 		data = nil
+		var hr HeaderResponder
+		if errors.As(err, &hr) && !isNilAny(hr) {
+			for k, v := range hr.ResponseHeaders() {
+				r.SetHeader(k, v)
+			}
+		}
 	}
 	if result, ok := data.(resTypes.Result); ok {
 		switch result.StatusCode {
@@ -563,6 +569,12 @@ type CodeResponder interface {
 	Code() int
 }
 
+// HeaderResponder allows errors to specify HTTP response headers applied when writing
+// the error response on the ServeHTTP goroutine.
+type HeaderResponder interface {
+	ResponseHeaders() map[string]string
+}
+
 // isNil checks if the given any value is nil.
 // It returns true if the value is nil or if it is a pointer that points to nil.
 func isNil(i any) bool {
@@ -573,4 +585,17 @@ func isNil(i any) bool {
 	v := reflect.ValueOf(i)
 
 	return v.Kind() == reflect.Ptr && v.IsNil()
+}
+
+func isNilAny(i any) bool {
+	if i == nil {
+		return true
+	}
+	v := reflect.ValueOf(i)
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+		return v.IsNil()
+	default:
+		return false
+	}
 }

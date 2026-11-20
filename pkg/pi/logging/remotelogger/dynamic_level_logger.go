@@ -172,6 +172,62 @@ type remoteLogger struct {
 	wg          sync.WaitGroup
 }
 
+var _ logging.StructuredLogger = (*remoteLogger)(nil)
+
+// Unwrap returns the underlying logging.Logger wrapped by this remoteLogger.
+func (r *remoteLogger) Unwrap() logging.Logger {
+	if r == nil {
+		return nil
+	}
+	return r.Logger
+}
+
+func (r *remoteLogger) structuredTarget() logging.StructuredLogger {
+	if r == nil || r.Logger == nil {
+		return nil
+	}
+	if sl, ok := r.Logger.(logging.StructuredLogger); ok {
+		return sl
+	}
+	return logging.WithContext(nil, r.Logger)
+}
+
+// With returns an immutable *logging.ContextLogger deriving from this logger with the given fields.
+func (r *remoteLogger) With(kv ...any) *logging.ContextLogger {
+	if r == nil {
+		return logging.WithContext(nil, nil).With(kv...)
+	}
+	return logging.WithContext(nil, r).With(kv...)
+}
+
+// Debugw logs a structured debug message with key-value fields.
+func (r *remoteLogger) Debugw(msg string, kv ...any) {
+	if sl := r.structuredTarget(); sl != nil {
+		sl.Debugw(msg, kv...)
+	}
+}
+
+// Infow logs a structured info message with key-value fields.
+func (r *remoteLogger) Infow(msg string, kv ...any) {
+	if sl := r.structuredTarget(); sl != nil {
+		sl.Infow(msg, kv...)
+	}
+}
+
+// Warnw logs a structured warn message with key-value fields.
+func (r *remoteLogger) Warnw(msg string, kv ...any) {
+	if sl := r.structuredTarget(); sl != nil {
+		sl.Warnw(msg, kv...)
+	}
+}
+
+// Errorw logs a structured error message with key-value fields.
+func (r *remoteLogger) Errorw(msg string, kv ...any) {
+	if sl := r.structuredTarget(); sl != nil {
+		sl.Errorw(msg, kv...)
+	}
+}
+
 func (r *remoteLogger) acquireLoopContext() (context.Context, bool) {
 	r.lifecycleMu.Lock()
 	defer r.lifecycleMu.Unlock()
@@ -207,6 +263,9 @@ func (r *remoteLogger) Close() error {
 
 // SetShowCaller delegates to the underlying logger if it supports CallerConfigurer.
 func (r *remoteLogger) SetShowCaller(show bool) {
+	if r == nil {
+		return
+	}
 	if cc, ok := r.Logger.(logging.CallerConfigurer); ok {
 		cc.SetShowCaller(show)
 	}

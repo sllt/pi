@@ -2,6 +2,7 @@ package qb
 
 import (
 	"context"
+	"database/sql"
 	"math"
 	"reflect"
 	"strconv"
@@ -853,4 +854,65 @@ func TestOrAndCustomJsonContains(t *testing.T) {
 	ass.Equal(v, v1)
 	ass.NoError(err)
 
+}
+
+type dialectQueryRowExecutor struct {
+	*sql.DB
+	dialect string
+}
+
+func (d dialectQueryRowExecutor) Dialect() string {
+	return d.dialect
+}
+
+func TestAggregate_WithQueryRowExecutorAndTx(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// 1. Plain *sql.DB satisfies QueryRowExecutor
+	mock.ExpectQuery("SELECT count(*) FROM posts WHERE (status=?)").
+		WithArgs("published").
+		WillReturnRows(sqlmock.NewRows([]string{"count(*)"}).AddRow(7))
+
+	res, err := Aggregate(ctx, db, "posts", map[string]interface{}{"status": "published"}, AggregateCount("*"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), res.Int64())
+
+	// 2. DialectProvider auto-detects postgres ($1)
+	mock.ExpectQuery("SELECT sum(views) FROM posts WHERE (author_id=$1)").
+		WithArgs(42).
+		WillReturnRows(sqlmock.NewRows([]string{"sum(views)"}).AddRow(123))
+
+	res, err = Aggregate(ctx, dialectQueryRowExecutor{DB: db, dialect: "postgres"}, "posts", map[string]interface{}{"author_id": 42}, AggregateSum("views"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(123), res.Int64())
+
+	// 3. *sql.Tx satisfies QueryRowExecutor
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+
+	mock.ExpectQuery("SELECT count(*) FROM posts").
+		WillReturnRows(sqlmock.NewRows([]string{"count(*)"}).AddRow(3))
+
+	res, err = Aggregate(ctx, tx, "posts", nil, AggregateCount("*"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), res.Int64())
+
+	// 4. sql.ErrNoRows yields 0 without error
+	mock.ExpectQuery("SELECT sum(views) FROM posts").
+		WillReturnError(sql.ErrNoRows)
+
+	res, err = Aggregate(ctx, db, "posts", nil, AggregateSum("views"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), res.Int64())
+
+	// 5. Nil executor rejected
+	_, err = Aggregate(ctx, nil, "posts", nil, AggregateCount("*"))
+	require.ErrorIs(t, err, errNilExecutor)
+
+	require.NoError(t, mock.ExpectationsWereMet())
 }

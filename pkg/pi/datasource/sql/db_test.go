@@ -1246,7 +1246,7 @@ func TestDB_sendOperationStats_RecordsMilliseconds(t *testing.T) {
 		"hostname", "host", "database", "db", "type", "SELECT",
 	)
 
-	db.sendOperationStats(start, "SELECT", "SELECT * FROM users")
+	db.sendOperationStats(t.Context(), start, "SELECT", "SELECT * FROM users")
 
 	duration := time.Since(start).Milliseconds()
 	assert.Equal(t, int64(1500), duration)

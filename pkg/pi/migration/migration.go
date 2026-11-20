@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 
-	"github.com/gogo/protobuf/sortkeys"
 	goRedis "github.com/redis/go-redis/v9"
 
 	piSql "github.com/sllt/pi/pkg/pi/datasource/sql"
@@ -73,7 +73,7 @@ func Run(ctx context.Context, migrationsMap map[int64]Migrate, target Target, op
 		return result, err
 	}
 
-	sortkeys.Int64s(keys)
+	slices.Sort(keys)
 
 	if err = ctx.Err(); err != nil {
 		return result, err
@@ -258,7 +258,7 @@ func getKeys(migrationsMap map[int64]Migrate) (invalidKey, keys []int64) {
 		keys = append(keys, k)
 	}
 
-	sortkeys.Int64s(invalidKey)
+	slices.Sort(invalidKey)
 	return invalidKey, keys
 }
 

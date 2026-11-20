@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -74,6 +75,8 @@ type buildOptions struct {
 	typedBind          TypedBindConfig
 	openAPI            OpenAPIConfig
 	hasOpenAPI         bool
+	trustedProxies     []string
+	hasTrustedProxies  bool
 
 	db             piSQL.Client
 	dbOwnership    Ownership
@@ -115,6 +118,20 @@ func WithExplicitHTTPStatus() Option {
 func WithConfig(values map[string]string) Option {
 	snapshot := config.NewSnapshot(values)
 	return func(o *buildOptions) error { o.values = snapshot.Values(); return nil }
+}
+
+// WithTrustedProxies configures the trusted reverse-proxy IP addresses or CIDR ranges
+// used by Context.ClientIP and IP-based rate limiting. Calling WithTrustedProxies()
+// with no arguments explicitly clears trusted proxies and overrides TRUSTED_PROXIES.
+func WithTrustedProxies(cidrs ...string) Option {
+	return func(o *buildOptions) error {
+		if _, err := middleware.ParseTrustedProxies(cidrs); err != nil {
+			return err
+		}
+		o.trustedProxies = append([]string(nil), cidrs...)
+		o.hasTrustedProxies = true
+		return nil
+	}
 }
 
 func WithLogger(l logging.Logger) Option {
@@ -360,6 +377,21 @@ func Build(options ...Option) (*App, error) {
 		return nil, err
 	}
 
+	var trustedPrefixes []netip.Prefix
+	if o.hasTrustedProxies {
+		var err error
+		trustedPrefixes, err = middleware.ParseTrustedProxies(o.trustedProxies)
+		if err != nil {
+			return nil, err
+		}
+	} else if rawProxies := cfg.Env("TRUSTED_PROXIES").Strings(); len(rawProxies) > 0 {
+		var err error
+		trustedPrefixes, err = middleware.ParseTrustedProxies(rawProxies)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if o.managedSQL && o.hasExplicitSQL {
 		return nil, fmt.Errorf("%w: WithManagedSQL and WithSQL are mutually exclusive", ErrDuplicateResource)
 	}
@@ -484,6 +516,7 @@ func Build(options ...Option) (*App, error) {
 	k := newIsolatedKernel(cfg, o.logger, o.metrics, o.tracerProvider)
 	k.validate = o.validate
 	k.explicitHTTPStatus = o.explicitHTTPStatus
+	k.trustedProxies = trustedPrefixes
 	k.maxBodyBytes = 1 << 20
 	if v := strings.TrimSpace(cfg.Get("HTTP_MAX_BODY_BYTES")); v != "" {
 		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
@@ -633,7 +666,7 @@ func validateBuildConfig(c *config.Snapshot) error {
 		"DB_DIALECT", "DB_URL", "DB_NAME", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD",
 		"DB_SSL_MODE", "DB_CHARSET", "DB_MAX_IDLE_CONNECTION", "DB_MAX_OPEN_CONNECTION",
 		"DB_REPLICA_MAX_IDLE_CONNECTIONS", "DB_REPLICA_MAX_OPEN_CONNECTIONS",
-		"DB_REPLICAS", "DB_RESOLVER_STRATEGY",
+		"DB_REPLICAS", "DB_RESOLVER_STRATEGY", "DB_SLOW_QUERY_THRESHOLD",
 		"DB_TLS_CA_CERT", "DB_TLS_CLIENT_CERT", "DB_TLS_CLIENT_KEY",
 	} {
 		allowed[k] = true

@@ -40,6 +40,11 @@ func (m *MockHTTP) EXPECT() *MockHTTPMockRecorder {
 	return m.recorder
 }
 
+// R starts a fluent outbound HTTP request builder backed by this mock.
+func (m *MockHTTP) R() *Request {
+	return newRequest(m)
+}
+
 // Delete mocks base method.
 func (m *MockHTTP) Delete(ctx context.Context, api string, body []byte) (*http.Response, error) {
 	m.ctrl.T.Helper()

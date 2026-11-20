@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"github.com/sllt/pi/pkg/pi/cmd/terminal"
+	"github.com/sllt/pi/pkg/pi/config"
 	"github.com/sllt/pi/pkg/pi/datasource/file"
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub"
 	piRedis "github.com/sllt/pi/pkg/pi/datasource/redis"
@@ -108,7 +110,7 @@ func (c *Context) File() file.FileSystem {
 // Logger returns the base application logger (never nil).
 func (c *Context) Logger() logging.Logger {
 	if c == nil || c.rt == nil {
-		return nopFallbackLogger{}
+		return logging.Noop()
 	}
 	return c.rt.getLogger()
 }
@@ -164,6 +166,40 @@ func (c *Context) AppVersion() string {
 		return ""
 	}
 	return c.rt.getAppVersion()
+}
+
+// Env reads key from the application's configuration as a zero-allocation config.Value.
+func (c *Context) Env(key string) config.Value {
+	if c == nil || c.rt == nil {
+		return ""
+	}
+	return c.rt.getEnv(key)
+}
+
+// ClientIP extracts the client IP address from the underlying HTTP request.
+// When trustedProxies are provided, they override the application-level trusted proxies
+// for this call (invalid proxy entries fail closed by ignoring forwarding headers).
+// Without arguments, the application's configured trusted proxies are used.
+func (c *Context) ClientIP(trustedProxies ...string) string {
+	if c == nil {
+		return ""
+	}
+	req := c.httpRequest()
+	if req == nil {
+		return ""
+	}
+	if len(trustedProxies) > 0 {
+		prefixes, err := middleware.ParseTrustedProxies(trustedProxies)
+		if err != nil {
+			return middleware.ExtractClientIP(req, nil)
+		}
+		return middleware.ExtractClientIP(req, prefixes)
+	}
+	var prefixes []netip.Prefix
+	if c.rt != nil {
+		prefixes = c.rt.getTrustedProxies()
+	}
+	return middleware.ExtractClientIP(req, prefixes)
 }
 
 func (c *Context) httpRequest() *http.Request {

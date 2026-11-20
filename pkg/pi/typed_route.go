@@ -146,6 +146,9 @@ type typedEndpointConfig struct {
 	hasIdempotency bool
 	idempotencyCfg middleware.IdempotencyConfig
 	idempotencyPos int
+	hasRateLimit   bool
+	rateLimitCfg   RateLimitConfig
+	rateLimitPos   int
 }
 
 // EndpointOption configures per-endpoint runtime and OpenAPI behavior on route registration.
@@ -323,6 +326,7 @@ func Register[Req, Res any](
 			return err
 		}
 	}
+	app.resolveEndpointRateLimit(&epCfg, groupFullPrefix(group.node)+":"+runtimeFuncName(fn))
 	app.resolveEndpointIdempotency(&epCfg)
 	for _, c := range epCfg.closers {
 		app.registerMiddlewareCloser(c)
@@ -475,6 +479,7 @@ func (g *RouteGroup) addUnifiedRoute(method, pattern string, rawHandler any, opt
 				return g
 			}
 		}
+		g.app.resolveEndpointRateLimit(&epCfg, endpointRateLimitScope(g.node, method, pattern, rawHandler))
 		g.app.resolveEndpointIdempotency(&epCfg)
 		if legacyFn, matched, isNil := matchLegacyHandler(rawHandler); matched && !isNil && !epCfg.hasEndpointDoc && epCfg.strictOverride == nil {
 			idx := len(g.node.routes)
@@ -513,6 +518,7 @@ func (g *RouteGroup) addUnifiedRoute(method, pattern string, rawHandler any, opt
 			return g
 		}
 	}
+	g.app.resolveEndpointRateLimit(&epCfg, endpointRateLimitScope(g.node, method, pattern, rawHandler))
 	g.app.resolveEndpointIdempotency(&epCfg)
 	for _, c := range epCfg.closers {
 		g.app.registerMiddlewareCloser(c)
@@ -983,6 +989,9 @@ func (a *App) syncAndValidateRoutesLocked(checkSecuritySchemes bool) error {
 	reg := a.httpServer.registry
 
 	errs := append([]error(nil), reg.declErrors...)
+	if a.kernel != nil && a.kernel.trustedProxyErr != nil {
+		errs = append(errs, a.kernel.trustedProxyErr)
+	}
 	if _, syncErr := a.syncTypedDocsLocked(); syncErr != nil {
 		errs = append(errs, syncErr)
 	}

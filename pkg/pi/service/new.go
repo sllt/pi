@@ -49,6 +49,10 @@ type HTTP interface {
 	// HTTP is embedded as HTTP would be able to access it's clients method
 	httpClient
 
+	// R starts a fluent outbound HTTP request builder through this service
+	// (preserving all configured decorators).
+	R() *Request
+
 	// HealthCheck to get the service health and report it to the current application
 	HealthCheck(ctx context.Context) *Health
 }
@@ -157,6 +161,10 @@ func newHTTPService(
 	return svc
 }
 
+func (h *httpService) R() *Request {
+	return newRequest(h)
+}
+
 func (h *httpService) Get(ctx context.Context, path string, queryParams map[string]any) (*http.Response, error) {
 	return h.GetWithHeaders(ctx, path, queryParams, nil)
 }
@@ -217,8 +225,7 @@ func (h *httpService) createAndSendRequest(ctx context.Context, method string, p
 	svcName := h.name
 	h.mu.RUnlock()
 
-	uri := h.url + "/" + path
-	uri = strings.TrimRight(uri, "/")
+	uri := joinURL(h.url, path)
 
 	if tracer != nil {
 		var span trace.Span
@@ -368,7 +375,25 @@ func (h *httpService) UseTracerProvider(tp trace.TracerProvider) {
 	h.mu.Unlock()
 }
 
+func joinURL(base, path string) string {
+	trimmedBase := strings.TrimRight(base, "/")
+	trimmedPath := strings.TrimLeft(path, "/")
+	if trimmedPath == "" {
+		return trimmedBase
+	}
+	if strings.HasPrefix(trimmedPath, "?") {
+		return trimmedBase + trimmedPath
+	}
+	if trimmedBase == "" {
+		return "/" + trimmedPath
+	}
+	return trimmedBase + "/" + trimmedPath
+}
+
 func encodeQueryParameters(req *http.Request, queryParams map[string]any) {
+	if len(queryParams) == 0 {
+		return
+	}
 	q := req.URL.Query()
 
 	for k, v := range queryParams {

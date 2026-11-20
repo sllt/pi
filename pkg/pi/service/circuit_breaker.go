@@ -347,6 +347,10 @@ func (cb *circuitBreaker) doRequest(ctx context.Context, method, path string, qu
 	return resp, err
 }
 
+func (cb *circuitBreaker) R() *Request {
+	return newRequest(cb)
+}
+
 func (cb *circuitBreaker) GetWithHeaders(ctx context.Context, path string, queryParams map[string]any,
 	headers map[string]string) (*http.Response, error) {
 	return cb.doRequest(ctx, http.MethodGet, path, queryParams, nil, headers)

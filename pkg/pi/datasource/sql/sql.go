@@ -36,16 +36,17 @@ var (
 
 // DBConfig has those members which are necessary variables while connecting to database.
 type DBConfig struct {
-	Dialect     string
-	HostName    string
-	User        string
-	Password    string
-	Port        string
-	Database    string
-	SSLMode     string
-	MaxIdleConn int
-	MaxOpenConn int
-	Charset     string
+	Dialect            string
+	HostName           string
+	User               string
+	Password           string
+	Port               string
+	Database           string
+	SSLMode            string
+	MaxIdleConn        int
+	MaxOpenConn        int
+	Charset            string
+	SlowQueryThreshold time.Duration
 }
 
 func setupSupabaseDefaults(dbConfig *DBConfig, configs config.Config, logger datasource.Logger) {
@@ -274,6 +275,13 @@ func getDBConfig(configs config.Config) *DBConfig {
 		maxOpenConn = defaultMaxOpenConn
 	}
 
+	var slowQueryThreshold time.Duration
+	if raw := strings.TrimSpace(configs.Get("DB_SLOW_QUERY_THRESHOLD")); raw != "" {
+		if parsed, parseErr := time.ParseDuration(raw); parseErr == nil && parsed > 0 {
+			slowQueryThreshold = parsed
+		}
+	}
+
 	return &DBConfig{
 		Dialect:     configs.Get("DB_DIALECT"),
 		HostName:    configs.Get("DB_HOST"),
@@ -284,8 +292,9 @@ func getDBConfig(configs config.Config) *DBConfig {
 		MaxOpenConn: maxOpenConn,
 		MaxIdleConn: maxIdleConn,
 		// Supported for postgres, supabase, cockroachdb, and mysql
-		SSLMode: configs.GetOrDefault("DB_SSL_MODE", "disable"),
-		Charset: configs.Get("DB_CHARSET"),
+		SSLMode:            configs.GetOrDefault("DB_SSL_MODE", "disable"),
+		Charset:            configs.Get("DB_CHARSET"),
+		SlowQueryThreshold: slowQueryThreshold,
 	}
 }
 

@@ -1485,3 +1485,69 @@ func TestInsertOnDuplicate(t *testing.T) {
 	ass.Equal("INSERT INTO tb (a,b,c) VALUES (?,?,?) ON DUPLICATE KEY UPDATE c=?", cond)
 	ass.Equal([]interface{}{1, 2, 3, 4}, vals)
 }
+
+func TestBuildWhere_TypedSlicesAndBytesSafety(t *testing.T) {
+	ass := assert.New(t)
+
+	// Typed slices for IN, NOT IN, and BETWEEN
+	cond, vals, err := BuildSelect("posts", map[string]interface{}{
+		"id in":         []int64{10, 20},
+		"uid not in":    []uint64{1, 2, 3},
+		"rank between":  []float64{1.5, 9.5},
+		"tag":           []string{"go", "pi"},
+		"payload":       []byte("raw-bytes"),
+		"other_uint in": []uint{7, 8},
+	}, []string{"id"})
+	ass.NoError(err)
+	ass.Equal("SELECT id FROM posts WHERE (payload=? AND id IN (?,?) AND other_uint IN (?,?) AND tag IN (?,?) AND uid NOT IN (?,?,?) AND (rank BETWEEN ? AND ?))", cond)
+	ass.Equal([]interface{}{[]byte("raw-bytes"), int64(10), int64(20), uint(7), uint(8), "go", "pi", uint64(1), uint64(2), uint64(3), 1.5, 9.5}, vals)
+
+	// Empty typed slices are rejected cleanly
+	for _, emptyVal := range []interface{}{[]int{}, ([]int64)(nil), []string{}} {
+		_, _, err = BuildSelect("posts", map[string]interface{}{"id in": emptyVal}, nil)
+		ass.Error(err)
+		_, _, err = BuildSelect("posts", map[string]interface{}{"id not in": emptyVal}, nil)
+		ass.Error(err)
+		_, _, err = BuildSelect("posts", map[string]interface{}{"id between": emptyVal}, nil)
+		ass.Error(err)
+	}
+
+	// []byte must NOT be unpacked as IN/BETWEEN elements
+	_, _, err = BuildSelect("posts", map[string]interface{}{"data in": []byte("abc")}, nil)
+	ass.Error(err)
+	_, _, err = BuildSelect("posts", map[string]interface{}{"data between": []byte("ab")}, nil)
+	ass.Error(err)
+
+	// NamedQuery keeps []byte as a single bind placeholder
+	nCond, nVals, err := NamedQuery("INSERT INTO files (data, ids) VALUES ({{data}}, {{ids}})", map[string]interface{}{
+		"data": []byte("hello"),
+		"ids":  []int64{1, 2},
+	})
+	ass.NoError(err)
+	ass.Equal("INSERT INTO files (data, ids) VALUES (?, (?,?))", nCond)
+	ass.Equal([]interface{}{[]byte("hello"), int64(1), int64(2)}, nVals)
+
+	// NamedQuery rejects empty slices
+	_, _, err = NamedQuery("SELECT * FROM posts WHERE id IN {{ids}}", map[string]interface{}{
+		"ids": []int64{},
+	})
+	ass.Error(err)
+
+	// Custom uint8 enum slices work in IN/NOT IN/BETWEEN/NamedQuery while []byte remains protected
+	type statusCode uint8
+	cond, vals, err = BuildSelect("posts", map[string]interface{}{
+		"status in":     []statusCode{1, 2},
+		"prev not in":   []statusCode{3},
+		"level between": []statusCode{1, 5},
+	}, []string{"id"})
+	ass.NoError(err)
+	ass.Equal("SELECT id FROM posts WHERE (status IN (?,?) AND prev NOT IN (?) AND (level BETWEEN ? AND ?))", cond)
+	ass.Equal([]interface{}{statusCode(1), statusCode(2), statusCode(3), statusCode(1), statusCode(5)}, vals)
+
+	nCond, nVals, err = NamedQuery("SELECT * FROM posts WHERE status IN {{statuses}}", map[string]interface{}{
+		"statuses": []statusCode{1, 2},
+	})
+	ass.NoError(err)
+	ass.Equal("SELECT * FROM posts WHERE status IN (?,?)", nCond)
+	ass.Equal([]interface{}{statusCode(1), statusCode(2)}, nVals)
+}

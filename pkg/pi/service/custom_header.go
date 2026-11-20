@@ -24,6 +24,10 @@ type customHeader struct {
 	HTTP
 }
 
+func (a *customHeader) R() *Request {
+	return newRequest(a)
+}
+
 func (a *customHeader) Get(ctx context.Context, path string, queryParams map[string]any) (*http.Response, error) {
 	return a.GetWithHeaders(ctx, path, queryParams, nil)
 }
@@ -83,15 +87,17 @@ func (a *customHeader) DeleteWithHeaders(ctx context.Context, path string, body 
 }
 
 func setCustomHeader(headers, customHeader map[string]string) map[string]string {
-	if headers == nil {
-		headers = make(map[string]string)
+	cloned := make(map[string]string, len(headers)+len(customHeader))
+
+	for key, value := range headers {
+		cloned[key] = value
 	}
 
 	for key, value := range customHeader {
-		headers[key] = value
+		cloned[key] = value
 	}
 
-	return headers
+	return cloned
 }
 
 func (a *customHeader) UseServiceName(name string) {

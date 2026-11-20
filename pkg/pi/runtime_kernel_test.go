@@ -150,6 +150,9 @@ func (s *stubUnsealedHTTPService) Close() error {
 	s.closed.Add(1)
 	return nil
 }
+func (s *stubUnsealedHTTPService) R() *service.Request {
+	return nil
+}
 
 func TestRuntimeKernel_SlotReplacementGuardsAndImmutability(t *testing.T) {
 	t.Run("self-assignment updates ownership without closing, UnwrapSQL transfers ownership, and regular replacement closes displaced Owned", func(t *testing.T) {

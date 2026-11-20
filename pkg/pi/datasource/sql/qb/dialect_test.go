@@ -139,3 +139,16 @@ func TestNamedQueryWithDialect_Postgres(t *testing.T) {
 	assert.Equal(t, "SELECT * FROM users WHERE id=$1 AND status IN ($2,$3)", cond)
 	assert.Equal(t, []interface{}{7, "active", "pending"}, vals)
 }
+
+func TestRebindQuery_LexerAwarePostgres(t *testing.T) {
+	b, err := New("postgres")
+	require.NoError(t, err)
+
+	input := "SELECT * FROM posts WHERE title = 'what?''s up?' AND \"col?\"\"id\" = ? AND meta ?? ? -- why?\n/* comment ? /* nested ? */ still ? */ AND status = ? -- trailing ?"
+	want := "SELECT * FROM posts WHERE title = 'what?''s up?' AND \"col?\"\"id\" = $1 AND meta ? $2 -- why?\n/* comment ? /* nested ? */ still ? */ AND status = $3 -- trailing ?"
+	assert.Equal(t, want, b.rebindQuery(input))
+
+	// Unclosed literal or comment should not panic or mis-rebind
+	assert.Equal(t, "SELECT 'unclosed ?", b.rebindQuery("SELECT 'unclosed ?"))
+	assert.Equal(t, "SELECT /* unclosed ?", b.rebindQuery("SELECT /* unclosed ?"))
+}

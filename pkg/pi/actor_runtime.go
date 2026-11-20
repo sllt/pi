@@ -142,105 +142,57 @@ func isValidActorSegment(s string) bool {
 	return true
 }
 
-// piSlogHandler adapts logging.Logger to log/slog without touching slog.Default().
-type piSlogHandler struct {
-	logger logging.Logger
-	groups []string
-	attrs  []slog.Attr
+type actorSlogPrefixHandler struct {
+	base slog.Handler
 }
+
+type actorLegacyFormatLogger struct {
+	logging.Logger
+}
+
+func (a actorLegacyFormatLogger) Debug(args ...any) { a.Logger.Debugf("%s", fmt.Sprint(args...)) }
+func (a actorLegacyFormatLogger) Info(args ...any)  { a.Logger.Infof("%s", fmt.Sprint(args...)) }
+func (a actorLegacyFormatLogger) Warn(args ...any)  { a.Logger.Warnf("%s", fmt.Sprint(args...)) }
+func (a actorLegacyFormatLogger) Error(args ...any) { a.Logger.Errorf("%s", fmt.Sprint(args...)) }
 
 func newActorSlogLogger(l logging.Logger) *slog.Logger {
-	return slog.New(&piSlogHandler{logger: l})
+	if l != nil {
+		if _, ok := l.(logging.StructuredLogger); !ok {
+			if _, ok := l.(interface{ Unwrap() logging.Logger }); !ok {
+				l = actorLegacyFormatLogger{Logger: l}
+			}
+		}
+	}
+	return slog.New(&actorSlogPrefixHandler{
+		base: logging.NewSlogHandler(l),
+	})
 }
 
-func (h *piSlogHandler) Enabled(_ context.Context, _ slog.Level) bool {
-	return h != nil && h.logger != nil
+func (h *actorSlogPrefixHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h != nil && h.base != nil && h.base.Enabled(ctx, level)
 }
 
-func (h *piSlogHandler) Handle(_ context.Context, r slog.Record) error {
-	if h == nil || h.logger == nil {
+func (h *actorSlogPrefixHandler) Handle(ctx context.Context, r slog.Record) error {
+	if h == nil || h.base == nil {
 		return nil
 	}
-	var b strings.Builder
-	b.WriteString("[actor] ")
-	b.WriteString(r.Message)
-
-	prefix := strings.Join(h.groups, ".")
-	for _, a := range h.attrs {
-		appendSlogAttr(&b, prefix, a)
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		appendSlogAttr(&b, prefix, a)
-		return true
-	})
-
-	msg := b.String()
-	switch {
-	case r.Level >= slog.LevelError:
-		h.logger.Errorf("%s", msg)
-	case r.Level >= slog.LevelWarn:
-		h.logger.Warnf("%s", msg)
-	case r.Level >= slog.LevelInfo:
-		h.logger.Infof("%s", msg)
-	default:
-		h.logger.Debugf("%s", msg)
-	}
-	return nil
+	prefixed := r.Clone()
+	prefixed.Message = "[actor] " + prefixed.Message
+	return h.base.Handle(ctx, prefixed)
 }
 
-func appendSlogAttr(b *strings.Builder, groupPrefix string, a slog.Attr) {
-	a.Value = a.Value.Resolve()
-	if a.Equal(slog.Attr{}) {
-		return
-	}
-	if a.Value.Kind() == slog.KindGroup {
-		nextPrefix := a.Key
-		if groupPrefix != "" && nextPrefix != "" {
-			nextPrefix = groupPrefix + "." + nextPrefix
-		} else if groupPrefix != "" {
-			nextPrefix = groupPrefix
-		}
-		for _, sub := range a.Value.Group() {
-			appendSlogAttr(b, nextPrefix, sub)
-		}
-		return
-	}
-	key := a.Key
-	if groupPrefix != "" && key != "" {
-		key = groupPrefix + "." + key
-	}
-	b.WriteByte(' ')
-	b.WriteString(key)
-	b.WriteByte('=')
-	b.WriteString(a.Value.String())
-}
-
-func (h *piSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	if len(attrs) == 0 {
+func (h *actorSlogPrefixHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if h == nil || h.base == nil || len(attrs) == 0 {
 		return h
 	}
-	combined := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
-	combined = append(combined, h.attrs...)
-	combined = append(combined, attrs...)
-	return &piSlogHandler{
-		logger: h.logger,
-		groups: h.groups,
-		attrs:  combined,
-	}
+	return &actorSlogPrefixHandler{base: h.base.WithAttrs(attrs)}
 }
 
-func (h *piSlogHandler) WithGroup(name string) slog.Handler {
-	if name == "" {
+func (h *actorSlogPrefixHandler) WithGroup(name string) slog.Handler {
+	if h == nil || h.base == nil || name == "" {
 		return h
 	}
-	groups := make([]string, 0, len(h.groups)+1)
-	groups = append(groups, h.groups...)
-	groups = append(groups, name)
-	return &piSlogHandler{
-		logger: h.logger,
-		groups: groups,
-		attrs:  h.attrs,
-	}
+	return &actorSlogPrefixHandler{base: h.base.WithGroup(name)}
 }
 
 type actorRuntime struct {

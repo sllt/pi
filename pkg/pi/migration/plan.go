@@ -3,9 +3,8 @@ package migration
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
-
-	"github.com/gogo/protobuf/sortkeys"
 )
 
 type PlanAction string
@@ -76,7 +75,7 @@ func Plan(ctx context.Context, migrationsMap map[int64]Migrate, target Target, o
 	if len(invalidKeys) > 0 {
 		return plan, fmt.Errorf("%w: UP not defined for the following keys: %v", ErrInvalidMigration, invalidKeys)
 	}
-	sortkeys.Int64s(keys)
+	slices.Sort(keys)
 
 	state, err := currentMigrationState(ctx, target, migrationsMap)
 	if err != nil {
@@ -130,7 +129,7 @@ func Status(ctx context.Context, migrationsMap map[int64]Migrate, target Target,
 	if len(invalidKeys) > 0 {
 		return StatusResult{}, fmt.Errorf("%w: UP not defined for the following keys: %v", ErrInvalidMigration, invalidKeys)
 	}
-	sortkeys.Int64s(keys)
+	slices.Sort(keys)
 
 	state, err := currentMigrationState(ctx, target, migrationsMap)
 	if err != nil {
@@ -271,7 +270,7 @@ func legacyRecordsFromLast(lastMigration int64, migrationsMap map[int64]Migrate)
 		return []Record{{Version: lastMigration, Method: "UP"}}
 	}
 
-	sortkeys.Int64s(keys)
+	slices.Sort(keys)
 	records := make([]Record, 0, len(keys))
 	for _, version := range keys {
 		records = append(records, Record{Version: version, Method: "UP"})
@@ -308,7 +307,7 @@ func mergeAppliedRecords(groups ...[]Record) []Record {
 	for version := range byVersion {
 		keys = append(keys, version)
 	}
-	sortkeys.Int64s(keys)
+	slices.Sort(keys)
 
 	merged := make([]Record, 0, len(keys))
 	for _, version := range keys {

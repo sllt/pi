@@ -97,6 +97,9 @@ type App struct {
 	middlewareClosers     []func() error
 	defaultIdemMu         sync.Mutex
 	defaultIdemStore      *middleware.MemoryIdempotencyStore
+	defaultRLMu           sync.Mutex
+	defaultRLStore        *middleware.MemoryRateLimitStore
+	rateLimitRuleSeq      atomic.Uint64
 
 	runtimeCtx      context.Context
 	runtimeCancel   context.CancelCauseFunc
@@ -452,6 +455,9 @@ func isPortAvailable(port int) bool {
 
 func (a *App) validateRoutesPreStart() error {
 	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		if a != nil && a.kernel != nil {
+			return a.kernel.trustedProxyErr
+		}
 		return nil
 	}
 	reg := a.httpServer.registry
@@ -462,6 +468,9 @@ func (a *App) validateRoutesPreStart() error {
 
 func (a *App) validateRoutesForStart() error {
 	if a == nil || a.httpServer == nil || a.httpServer.registry == nil {
+		if a != nil && a.kernel != nil {
+			return a.kernel.trustedProxyErr
+		}
 		return nil
 	}
 	reg := a.httpServer.registry
@@ -748,7 +757,7 @@ func (a *App) File() file.FileSystem {
 // Logger returns the logger instance associated with the App (never nil).
 func (a *App) Logger() logging.Logger {
 	if a == nil || a.kernel == nil {
-		return nopFallbackLogger{}
+		return logging.Noop()
 	}
 	return a.kernel.getLogger()
 }
@@ -816,6 +825,20 @@ func (a *App) AppVersion() string {
 		return ""
 	}
 	return a.kernel.getAppVersion()
+}
+
+// Env reads key from the application's configuration as a zero-allocation config.Value.
+func (a *App) Env(key string) config.Value {
+	if a == nil {
+		return ""
+	}
+	if !isNilValue(a.Config) {
+		return config.Lookup(a.Config, key)
+	}
+	if a.kernel != nil {
+		return a.kernel.getEnv(key)
+	}
+	return ""
 }
 
 // MigrationDeps implements migration.Target for running migrations against App datasources and external adapters.

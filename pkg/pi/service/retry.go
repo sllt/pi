@@ -37,6 +37,10 @@ type retryProvider struct {
 	HTTP
 }
 
+func (rp *retryProvider) R() *Request {
+	return newRequest(rp)
+}
+
 func (rp *retryProvider) Get(ctx context.Context, path string, queryParams map[string]any) (*http.Response,
 	error) {
 	return rp.doWithRetry(func() (*http.Response, error) {
@@ -47,7 +51,7 @@ func (rp *retryProvider) Get(ctx context.Context, path string, queryParams map[s
 func (rp *retryProvider) GetWithHeaders(ctx context.Context, path string, queryParams map[string]any,
 	headers map[string]string) (*http.Response, error) {
 	return rp.doWithRetry(func() (*http.Response, error) {
-		return rp.HTTP.GetWithHeaders(ctx, path, queryParams, headers)
+		return rp.HTTP.GetWithHeaders(ctx, path, queryParams, cloneStringMap(headers))
 	})
 }
 
@@ -62,7 +66,7 @@ func (rp *retryProvider) PostWithHeaders(ctx context.Context, path string, query
 	body []byte,
 	headers map[string]string) (*http.Response, error) {
 	return rp.doWithRetry(func() (*http.Response, error) {
-		return rp.HTTP.PostWithHeaders(ctx, path, queryParams, body, headers)
+		return rp.HTTP.PostWithHeaders(ctx, path, queryParams, body, cloneStringMap(headers))
 	})
 }
 
@@ -76,7 +80,7 @@ func (rp *retryProvider) Put(ctx context.Context, api string, queryParams map[st
 func (rp *retryProvider) PutWithHeaders(ctx context.Context, path string, queryParams map[string]any, body []byte,
 	headers map[string]string) (*http.Response, error) {
 	return rp.doWithRetry(func() (*http.Response, error) {
-		return rp.HTTP.PutWithHeaders(ctx, path, queryParams, body, headers)
+		return rp.HTTP.PutWithHeaders(ctx, path, queryParams, body, cloneStringMap(headers))
 	})
 }
 
@@ -90,7 +94,7 @@ func (rp *retryProvider) Patch(ctx context.Context, path string, queryParams map
 func (rp *retryProvider) PatchWithHeaders(ctx context.Context, path string, queryParams map[string]any, body []byte,
 	headers map[string]string) (*http.Response, error) {
 	return rp.doWithRetry(func() (*http.Response, error) {
-		return rp.HTTP.PatchWithHeaders(ctx, path, queryParams, body, headers)
+		return rp.HTTP.PatchWithHeaders(ctx, path, queryParams, body, cloneStringMap(headers))
 	})
 }
 
@@ -103,7 +107,7 @@ func (rp *retryProvider) Delete(ctx context.Context, path string, body []byte) (
 func (rp *retryProvider) DeleteWithHeaders(ctx context.Context, path string, body []byte, headers map[string]string) (
 	*http.Response, error) {
 	return rp.doWithRetry(func() (*http.Response, error) {
-		return rp.HTTP.DeleteWithHeaders(ctx, path, body, headers)
+		return rp.HTTP.DeleteWithHeaders(ctx, path, body, cloneStringMap(headers))
 	})
 }
 

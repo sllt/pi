@@ -104,6 +104,10 @@ func (rl *rateLimiter) checkRateLimit(req *http.Request) error {
 	return nil
 }
 
+func (rl *rateLimiter) R() *Request {
+	return newRequest(rl)
+}
+
 // Get performs rate-limited HTTP GET request.
 func (rl *rateLimiter) Get(ctx context.Context, path string, queryParams map[string]any) (*http.Response, error) {
 	fullURL := rl.buildFullURL(path)

@@ -28,7 +28,7 @@ var (
 	errCustomValueType           = errors.New(`[builder] the value of "_custom_" must impl Comparable`)
 	errBetweenValueLength        = errors.New(`[builder] the value of "between" must contain exactly two elements`)
 
-	errWhereInterfaceSliceType = `[builder] the value of "%s" must be of []interface{} type`
+	errWhereInterfaceSliceType = `[builder] the value of "%s" must be a slice`
 	errEmptySliceCondition     = `[builder] the value of "%s" must contain at least one element`
 
 	defaultIgnoreKeys = map[string]struct{}{
@@ -485,9 +485,18 @@ func convertWhereMapToWhereMapSlice(where map[string]interface{}, op string) (ma
 	return result, nil
 }
 
+var byteType = reflect.TypeOf(byte(0))
+
+func isByteSlice(t reflect.Type) bool {
+	return t.Kind() == reflect.Slice && t.Elem() == byteType
+}
+
 func convertInterfaceToMap(val interface{}) ([]interface{}, bool) {
+	if val == nil {
+		return nil, false
+	}
 	s := reflect.ValueOf(val)
-	if s.Kind() != reflect.Slice {
+	if s.Kind() != reflect.Slice || isByteSlice(s.Type()) {
 		return nil, false
 	}
 	interfaceSlice := make([]interface{}, s.Len())
@@ -507,7 +516,7 @@ func splitKey(key string, val interface{}) (field string, operator string, err e
 	if idx == -1 {
 		field = key
 		operator = "="
-		if reflect.ValueOf(val).Kind() == reflect.Slice {
+		if rv := reflect.ValueOf(val); rv.IsValid() && rv.Kind() == reflect.Slice && !isByteSlice(rv.Type()) {
 			operator = "in"
 		}
 	} else {
@@ -571,15 +580,21 @@ func namedQuery(sql string, data map[string]interface{}) (string, []interface{},
 			return ""
 		}
 		v := reflect.ValueOf(val)
-		if v.Type().Kind() != reflect.Slice {
+		if !v.IsValid() || v.Kind() != reflect.Slice || isByteSlice(v.Type()) {
 			vals = append(vals, val)
 			return paramPlaceHolder
 		}
-		length := v.Len()
-		for i := 0; i < length; i++ {
+		sliceLen := v.Len()
+		if sliceLen == 0 {
+			if err == nil {
+				err = fmt.Errorf("[builder] named parameter %q slice cannot be empty", paramName)
+			}
+			return ""
+		}
+		for i := 0; i < sliceLen; i++ {
 			vals = append(vals, v.Index(i).Interface())
 		}
-		return createMultiPlaceholders(length)
+		return createMultiPlaceholders(sliceLen)
 	})
 	if nil != err {
 		return "", nil, err

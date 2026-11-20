@@ -6,14 +6,15 @@ package sql
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"io"
-	"reflect"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sllt/pi/pkg/pi/datasource"
 )
@@ -40,10 +41,9 @@ type Log struct {
 	Args     []any  `json:"args,omitempty"`
 }
 
-var (
-	errSelectDataNotPointer = errors.New("data is not a pointer")
-	errSelectUnsupported    = errors.New("unsupported select destination type")
-)
+const maxSlowQuerySQLLen = 512
+
+var whitespaceRegex = regexp.MustCompile(`\s+`)
 
 func (l *Log) PrettyPrint(writer io.Writer) {
 	fmt.Fprintf(writer, "\u001B[38;5;8m%-32s \u001B[38;5;24m%-6s\u001B[0m %8d\u001B[38;5;8mµs\u001B[0m %s\n",
@@ -51,14 +51,45 @@ func (l *Log) PrettyPrint(writer io.Writer) {
 }
 
 func clean(query string) string {
-	query = regexp.MustCompile(`\s+`).ReplaceAllString(query, " ")
+	query = whitespaceRegex.ReplaceAllString(query, " ")
 	query = strings.TrimSpace(query)
 
 	return query
 }
 
-func sendStats(logger datasource.Logger, metrics Metrics, config *DBConfig, start time.Time, queryType, query string, args ...any) {
-	duration := time.Since(start).Milliseconds()
+func truncateSQL(query string, maxLen int) string {
+	cleaned := clean(query)
+	if maxLen <= 0 || len(cleaned) <= maxLen {
+		return cleaned
+	}
+
+	const ellipsis = "..."
+	if maxLen <= len(ellipsis) {
+		return cleaned[:maxLen]
+	}
+
+	limit := maxLen - len(ellipsis)
+	for limit > 0 && !utf8.RuneStart(cleaned[limit]) {
+		limit--
+	}
+
+	return cleaned[:limit] + ellipsis
+}
+
+func sendStats(ctx context.Context, logger datasource.Logger, metrics Metrics, config *DBConfig, start time.Time, queryType, query string, args ...any) {
+	elapsed := time.Since(start)
+	duration := elapsed.Milliseconds()
+
+	var (
+		hostName      string
+		database      string
+		slowThreshold time.Duration
+	)
+	if config != nil {
+		hostName = config.HostName
+		database = config.Database
+		slowThreshold = config.SlowQueryThreshold
+	}
 
 	if logger != nil {
 		logger.Debug(&Log{
@@ -67,17 +98,35 @@ func sendStats(logger datasource.Logger, metrics Metrics, config *DBConfig, star
 			Duration: duration,
 			// Query arguments can contain credentials or password hashes.
 		})
+
+		if slowThreshold > 0 && elapsed >= slowThreshold {
+			var traceID string
+			if ctx != nil {
+				if sc := trace.SpanFromContext(ctx).SpanContext(); sc.HasTraceID() {
+					traceID = sc.TraceID().String()
+				}
+			}
+
+			truncatedSQL := truncateSQL(query, maxSlowQuerySQLLen)
+			if traceID != "" {
+				logger.Warnf("slow SQL query (%s >= %s) op=%s trace_id=%s sql=%s",
+					elapsed, slowThreshold, queryType, traceID, truncatedSQL)
+			} else {
+				logger.Warnf("slow SQL query (%s >= %s) op=%s sql=%s",
+					elapsed, slowThreshold, queryType, truncatedSQL)
+			}
+		}
 	}
 
 	// This contains the fix for the nil pointer dereference
 	if metrics != nil {
-		metrics.RecordHistogram(context.Background(), "app_sql_stats", float64(duration), "hostname", config.HostName,
-			"database", config.Database, "type", getOperationType(query))
+		metrics.RecordHistogram(context.Background(), "app_sql_stats", float64(duration), "hostname", hostName,
+			"database", database, "type", getOperationType(query))
 	}
 }
 
-func (d *DB) sendOperationStats(start time.Time, queryType, query string, args ...any) {
-	sendStats(d.logger, d.metrics, d.config, start, queryType, query, args...)
+func (d *DB) sendOperationStats(ctx context.Context, start time.Time, queryType, query string, args ...any) {
+	sendStats(ctx, d.logger, d.metrics, d.config, start, queryType, query, args...)
 }
 
 func getOperationType(query string) string {
@@ -88,41 +137,44 @@ func getOperationType(query string) string {
 }
 
 func (d *DB) Query(query string, args ...any) (*sql.Rows, error) {
-	defer d.sendOperationStats(time.Now(), "Query", query, args...)
+	defer d.sendOperationStats(context.Background(), time.Now(), "Query", query, args...)
 	return d.DB.QueryContext(context.Background(), query, args...)
 }
 
 func (d *DB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	defer d.sendOperationStats(time.Now(), "QueryContext", query, args...)
+	defer d.sendOperationStats(ctx, time.Now(), "QueryContext", query, args...)
 	return d.DB.QueryContext(ctx, query, args...)
 }
 
 func (d *DB) Dialect() string {
+	if d == nil || d.config == nil {
+		return ""
+	}
 	return d.config.Dialect
 }
 
 func (d *DB) QueryRow(query string, args ...any) *sql.Row {
-	defer d.sendOperationStats(time.Now(), "QueryRow", query, args...)
+	defer d.sendOperationStats(context.Background(), time.Now(), "QueryRow", query, args...)
 	return d.DB.QueryRowContext(context.Background(), query, args...)
 }
 
 func (d *DB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	defer d.sendOperationStats(time.Now(), "QueryRowContext", query, args...)
+	defer d.sendOperationStats(ctx, time.Now(), "QueryRowContext", query, args...)
 	return d.DB.QueryRowContext(ctx, query, args...)
 }
 
 func (d *DB) Exec(query string, args ...any) (sql.Result, error) {
-	defer d.sendOperationStats(time.Now(), "Exec", query, args...)
+	defer d.sendOperationStats(context.Background(), time.Now(), "Exec", query, args...)
 	return d.DB.ExecContext(context.Background(), query, args...)
 }
 
 func (d *DB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	defer d.sendOperationStats(time.Now(), "ExecContext", query, args...)
+	defer d.sendOperationStats(ctx, time.Now(), "ExecContext", query, args...)
 	return d.DB.ExecContext(ctx, query, args...)
 }
 
 func (d *DB) Prepare(query string) (*sql.Stmt, error) {
-	defer d.sendOperationStats(time.Now(), "Prepare", query)
+	defer d.sendOperationStats(context.Background(), time.Now(), "Prepare", query)
 	return d.DB.PrepareContext(context.Background(), query)
 }
 
@@ -178,52 +230,59 @@ type Tx struct {
 // Owns reports transaction identity, not merely matching database configuration.
 func (d *DB) Owns(tx *Tx) bool { return d != nil && tx != nil && tx.owner == d }
 
-func (t *Tx) sendOperationStats(start time.Time, queryType, query string, args ...any) {
-	sendStats(t.logger, t.metrics, t.config, start, queryType, query, args...)
+func (t *Tx) Dialect() string {
+	if t == nil || t.config == nil {
+		return ""
+	}
+	return t.config.Dialect
+}
+
+func (t *Tx) sendOperationStats(ctx context.Context, start time.Time, queryType, query string, args ...any) {
+	sendStats(ctx, t.logger, t.metrics, t.config, start, queryType, query, args...)
 }
 
 func (t *Tx) Query(query string, args ...any) (*sql.Rows, error) {
-	defer t.sendOperationStats(time.Now(), "TxQuery", query, args...)
+	defer t.sendOperationStats(context.Background(), time.Now(), "TxQuery", query, args...)
 	return t.Tx.QueryContext(context.Background(), query, args...)
 }
 
 func (t *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	defer t.sendOperationStats(time.Now(), "TxQueryContext", query, args...)
+	defer t.sendOperationStats(ctx, time.Now(), "TxQueryContext", query, args...)
 	return t.Tx.QueryContext(ctx, query, args...)
 }
 
 func (t *Tx) QueryRow(query string, args ...any) *sql.Row {
-	defer t.sendOperationStats(time.Now(), "TxQueryRow", query, args...)
+	defer t.sendOperationStats(context.Background(), time.Now(), "TxQueryRow", query, args...)
 	return t.Tx.QueryRowContext(context.Background(), query, args...)
 }
 
 func (t *Tx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	defer t.sendOperationStats(time.Now(), "TxQueryRowContext", query, args...)
+	defer t.sendOperationStats(ctx, time.Now(), "TxQueryRowContext", query, args...)
 	return t.Tx.QueryRowContext(ctx, query, args...)
 }
 
 func (t *Tx) Exec(query string, args ...any) (sql.Result, error) {
-	defer t.sendOperationStats(time.Now(), "TxExec", query, args...)
+	defer t.sendOperationStats(context.Background(), time.Now(), "TxExec", query, args...)
 	return t.Tx.ExecContext(context.Background(), query, args...)
 }
 
 func (t *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	defer t.sendOperationStats(time.Now(), "TxExecContext", query, args...)
+	defer t.sendOperationStats(ctx, time.Now(), "TxExecContext", query, args...)
 	return t.Tx.ExecContext(ctx, query, args...)
 }
 
 func (t *Tx) Prepare(query string) (*sql.Stmt, error) {
-	defer t.sendOperationStats(time.Now(), "TxPrepare", query)
+	defer t.sendOperationStats(context.Background(), time.Now(), "TxPrepare", query)
 	return t.Tx.PrepareContext(context.Background(), query)
 }
 
 func (t *Tx) Commit() error {
-	defer t.sendOperationStats(time.Now(), "TxCommit", "COMMIT")
+	defer t.sendOperationStats(context.Background(), time.Now(), "TxCommit", "COMMIT")
 	return t.Tx.Commit()
 }
 
 func (t *Tx) Rollback() error {
-	defer t.sendOperationStats(time.Now(), "TxRollback", "ROLLBACK")
+	defer t.sendOperationStats(context.Background(), time.Now(), "TxRollback", "ROLLBACK")
 	return t.Tx.Rollback()
 }
 
@@ -262,176 +321,4 @@ func (d *DB) Select(ctx context.Context, data any, query string, args ...any) er
 // Select executes query using the active transaction and binds rows into data.
 func (t *Tx) Select(ctx context.Context, data any, query string, args ...any) error {
 	return selectData(ctx, t.logger, t.QueryContext, data, query, args...)
-}
-
-type queryFunc func(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-
-//nolint:exhaustive // We only support slice and struct destinations.
-func selectData(ctx context.Context, logger datasource.Logger, queryContext queryFunc, data any, query string, args ...any) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	// Destination must be settable so callers can read scanned results.
-	rvo := reflect.ValueOf(data)
-	if !rvo.IsValid() || rvo.Kind() != reflect.Ptr || rvo.IsNil() {
-		if logger != nil {
-			logger.Error("we did not get a pointer. data is not settable.")
-		}
-
-		return errSelectDataNotPointer
-	}
-
-	rv := rvo.Elem()
-
-	switch rv.Kind() {
-	case reflect.Slice:
-		return selectSlice(ctx, logger, queryContext, query, args, rvo, rv)
-	case reflect.Struct:
-		return selectStruct(ctx, logger, queryContext, query, args, rv)
-	default:
-		if logger != nil {
-			logger.Debugf("a pointer to %v was not expected.", rv.Kind().String())
-		}
-
-		return fmt.Errorf("%w: %s", errSelectUnsupported, rv.Kind())
-	}
-}
-
-func selectSlice(ctx context.Context, logger datasource.Logger, queryContext queryFunc, query string, args []any, rvo, rv reflect.Value) error {
-	rows, err := queryContext(ctx, query, args...)
-	if err != nil {
-		if logger != nil {
-			logger.Errorf("error running query: %v", err)
-		}
-
-		return err
-	}
-
-	defer rows.Close()
-
-	for rows.Next() {
-		val := reflect.New(rv.Type().Elem())
-
-		if rv.Type().Elem().Kind() == reflect.Struct {
-			if err := rowsToStruct(rows, val); err != nil {
-				return err
-			}
-		} else if err := rows.Scan(val.Interface()); err != nil {
-			return err
-		}
-
-		rv = reflect.Append(rv, val.Elem())
-	}
-
-	if err := rows.Err(); err != nil {
-		if logger != nil {
-			logger.Errorf("error parsing rows : %v", err)
-		}
-
-		return err
-	}
-
-	if rvo.Elem().CanSet() {
-		rvo.Elem().Set(rv)
-	}
-
-	return nil
-}
-
-func selectStruct(ctx context.Context, logger datasource.Logger, queryContext queryFunc, query string, args []any, rv reflect.Value) error {
-	rows, err := queryContext(ctx, query, args...)
-	if err != nil {
-		if logger != nil {
-			logger.Errorf("error running query: %v", err)
-		}
-
-		return err
-	}
-
-	defer rows.Close()
-
-	rowFound := false
-
-	for rows.Next() {
-		rowFound = true
-		if err := rowsToStruct(rows, rv); err != nil {
-			return err
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		if logger != nil {
-			logger.Errorf("error parsing rows : %v", err)
-		}
-
-		return err
-	}
-
-	if !rowFound {
-		return sql.ErrNoRows
-	}
-
-	return nil
-}
-
-func rowsToStruct(rows *sql.Rows, vo reflect.Value) error {
-	v := vo
-	if vo.Kind() == reflect.Ptr {
-		v = vo.Elem()
-	}
-
-	// Map fields and their indexes by normalized name
-	fieldNameIndex := map[string]int{}
-
-	for i := 0; i < v.Type().NumField(); i++ {
-		var name string
-
-		f := v.Type().Field(i)
-		tag := f.Tag.Get("db")
-
-		if tag != "" {
-			name = tag
-		} else {
-			name = ToSnakeCase(f.Name)
-		}
-
-		fieldNameIndex[name] = i
-	}
-
-	fields := []any{}
-	columns, err := rows.Columns()
-	if err != nil {
-		return err
-	}
-
-	for _, c := range columns {
-		if i, ok := fieldNameIndex[c]; ok {
-			fields = append(fields, v.Field(i).Addr().Interface())
-		} else {
-			var i any
-
-			fields = append(fields, &i)
-		}
-	}
-
-	if err := rows.Scan(fields...); err != nil {
-		return err
-	}
-
-	if vo.CanSet() {
-		vo.Set(v)
-	}
-
-	return nil
-}
-
-var matchFirstCap = regexp.MustCompile("(.)([A-Z][a-z]+)")
-var matchAllCap = regexp.MustCompile("([a-z0-9])([A-Z])")
-
-func ToSnakeCase(str string) string {
-	snake := matchFirstCap.ReplaceAllString(str, "${1}_${2}")
-	snake = matchAllCap.ReplaceAllString(snake, "${1}_${2}")
-
-	return strings.ToLower(snake)
 }

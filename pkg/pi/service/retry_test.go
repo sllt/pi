@@ -15,6 +15,10 @@ import (
 
 type mockHTTP struct{}
 
+func (m *mockHTTP) R() *Request {
+	return newRequest(m)
+}
+
 func (*mockHTTP) HealthCheck(_ context.Context) *Health {
 	return &Health{
 		Status:  "UP",

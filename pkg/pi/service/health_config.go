@@ -38,6 +38,10 @@ type customHealthService struct {
 	HTTP
 }
 
+func (c *customHealthService) R() *Request {
+	return newRequest(c)
+}
+
 func (c *customHealthService) HealthCheck(ctx context.Context) *Health {
 	return checkEndpointHealth(ctx, c.HTTP, c.healthEndpoint, c.timeout)
 }

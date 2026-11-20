@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -42,6 +43,7 @@ type RateLimiterConfig struct {
 	PerIP             bool
 	Store             RateLimiterStore // Optional: defaults to in-memory store
 	TrustedProxies    bool             // If true, trust X-Forwarded-For and X-Real-IP headers
+	TrustedProxyCIDRs []string         // Optional CIDR/IP allowlist for safe proxy header extraction
 	MaxKeys           int64            // Maximum unique rate limit keys (0 = default 100000)
 	Context           context.Context  // Optional lifecycle context for background bucket cleanup
 }
@@ -54,6 +56,12 @@ func (c RateLimiterConfig) Validate() error {
 
 	if c.Burst <= 0 {
 		return errInvalidBurst
+	}
+
+	if len(c.TrustedProxyCIDRs) > 0 {
+		if _, err := ParseTrustedProxies(c.TrustedProxyCIDRs); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -141,6 +149,14 @@ func RateLimiterDeferred(
 		panic(fmt.Sprintf("invalid rate limiter config: %v", err))
 	}
 
+	var (
+		trustedPrefixes      []netip.Prefix
+		hasTrustedProxyCIDRs = len(config.TrustedProxyCIDRs) > 0
+	)
+	if hasTrustedProxyCIDRs {
+		trustedPrefixes, _ = ParseTrustedProxies(config.TrustedProxyCIDRs)
+	}
+
 	// Use in-memory store if none provided
 	if config.Store == nil {
 		config.Store = NewMemoryRateLimiterStore(config)
@@ -173,8 +189,12 @@ func RateLimiterDeferred(
 			// Determine the rate limit key (IP or global)
 			key := "global"
 			if config.PerIP {
-				key = getIP(r, config.TrustedProxies)
-				// Fallback to "unknown" if getIP returns empty string
+				if hasTrustedProxyCIDRs {
+					key = ExtractClientIP(r, trustedPrefixes)
+				} else {
+					key = getIP(r, config.TrustedProxies)
+				}
+				// Fallback to "unknown" if IP extraction returns empty string
 				// This prevents all requests from sharing the same bucket
 				if key == "" {
 					key = "unknown"

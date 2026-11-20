@@ -158,21 +158,95 @@ func (b Builder) rebindQuery(query string) string {
 	}
 
 	var (
-		counter int = 1
+		counter = 1
 		out     strings.Builder
 	)
 
 	out.Grow(len(query) + 8)
 
-	for i := 0; i < len(query); i++ {
-		if query[i] != '?' {
-			out.WriteByte(query[i])
-			continue
+	n := len(query)
+	for i := 0; i < n; i++ {
+		ch := query[i]
+		switch ch {
+		case '\'':
+			out.WriteByte(ch)
+			for i++; i < n; i++ {
+				c := query[i]
+				out.WriteByte(c)
+				if c == '\'' {
+					if i+1 < n && query[i+1] == '\'' {
+						i++
+						out.WriteByte(query[i])
+						continue
+					}
+					break
+				}
+			}
+		case '"':
+			out.WriteByte(ch)
+			for i++; i < n; i++ {
+				c := query[i]
+				out.WriteByte(c)
+				if c == '"' {
+					if i+1 < n && query[i+1] == '"' {
+						i++
+						out.WriteByte(query[i])
+						continue
+					}
+					break
+				}
+			}
+		case '-':
+			if i+1 < n && query[i+1] == '-' {
+				out.WriteString("--")
+				i += 2
+				for ; i < n; i++ {
+					out.WriteByte(query[i])
+					if query[i] == '\n' {
+						break
+					}
+				}
+			} else {
+				out.WriteByte(ch)
+			}
+		case '/':
+			if i+1 < n && query[i+1] == '*' {
+				out.WriteString("/*")
+				i += 2
+				depth := 1
+				for ; i < n && depth > 0; i++ {
+					if i+1 < n && query[i] == '/' && query[i+1] == '*' {
+						out.WriteString("/*")
+						i++
+						depth++
+						continue
+					}
+					if i+1 < n && query[i] == '*' && query[i+1] == '/' {
+						out.WriteString("*/")
+						i++
+						depth--
+						continue
+					}
+					out.WriteByte(query[i])
+				}
+				if depth == 0 {
+					i--
+				}
+			} else {
+				out.WriteByte(ch)
+			}
+		case '?':
+			if i+1 < n && query[i+1] == '?' {
+				out.WriteByte('?')
+				i++
+				continue
+			}
+			out.WriteByte('$')
+			out.WriteString(strconv.Itoa(counter))
+			counter++
+		default:
+			out.WriteByte(ch)
 		}
-
-		out.WriteByte('$')
-		out.WriteString(strconv.Itoa(counter))
-		counter++
 	}
 
 	return out.String()

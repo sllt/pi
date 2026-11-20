@@ -14,13 +14,17 @@ type authProvider struct {
 	HTTP
 }
 
+func (a *authProvider) R() *Request {
+	return newRequest(a)
+}
+
 func (a *authProvider) Get(ctx context.Context, path string, queryParams map[string]any) (*http.Response, error) {
 	return a.GetWithHeaders(ctx, path, queryParams, nil)
 }
 
 func (a *authProvider) GetWithHeaders(ctx context.Context, path string, queryParams map[string]any,
 	headers map[string]string) (*http.Response, error) {
-	headers, err := a.auth(ctx, headers)
+	headers, err := a.auth(ctx, cloneStringMap(headers))
 	if err != nil {
 		return nil, err
 	}
@@ -35,7 +39,7 @@ func (a *authProvider) Post(ctx context.Context, path string, queryParams map[st
 
 func (a *authProvider) PostWithHeaders(ctx context.Context, path string, queryParams map[string]any,
 	body []byte, headers map[string]string) (*http.Response, error) {
-	headers, err := a.auth(ctx, headers)
+	headers, err := a.auth(ctx, cloneStringMap(headers))
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +53,7 @@ func (a *authProvider) Patch(ctx context.Context, path string, queryParams map[s
 
 func (a *authProvider) PatchWithHeaders(ctx context.Context, path string, queryParams map[string]any,
 	body []byte, headers map[string]string) (*http.Response, error) {
-	headers, err := a.auth(ctx, headers)
+	headers, err := a.auth(ctx, cloneStringMap(headers))
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +68,7 @@ func (a *authProvider) Put(ctx context.Context, path string, queryParams map[str
 
 func (a *authProvider) PutWithHeaders(ctx context.Context, path string, queryParams map[string]any,
 	body []byte, headers map[string]string) (*http.Response, error) {
-	headers, err := a.auth(ctx, headers)
+	headers, err := a.auth(ctx, cloneStringMap(headers))
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +81,7 @@ func (a *authProvider) Delete(ctx context.Context, path string, body []byte) (*h
 }
 
 func (a *authProvider) DeleteWithHeaders(ctx context.Context, path string, body []byte, headers map[string]string) (*http.Response, error) {
-	headers, err := a.auth(ctx, headers)
+	headers, err := a.auth(ctx, cloneStringMap(headers))
 	if err != nil {
 		return nil, err
 	}

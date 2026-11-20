@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/netip"
 	"reflect"
 	"strconv"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/sllt/pi/pkg/pi/datasource/pubsub/mqtt"
 	piRedis "github.com/sllt/pi/pkg/pi/datasource/redis"
 	piSQL "github.com/sllt/pi/pkg/pi/datasource/sql"
+	"github.com/sllt/pi/pkg/pi/http/middleware"
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/logging/remotelogger"
 	"github.com/sllt/pi/pkg/pi/metrics"
@@ -60,24 +62,6 @@ var (
 	ErrAppAlreadyStarted = errors.New("cannot mutate runtime resources after app has started or routes are compiled")
 )
 
-type nopFallbackLogger struct{}
-
-func (nopFallbackLogger) Debug(...any)              {}
-func (nopFallbackLogger) Debugf(string, ...any)     {}
-func (nopFallbackLogger) Log(...any)                {}
-func (nopFallbackLogger) Logf(string, ...any)       {}
-func (nopFallbackLogger) Info(...any)               {}
-func (nopFallbackLogger) Infof(string, ...any)      {}
-func (nopFallbackLogger) Notice(...any)             {}
-func (nopFallbackLogger) Noticef(string, ...any)    {}
-func (nopFallbackLogger) Warn(...any)               {}
-func (nopFallbackLogger) Warnf(string, ...any)      {}
-func (nopFallbackLogger) Error(...any)              {}
-func (nopFallbackLogger) Errorf(string, ...any)     {}
-func (nopFallbackLogger) Fatal(...any)              {}
-func (nopFallbackLogger) Fatalf(string, ...any)     {}
-func (nopFallbackLogger) ChangeLevel(logging.Level) {}
-
 func isNilValue(v any) bool {
 	if v == nil {
 		return true
@@ -98,6 +82,7 @@ func isNilValue(v any) bool {
 type runtimeKernel struct {
 	appName    string
 	appVersion string
+	config     config.Config
 
 	logger          logging.Logger
 	loggerOwned     bool
@@ -111,6 +96,8 @@ type runtimeKernel struct {
 	explicitHTTPStatus bool
 	maxBodyBytes       int64
 	hasExplicitMaxBody bool
+	trustedProxies     []netip.Prefix
+	trustedProxyErr    error
 
 	// Core slots & managed resource table (guarded by mu until frozen; unconfigured slots are strictly untyped nil)
 	mu           sync.RWMutex
@@ -144,6 +131,7 @@ func newLegacyKernel(conf config.Config, customLogger logging.Logger, loggerOwne
 	k := &runtimeKernel{
 		appName:      appName,
 		appVersion:   appVersion,
+		config:       conf,
 		maxBodyBytes: 1 << 20,
 		wsManager:    websocket.New(),
 		httpServices: make(map[string]service.HTTP),
@@ -185,6 +173,15 @@ func newLegacyKernel(conf config.Config, customLogger logging.Logger, loggerOwne
 		if cc, ok := k.logger.(logging.CallerConfigurer); ok {
 			showCaller := conf.GetOrDefault("LOG_CALLER", "true")
 			cc.SetShowCaller(showCaller != "false")
+		}
+		if rawProxies := config.Lookup(conf, "TRUSTED_PROXIES").Strings(); len(rawProxies) > 0 {
+			prefixes, err := middleware.ParseTrustedProxies(rawProxies)
+			if err != nil {
+				k.trustedProxyErr = err
+				k.logger.Errorf("invalid TRUSTED_PROXIES configuration: %v", err)
+			} else {
+				k.trustedProxies = prefixes
+			}
 		}
 	}
 
@@ -289,6 +286,7 @@ func newIsolatedKernel(
 	k := &runtimeKernel{
 		appName:         appName,
 		appVersion:      appVersion,
+		config:          cfg,
 		logger:          logger,
 		metricsManager:  m,
 		tracerProvider:  tp,
@@ -343,11 +341,31 @@ func (k *runtimeKernel) getAppVersion() string {
 	return k.appVersion
 }
 
+func (k *runtimeKernel) getEnv(key string) config.Value {
+	if k == nil {
+		return ""
+	}
+	return config.Lookup(k.config, key)
+}
+
+func (k *runtimeKernel) getTrustedProxies() []netip.Prefix {
+	if k == nil {
+		return nil
+	}
+	if k.frozen.Load() {
+		return k.trustedProxies
+	}
+	k.mu.RLock()
+	prefixes := k.trustedProxies
+	k.mu.RUnlock()
+	return prefixes
+}
+
 func (k *runtimeKernel) getLogger() logging.Logger {
 	if k != nil && !isNilValue(k.logger) {
 		return k.logger
 	}
-	return nopFallbackLogger{}
+	return logging.Noop()
 }
 
 func (k *runtimeKernel) getMetrics() metrics.Manager {
