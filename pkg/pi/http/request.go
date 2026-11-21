@@ -7,9 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"mime/multipart"
+	"net"
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sllt/pi/pkg/pi/apperror"
@@ -20,7 +24,21 @@ const (
 
 	// DefaultMaxBodyBytes bounds request body buffering when no explicit limit is configured.
 	DefaultMaxBodyBytes int64 = 1 << 20 // 1 MiB
+
+	multipartSnapshotHeadroom int64 = 64 << 10 // 64 KiB boundary-rewrite headroom
 )
+
+type limitedRequestBuffer struct {
+	bytes.Buffer
+	limit int64
+}
+
+func (b *limitedRequestBuffer) Write(p []byte) (int, error) {
+	if int64(b.Len())+int64(len(p)) > b.limit {
+		return 0, &http.MaxBytesError{Limit: b.limit}
+	}
+	return b.Buffer.Write(p)
+}
 
 type restoredBody struct {
 	io.Reader
@@ -41,6 +59,20 @@ type Request struct {
 	maxBodyBytes int64
 	rawBody      []byte
 	hasRawBody   bool
+	rw           http.ResponseWriter
+	readDeadline time.Time
+	bodyLimited  bool
+}
+
+// ConfigureBodyRead configures the response writer, per-read deadline, and whether
+// r.Body is already bounded by http.MaxBytesReader for lazy body reads.
+func (r *Request) ConfigureBodyRead(w http.ResponseWriter, readDeadline time.Time, bodyLimited bool) {
+	if r == nil {
+		return
+	}
+	r.rw = w
+	r.readDeadline = readDeadline
+	r.bodyLimited = bodyLimited
 }
 
 // NewRequest creates a new Pi Request instance from the given http.Request.
@@ -106,12 +138,11 @@ func (r *Request) Bind(i any) error {
 
 	switch contentType {
 	case "application/json":
-		body, bodyErr := r.body()
-		if bodyErr != nil {
-			return bodyErr
+		var body []byte
+		body, err = r.body()
+		if err == nil {
+			err = json.Unmarshal(body, &i)
 		}
-
-		err = json.Unmarshal(body, &i)
 	case "multipart/form-data":
 		err = r.bindMultipart(i)
 	case "application/x-www-form-urlencoded":
@@ -124,6 +155,13 @@ func (r *Request) Bind(i any) error {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			return maxBytesErr
+		}
+		if errors.Is(err, context.Canceled) || errors.As(err, new(ErrorClientClosedRequest)) {
+			return ErrorClientClosedRequest{}
+		}
+		var netErr net.Error
+		if errors.Is(err, context.DeadlineExceeded) || errors.As(err, new(ErrorRequestTimeout)) || (errors.As(err, &netErr) && netErr.Timeout()) {
+			return ErrorRequestTimeout{}
 		}
 		return apperror.New(apperror.InvalidArgument, 400, "invalid request body").WithCause(err)
 	}
@@ -165,6 +203,54 @@ func (r *Request) Params(key string) []string {
 	return result
 }
 
+func (r *Request) checkBodyReadDeadline() error {
+	if r == nil || r.req == nil {
+		return nil
+	}
+	if ctxErr := r.req.Context().Err(); ctxErr != nil {
+		if errors.Is(ctxErr, context.Canceled) {
+			return ErrorClientClosedRequest{}
+		}
+		return ErrorRequestTimeout{}
+	}
+	if !r.readDeadline.IsZero() && !time.Now().Before(r.readDeadline) {
+		return ErrorRequestTimeout{}
+	}
+	return nil
+}
+
+func (r *Request) prepareBodyReadDeadline(armSocket bool) (func(), error) {
+	if err := r.checkBodyReadDeadline(); err != nil {
+		return nil, err
+	}
+	if !armSocket || r == nil || r.readDeadline.IsZero() || r.rw == nil {
+		return nil, nil
+	}
+	rc := http.NewResponseController(r.rw)
+	if err := rc.SetReadDeadline(r.readDeadline); err != nil {
+		return nil, nil
+	}
+	return func() { _ = rc.SetReadDeadline(time.Time{}) }, nil
+}
+
+func normalizeBodyReadError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return maxBytesErr
+	}
+	if errors.Is(err, context.Canceled) {
+		return ErrorClientClosedRequest{}
+	}
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return ErrorRequestTimeout{}
+	}
+	return err
+}
+
 func (r *Request) body() ([]byte, error) {
 	if r == nil || r.req == nil {
 		return nil, nil
@@ -172,7 +258,8 @@ func (r *Request) body() ([]byte, error) {
 	if r.hasRawBody {
 		return r.rawBody, nil
 	}
-	if r.req.Body == nil {
+	if (r.req.Body == nil || r.req.Body == http.NoBody) && r.req.MultipartForm == nil && len(r.req.PostForm) == 0 {
+		r.hasRawBody = true
 		return nil, nil
 	}
 
@@ -181,21 +268,63 @@ func (r *Request) body() ([]byte, error) {
 		limit = DefaultMaxBodyBytes
 	}
 
-	origBody := r.req.Body
-	bodyBytes, err := io.ReadAll(io.LimitReader(origBody, limit+1))
-	if err != nil {
-		r.req.Body = restoredBody{
-			Reader: io.MultiReader(bytes.NewReader(bodyBytes), origBody),
-			Closer: origBody,
+	var bodyBytes []byte
+	if r.req.Body != nil && r.req.Body != http.NoBody {
+		var clearDeadline func()
+		if r.req.ContentLength != 0 {
+			armSocket := r.req.MultipartForm == nil && len(r.req.PostForm) == 0
+			var err error
+			clearDeadline, err = r.prepareBodyReadDeadline(armSocket)
+			if err != nil {
+				return nil, err
+			}
 		}
-		return nil, err
+		origBody := r.req.Body
+		var err error
+		func() {
+			if clearDeadline != nil {
+				defer clearDeadline()
+			}
+			bodyBytes, err = io.ReadAll(io.LimitReader(origBody, limit+1))
+		}()
+		if err != nil {
+			r.req.Body = restoredBody{
+				Reader: io.MultiReader(bytes.NewReader(bodyBytes), origBody),
+				Closer: origBody,
+			}
+			return nil, normalizeBodyReadError(err)
+		}
+		if int64(len(bodyBytes)) > limit {
+			r.req.Body = restoredBody{
+				Reader: io.MultiReader(bytes.NewReader(bodyBytes), origBody),
+				Closer: origBody,
+			}
+			return nil, &http.MaxBytesError{Limit: limit}
+		}
+		_ = origBody.Close()
+		r.req.Body = http.NoBody
 	}
-	if int64(len(bodyBytes)) > limit {
-		r.req.Body = restoredBody{
-			Reader: io.MultiReader(bytes.NewReader(bodyBytes), origBody),
-			Closer: origBody,
+
+	if len(bodyBytes) == 0 {
+		if r.req.MultipartForm != nil {
+			reencoded, err := r.reencodeMultipartForm(limit)
+			if err != nil {
+				return nil, err
+			}
+			bodyBytes = reencoded
+		} else if len(r.req.PostForm) > 0 {
+			encoded := r.req.PostForm.Encode()
+			if int64(len(encoded)) > limit {
+				return nil, &http.MaxBytesError{Limit: limit}
+			}
+			bodyBytes = []byte(encoded)
+			if r.req.Header == nil {
+				r.req.Header = make(http.Header)
+			}
+			if r.req.Header.Get("Content-Type") == "" {
+				r.req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
 		}
-		return nil, &http.MaxBytesError{Limit: limit}
 	}
 
 	r.rawBody = bodyBytes
@@ -203,6 +332,54 @@ func (r *Request) body() ([]byte, error) {
 	r.req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	return bodyBytes, nil
+}
+
+func (r *Request) reencodeMultipartForm(max int64) ([]byte, error) {
+	limit := max
+	if limit > 0 {
+		if limit <= math.MaxInt64-multipartSnapshotHeadroom {
+			limit += multipartSnapshotHeadroom
+		} else {
+			limit = math.MaxInt64
+		}
+	}
+	buffer := &limitedRequestBuffer{limit: limit}
+	writer := multipart.NewWriter(buffer)
+	for key, values := range r.req.MultipartForm.Value {
+		for _, value := range values {
+			if err := writer.WriteField(key, value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, files := range r.req.MultipartForm.File {
+		for _, file := range files {
+			part, err := writer.CreatePart(file.Header)
+			if err != nil {
+				return nil, err
+			}
+			source, err := file.Open()
+			if err != nil {
+				return nil, err
+			}
+			_, err = io.Copy(part, source)
+			closeErr := source.Close()
+			if err != nil {
+				return nil, err
+			}
+			if closeErr != nil {
+				return nil, closeErr
+			}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	if r.req.Header == nil {
+		r.req.Header = make(http.Header)
+	}
+	r.req.Header.Set("Content-Type", writer.FormDataContentType())
+	return buffer.Bytes(), nil
 }
 
 func (r *Request) bindMultipart(ptr any) error {
@@ -227,15 +404,27 @@ func (r *Request) bindForm(ptr any, isMultipart bool) error {
 	var fd formData
 
 	if isMultipart {
-		if r.req.Body != nil && r.req.MultipartForm == nil {
-			limit := r.maxBodyBytes
-			if limit <= 0 {
-				limit = defaultMaxMemory + DefaultMaxBodyBytes
+		if r.req.MultipartForm == nil && r.req.Body != nil && r.req.Body != http.NoBody {
+			if !r.bodyLimited {
+				limit := r.maxBodyBytes
+				if limit <= 0 {
+					limit = defaultMaxMemory + DefaultMaxBodyBytes
+				}
+				r.req.Body = http.MaxBytesReader(r.rw, r.req.Body, limit)
+				r.bodyLimited = true
 			}
-			r.req.Body = http.MaxBytesReader(nil, r.req.Body, limit)
+			if r.req.ContentLength != 0 {
+				clearDeadline, err := r.prepareBodyReadDeadline(!r.hasRawBody)
+				if err != nil {
+					return err
+				}
+				if clearDeadline != nil {
+					defer clearDeadline()
+				}
+			}
 		}
 		if err := r.req.ParseMultipartForm(defaultMaxMemory); err != nil {
-			return err
+			return normalizeBodyReadError(err)
 		}
 
 		fd = formData{files: r.req.MultipartForm.File, fields: r.req.MultipartForm.Value}

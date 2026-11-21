@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/sllt/pi/pkg/pi/logging"
 	"github.com/sllt/pi/pkg/pi/metrics/exporters"
@@ -159,4 +160,35 @@ func Test_NewMetricsManagerLabelHighCardinality(t *testing.T) {
 	log := testutil.StdoutOutputForFunc(logs)
 
 	assert.Contains(t, log, `metrics counter-test has high cardinality: 24`, "TEST Failed. high cardinality of metrics")
+}
+
+func Test_NewNoopMetricsManager(t *testing.T) {
+	type noopChecker interface {
+		IsNoop() bool
+	}
+
+	m := NewNoopMetricsManager()
+	checker, ok := m.(noopChecker)
+	assert.True(t, ok)
+	assert.True(t, checker.IsNoop())
+
+	// All operations are safe no-ops without logging errors.
+	m.NewCounter("c", "desc")
+	m.NewUpDownCounter("u", "desc")
+	m.NewHistogram("h", "desc", 1, 2)
+	m.NewGauge("g", "desc")
+	m.IncrementCounter(t.Context(), "c", "k", "v")
+	m.DeltaUpDownCounter(t.Context(), "u", 1.5, "k", "v")
+	m.RecordHistogram(t.Context(), "h", 2.5, "k", "v")
+	m.SetGauge("g", 3.5, "k", "v")
+
+	fromNoopMeter := NewMetricsManager(noop.NewMeterProvider().Meter("pi"), logging.NewMockLogger(logging.ERROR))
+	checker2, ok2 := fromNoopMeter.(noopChecker)
+	assert.True(t, ok2)
+	assert.True(t, checker2.IsNoop())
+
+	fromNilMeter := NewMetricsManager(nil, logging.NewMockLogger(logging.ERROR))
+	checker3, ok3 := fromNilMeter.(noopChecker)
+	assert.True(t, ok3)
+	assert.True(t, checker3.IsNoop())
 }

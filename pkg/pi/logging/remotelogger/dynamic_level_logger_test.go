@@ -485,3 +485,23 @@ func TestRemoteLogger_CloseCancelsInFlightFetchAndIdempotent(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	assert.Zero(t, afterClose.Load(), "no requests should fire after Close")
 }
+
+func TestRemoteLogger_IsInfoEnabled(t *testing.T) {
+	type infoChecker interface {
+		IsInfoEnabled() bool
+	}
+
+	rl := New(logging.WARN, "", 0)
+	checker, ok := rl.(infoChecker)
+	require.True(t, ok)
+	assert.False(t, checker.IsInfoEnabled())
+
+	rl.ChangeLevel(logging.INFO)
+	assert.True(t, checker.IsInfoEnabled())
+
+	rl.ChangeLevel(logging.ERROR)
+	assert.False(t, checker.IsInfoEnabled())
+
+	var nilRL *remoteLogger
+	assert.False(t, nilRL.IsInfoEnabled())
+}

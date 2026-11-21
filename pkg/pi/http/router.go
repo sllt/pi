@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/embedded"
+	traceNoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/sllt/pi/pkg/pi/logging"
 )
@@ -65,6 +66,24 @@ func (d dynamicTracerProvider) Tracer(name string, opts ...trace.TracerOption) t
 	return otel.GetTracerProvider().Tracer(name, opts...)
 }
 
+type lightweightTracerProvider interface {
+	IsLightweightTrace() bool
+}
+
+func isBypassableTracerProvider(tp trace.TracerProvider) bool {
+	if tp == nil {
+		return false
+	}
+	switch v := tp.(type) {
+	case traceNoop.TracerProvider, *traceNoop.TracerProvider:
+		return true
+	case lightweightTracerProvider:
+		return v.IsLightweightTrace()
+	default:
+		return false
+	}
+}
+
 // NewRouteHTTPHandler wraps handler with OpenTelemetry HTTP instrumentation scoped to
 // the supplied TracerProvider resolver and optional isolated meter provider.
 func NewRouteHTTPHandler(handler http.Handler, operation string, providerFn func() trace.TracerProvider, isolateMetrics bool) http.Handler {
@@ -75,7 +94,21 @@ func NewRouteHTTPHandler(handler http.Handler, operation string, providerFn func
 	if isolateMetrics {
 		opts = append(opts, otelhttp.WithMeterProvider(metricNoop.NewMeterProvider()))
 	}
-	return otelhttp.NewHandler(handler, operation, opts...)
+	otelHandler := otelhttp.NewHandler(handler, operation, opts...)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var tp trace.TracerProvider
+		if providerFn != nil {
+			tp = providerFn()
+		}
+		if tp == nil {
+			tp = otel.GetTracerProvider()
+		}
+		if isolateMetrics && isBypassableTracerProvider(tp) {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		otelHandler.ServeHTTP(w, r)
+	})
 }
 
 const (
@@ -113,10 +146,44 @@ func (rou *Router) SetTelemetry(providerFn func() trace.TracerProvider, isolateM
 	rou.isolateMetrics = isolateMetrics
 }
 
+func isCleanHTTPPath(p string) bool {
+	if len(p) == 0 || p[0] != '/' {
+		return false
+	}
+	if len(p) == 1 {
+		return true
+	}
+	if p[len(p)-1] == '/' {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] != '/' {
+			continue
+		}
+		if i+1 < len(p) && p[i+1] == '/' {
+			return false
+		}
+		if i+1 < len(p) && p[i+1] == '.' {
+			if i+2 == len(p) || p[i+2] == '/' {
+				return false
+			}
+			if p[i+2] == '.' && (i+3 == len(p) || p[i+3] == '/') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // ServeHTTP implements [http.Handler] interface with path normalization.
 func (rou *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Normalize the path before routing to handle double slashes
 	originalPath := r.URL.Path
+	if isCleanHTTPPath(originalPath) {
+		rou.mux.ServeHTTP(w, r)
+		return
+	}
+
+	// Normalize the path before routing to handle double slashes
 	normalizedPath := path.Clean(originalPath)
 
 	// path.Clean returns "." for empty paths, convert to "/" for HTTP routing

@@ -1,19 +1,16 @@
 package pi
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"runtime/debug"
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/trace"
@@ -37,11 +34,12 @@ type handler struct {
 }
 
 type handlerResult struct {
-	data       any
-	err        error
-	ctx        context.Context
-	streamDone func()
+	data any
+	err  error
+	ctx  context.Context
 }
+
+func noopStreamDone() {}
 
 type ErrorLogEntry struct {
 	TraceID string `json:"trace_id,omitempty"`
@@ -53,17 +51,21 @@ func (el *ErrorLogEntry) PrettyPrint(writer io.Writer) {
 }
 
 func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	traceID := trace.SpanFromContext(r.Context()).SpanContext().TraceID().String()
-	if !trace.SpanFromContext(r.Context()).SpanContext().HasTraceID() {
+	sc := trace.SpanFromContext(r.Context()).SpanContext()
+	var traceID string
+	if sc.HasTraceID() {
+		traceID = sc.TraceID().String()
+	} else {
 		traceID = uuid.NewString()
 	}
 	w.Header().Set("X-Request-ID", traceID)
-	deadline := time.Now().Add(h.requestTimeout)
+
 	policy := piHTTP.LegacyStatus
 	if h.rt != nil && h.rt.explicitHTTPStatus {
 		policy = piHTTP.ExplicitStatus
 	}
 	responder := piHTTP.NewResponderForRequest(w, r, policy)
+
 	max := h.maxBodyBytes
 	if max <= 0 && h.rt != nil {
 		max = h.rt.maxBodyBytes
@@ -71,178 +73,106 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if max <= 0 {
 		max = 1 << 20
 	}
-	// The asynchronous Handler owns a request snapshot. The net/http server may
-	// close/reuse the original body and routing context after a timeout response.
-	var (
-		snapshotBytes []byte
-		hasSnapshot   bool
-	)
-	if !websocket.IsWebSocketUpgrade(r) {
-		owned := r.Clone(r.Context())
-		if route := chi.RouteContext(r.Context()); route != nil {
-			copy := *route
-			copy.URLParams.Keys = append([]string(nil), route.URLParams.Keys...)
-			copy.URLParams.Values = append([]string(nil), route.URLParams.Values...)
-			copy.RoutePatterns = append([]string(nil), route.RoutePatterns...)
-			owned = owned.WithContext(context.WithValue(owned.Context(), chi.RouteCtxKey, &copy))
-		}
-		if r.Body != nil || r.MultipartForm != nil || len(r.PostForm) > 0 {
-			controller := http.NewResponseController(w)
-			if h.requestTimeout > 0 {
-				_ = controller.SetReadDeadline(deadline)
-			}
-			body, contentType, err := snapshotBody(w, r, max)
-			if r.Body != nil {
-				_ = r.Body.Close()
-			}
-			if h.requestTimeout > 0 {
-				_ = controller.SetReadDeadline(time.Time{})
-			}
-			if err != nil {
-				var limit *http.MaxBytesError
-				var timeout net.Error
-				if errors.As(err, &limit) {
-					responder.Respond(nil, piHTTP.ErrorPayloadTooLarge{})
-				} else if errors.As(err, &timeout) && timeout.Timeout() {
-					responder.Respond(nil, piHTTP.ErrorRequestTimeout{})
-				} else {
-					responder.Respond(nil, piHTTP.ErrorMalformedBody{})
-				}
-				return
-			}
-			snapshotBytes = body
-			hasSnapshot = true
-			owned.Body = io.NopCloser(bytes.NewReader(body))
-			if contentType != "" {
-				owned.Header.Set("Content-Type", contentType)
-				owned.ContentLength = int64(len(body))
-				owned.Form = nil
-				owned.PostForm = nil
-				owned.MultipartForm = nil
-			}
-		} else {
-			hasSnapshot = true
-		}
-		r = owned
-	}
+
 	var validate func(any) error
 	if h.rt != nil {
 		validate = h.rt.validate
-	}
-	piReq := piHTTP.NewRequestWithSnapshotAndLimit(r, validate, snapshotBytes, hasSnapshot, max)
-	snapshotBytes = nil
-	c := newContext(responder, piReq, h.rt)
-	rawReqCtx := r.Context()
-
-	if websocket.IsWebSocketUpgrade(r) {
-		// If the request is a WebSocket upgrade, do not apply the timeout
-		c.Context = r.Context()
-		c.ContextLogger.UpdateContext(c.Context)
-	} else if h.requestTimeout != 0 {
-		ctx, cancel := context.WithDeadline(r.Context(), deadline)
-		defer cancel()
-
-		c.Context = ctx
-		c.ContextLogger.UpdateContext(c.Context)
 	}
 
 	// The websocket middleware has already hijacked this connection. Execute
 	// directly so ServeHTTP stays bound to the WebSocket loop lifetime and
 	// WSHandlerUpgrade's deferred cleanup never fires while the loop is active.
 	if r.Context().Value(piWS.WSConnectionKey) != nil {
+		piReq := piHTTP.NewRequestWithLimit(r, max, validate)
+		c := newContext(responder, piReq, h.rt)
 		doneHandler := h.rt.BeginHandlerExecution()
 		defer doneHandler()
 		_ = h.execute(c, traceID)
 		return
 	}
 
-	// Handler middleware and Context.Trace may replace c.Context. The response
-	// goroutine owns this original cancellation context and never reads c again.
-	requestCtx := c.Context
-	results := make(chan handlerResult, 1)
-	responseDone := make(chan struct{})
-	defer close(responseDone)
-
-	var (
-		handoffMu sync.Mutex
-		timedOut  bool
-	)
-
-	doneHandler := h.rt.BeginHandlerExecution()
-	go func() {
-		defer doneHandler()
-		defer func() {
-			if r.MultipartForm != nil {
-				<-responseDone
-				_ = r.MultipartForm.RemoveAll()
-			}
-		}()
-		// Buffering lets a late Handler finish even after the response has timed out.
-		execRes := h.execute(c, traceID)
-		handoffMu.Lock()
-		if !timedOut && execRes.err == nil && r.Method != http.MethodHead && hasActiveStreamResponse(execRes.data) && h.rt != nil {
-			execRes.streamDone = h.rt.BeginHandlerExecution()
+	rawReqCtx := r.Context()
+	if err := rawReqCtx.Err(); err != nil {
+		if errors.Is(err, context.Canceled) {
+			responder.Respond(nil, piHTTP.ErrorClientClosedRequest{})
+		} else {
+			responder.Respond(nil, piHTTP.ErrorRequestTimeout{})
 		}
-		results <- execRes
-		handoffMu.Unlock()
+		return
+	}
+
+	isWSUpgrade := websocket.IsWebSocketUpgrade(r)
+	requestCtx := rawReqCtx
+	var readDeadline time.Time
+	applyTimeout := h.requestTimeout > 0 && !isWSUpgrade
+	if applyTimeout {
+		var cancel context.CancelFunc
+		requestCtx, cancel = context.WithTimeout(rawReqCtx, h.requestTimeout)
+		defer cancel()
+		r = r.WithContext(requestCtx)
+		if dl, ok := requestCtx.Deadline(); ok {
+			readDeadline = dl
+		}
+	}
+
+	_, bodyIsWriterTo := r.Body.(io.WriterTo)
+	bodyPreBuffered := r.MultipartForm != nil || len(r.PostForm) > 0 || r.GetBody != nil || bodyIsWriterTo
+
+	var bodyLimited bool
+	if !isWSUpgrade && r.Body != nil && r.Body != http.NoBody {
+		r.Body = http.MaxBytesReader(w, r.Body, max)
+		bodyLimited = true
+	}
+
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
 	}()
 
-	var result handlerResult
+	var deadlineRW http.ResponseWriter
+	if !bodyPreBuffered {
+		deadlineRW = w
+	}
 
-	select {
-	case <-requestCtx.Done():
-		handoffMu.Lock()
-		timedOut = true
-		select {
-		case late := <-results:
-			if late.streamDone != nil {
-				late.streamDone()
-			}
-		default:
-		}
-		handoffMu.Unlock()
+	piReq := piHTTP.NewRequestWithLimit(r, max, validate)
+	piReq.ConfigureBodyRead(deadlineRW, readDeadline, bodyLimited)
+	doneHandler := h.rt.BeginHandlerExecution()
+	defer doneHandler()
 
-		// Handle different context cancellation scenarios
-		ctxErr := requestCtx.Err()
+	c := newContext(responder, piReq, h.rt)
+	result := h.execute(c, traceID)
 
-		// Server-side timeout occurred && fallback for other context errors
-		result.err = piHTTP.ErrorRequestTimeout{}
-
-		if errors.Is(ctxErr, context.Canceled) {
-			// Client canceled the request (e.g., closed browser tab)
+	if result.err == nil && requestCtx.Err() != nil && !isHandledResponse(result.data) {
+		if errors.Is(requestCtx.Err(), context.Canceled) {
 			result.err = piHTTP.ErrorClientClosedRequest{}
+		} else {
+			result.err = piHTTP.ErrorRequestTimeout{}
 		}
-	case result = <-results:
 	}
-	if result.streamDone != nil {
-		defer result.streamDone()
-	}
+
 	if result.err == nil {
 		if result.ctx != nil {
 			responder.SetStreamBaseContext(context.WithoutCancel(result.ctx))
 		}
-		result.data = h.guardStream(result.data, traceID, rawReqCtx, result.streamDone)
+		result.data = h.guardStream(result.data, traceID, rawReqCtx, noopStreamDone)
 	}
 
-	// Handler function completed
 	responder.Respond(result.data, result.err)
 }
 
-func hasActiveStreamResponse(data any) bool {
-	switch value := data.(type) {
+func isHandledResponse(data any) bool {
+	switch v := data.(type) {
+	case response.Handled:
+		return true
 	case response.Result:
-		if value.StatusCode == http.StatusNoContent {
+		switch v.StatusCode {
+		case http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusNoContent:
+			_, ok := v.Data.(response.Handled)
+			return ok
+		default:
 			return false
 		}
-		return hasActiveStreamResponse(value.Data)
-	case response.Stream:
-		return value.Run != nil
-	case *response.Stream:
-		return value != nil && value.Run != nil
-	case response.SSE:
-		return value.Run != nil
-	case *response.SSE:
-		return value != nil && value.Run != nil
 	default:
 		return false
 	}

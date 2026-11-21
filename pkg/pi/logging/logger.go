@@ -484,6 +484,11 @@ func (l *logger) getLevel() Level {
 	return lvl
 }
 
+// IsInfoEnabled reports whether INFO-level logs are enabled.
+func (l *logger) IsInfoEnabled() bool {
+	return l != nil && l.getLevel() <= INFO
+}
+
 // SetShowCaller enables or disables caller information (file:line) in log output.
 func (l *logger) SetShowCaller(show bool) {
 	if l == nil {
@@ -547,7 +552,8 @@ func (noopLogger) logfWithExtraSkip(int, int, Level, string, string, ...any)    
 func (noopLogger) logStructuredWithSkip(int, Level, string, string, map[string]any) {}
 func (noopLogger) logStructuredWithCaller(int, int, uintptr, Level, string, string, map[string]any, bool) {
 }
-func (noopLogger) getLevel() Level { return FATAL + 1 }
+func (noopLogger) getLevel() Level     { return FATAL + 1 }
+func (noopLogger) IsInfoEnabled() bool { return false }
 
 var (
 	_ StructuredLogger           = (*logger)(nil)

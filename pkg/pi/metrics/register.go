@@ -6,6 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	metricNoop "go.opentelemetry.io/otel/metric/noop"
 )
 
 // Error can also be returned from all the methods, but it is decided not to do so such that to keep the usage clean -
@@ -53,8 +54,32 @@ type float64Gauge struct {
 	mu           sync.RWMutex
 }
 
+type noopMetricsManager struct{}
+
+// NewNoopMetricsManager creates a zero-allocation no-op metrics Manager.
+func NewNoopMetricsManager() Manager {
+	return noopMetricsManager{}
+}
+
+func (noopMetricsManager) IsNoop() bool                                                   { return true }
+func (noopMetricsManager) NewCounter(string, string)                                      {}
+func (noopMetricsManager) NewUpDownCounter(string, string)                                {}
+func (noopMetricsManager) NewHistogram(string, string, ...float64)                        {}
+func (noopMetricsManager) NewGauge(string, string)                                        {}
+func (noopMetricsManager) IncrementCounter(context.Context, string, ...string)            {}
+func (noopMetricsManager) DeltaUpDownCounter(context.Context, string, float64, ...string) {}
+func (noopMetricsManager) RecordHistogram(context.Context, string, float64, ...string)    {}
+func (noopMetricsManager) SetGauge(string, float64, ...string)                            {}
+
 // NewMetricsManager creates a new metrics manager instance with the provided metric  meter and logger.
 func NewMetricsManager(meter metric.Meter, logger Logger) Manager {
+	if meter == nil {
+		return noopMetricsManager{}
+	}
+	switch meter.(type) {
+	case metricNoop.Meter, *metricNoop.Meter:
+		return noopMetricsManager{}
+	}
 	return &metricsManager{
 		meter:  meter,
 		store:  newOtelStore(),

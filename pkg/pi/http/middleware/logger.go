@@ -113,17 +113,21 @@ type logger interface {
 	Error(...any)
 }
 
+type infoEnabledChecker interface {
+	IsInfoEnabled() bool
+}
+
 // Logging is a middleware which logs response status and time in milliseconds along with other data.
 func Logging(probes LogProbes, logger logger) func(inner http.Handler) http.Handler {
+	infoChecker, hasInfoCheck := logger.(infoEnabledChecker)
 	return func(inner http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			srw := &StatusResponseWriter{ResponseWriter: w}
 			sc := trace.SpanFromContext(r.Context()).SpanContext()
-			var traceID, spanID string
+			var traceID string
 			if sc.IsValid() {
 				traceID = sc.TraceID().String()
-				spanID = sc.SpanID().String()
 				srw.Header().Set("X-Correlation-ID", traceID)
 			}
 
@@ -135,14 +139,26 @@ func Logging(probes LogProbes, logger logger) func(inner http.Handler) http.Hand
 				return
 			}
 
-			defer handleRequestLog(srw, r, start, traceID, spanID, logger)
+			defer handleRequestLog(srw, r, start, sc, traceID, logger, infoChecker, hasInfoCheck)
 
 			inner.ServeHTTP(srw, r)
 		})
 	}
 }
 
-func handleRequestLog(srw *StatusResponseWriter, r *http.Request, start time.Time, traceID, spanID string, logger logger) {
+func handleRequestLog(srw *StatusResponseWriter, r *http.Request, start time.Time, sc trace.SpanContext, traceID string, logger logger, infoChecker infoEnabledChecker, hasInfoCheck bool) {
+	if logger == nil {
+		return
+	}
+	if srw.status < http.StatusInternalServerError && hasInfoCheck && !infoChecker.IsInfoEnabled() {
+		return
+	}
+
+	var spanID string
+	if sc.IsValid() {
+		spanID = sc.SpanID().String()
+	}
+
 	l := &RequestLog{
 		TraceID:      traceID,
 		SpanID:       spanID,
@@ -155,12 +171,10 @@ func handleRequestLog(srw *StatusResponseWriter, r *http.Request, start time.Tim
 		Response:     srw.status,
 	}
 
-	if logger != nil {
-		if srw.status >= http.StatusInternalServerError {
-			logger.Error(l)
-		} else {
-			logger.Log(l)
-		}
+	if srw.status >= http.StatusInternalServerError {
+		logger.Error(l)
+	} else {
+		logger.Log(l)
 	}
 }
 
@@ -183,17 +197,18 @@ func isLogProbeDisabled(probes LogProbes, urlPath string) bool {
 }
 
 func getIPAddress(r *http.Request) string {
-	ips := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-
 	// According to GCLB Documentation (https://cloud.google.com/load-balancing/docs/https/), IPs are added in following sequence.
 	// X-Forwarded-For: <unverified IP(s)>, <immediate client IP>, <global forwarding rule external IP>, <proxies running in GCP>
-	ipAddress := ips[0]
-
-	if ipAddress == "" {
-		ipAddress = r.RemoteAddr
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if idx := strings.IndexByte(xff, ','); idx >= 0 {
+			xff = xff[:idx]
+		}
+		if trimmed := strings.TrimSpace(xff); trimmed != "" {
+			return trimmed
+		}
 	}
 
-	return strings.TrimSpace(ipAddress)
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 type panicLog struct {
@@ -216,10 +231,12 @@ func panicRecovery(re any, w http.ResponseWriter, logger logger) {
 		e = "Unknown panic type"
 	}
 
-	logger.Error(panicLog{
-		Error:      e,
-		StackTrace: string(debug.Stack()),
-	})
+	if logger != nil {
+		logger.Error(panicLog{
+			Error:      e,
+			StackTrace: string(debug.Stack()),
+		})
+	}
 
 	w.WriteHeader(http.StatusInternalServerError)
 

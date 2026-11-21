@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"mime/multipart"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -453,4 +455,180 @@ func TestParseMsgTag(t *testing.T) {
 	// Empty
 	m = parseMsgTag("")
 	assert.Empty(t, m)
+}
+
+type timeoutReadCloser struct {
+	err    error
+	closed bool
+}
+
+func (b *timeoutReadCloser) Read([]byte) (int, error) {
+	return 0, b.err
+}
+
+func (b *timeoutReadCloser) Close() error {
+	b.closed = true
+	return nil
+}
+
+type netTimeoutErr struct{}
+
+func (netTimeoutErr) Error() string   { return "i/o timeout" }
+func (netTimeoutErr) Timeout() bool   { return true }
+func (netTimeoutErr) Temporary() bool { return false }
+
+type closerSpyBody struct {
+	reader io.Reader
+	closed bool
+}
+
+func (b *closerSpyBody) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
+}
+
+func (b *closerSpyBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestRequest_BindBodyErrorNormalizationAndEOFClose(t *testing.T) {
+	t.Run("truncated_json_body_io_error_returns_400_not_500", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/json", &timeoutReadCloser{err: io.ErrUnexpectedEOF})
+		r.Header.Set("Content-Type", "application/json")
+		req := NewRequest(r)
+
+		var dst struct {
+			Name string `json:"name"`
+		}
+		err := req.Bind(&dst)
+		require.Error(t, err)
+		status, _, _ := ErrorResponse(err)
+		assert.Equal(t, http.StatusBadRequest, status)
+	})
+
+	t.Run("slow_body_net_timeout_returns_408", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/json", &timeoutReadCloser{err: netTimeoutErr{}})
+		r.Header.Set("Content-Type", "application/json")
+		req := NewRequest(r)
+
+		var dst struct {
+			Name string `json:"name"`
+		}
+		err := req.Bind(&dst)
+		require.Error(t, err)
+		status, _, _ := ErrorResponse(err)
+		assert.Equal(t, http.StatusRequestTimeout, status)
+	})
+
+	t.Run("body_closes_origBody_on_clean_eof", func(t *testing.T) {
+		spy := &closerSpyBody{reader: strings.NewReader(`{"ok":true}`)}
+		r := httptest.NewRequest(http.MethodPost, "/json", spy)
+		r.Header.Set("Content-Type", "application/json")
+		req := NewRequest(r)
+
+		raw, err := req.RawBodyBytes()
+		require.NoError(t, err)
+		assert.Equal(t, `{"ok":true}`, string(raw))
+		assert.True(t, spy.closed)
+	})
+}
+
+type deadlineSpyResponseWriter struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (w *deadlineSpyResponseWriter) SetReadDeadline(d time.Time) error {
+	w.deadlines = append(w.deadlines, d)
+	return nil
+}
+
+func TestRequest_BodyReadDeadlineGuards(t *testing.T) {
+	t.Run("raw_body_arms_and_clears_deadline_immediately_and_multipart_bind_does_not_rearm", func(t *testing.T) {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("upload", "note.txt")
+		require.NoError(t, err)
+		_, err = io.WriteString(part, "hello")
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+		r := httptest.NewRequest(http.MethodPost, "/upload", &closerSpyBody{reader: bytes.NewReader(body.Bytes())})
+		r.ContentLength = int64(body.Len())
+		r.Header.Set("Content-Type", writer.FormDataContentType())
+
+		spyW := &deadlineSpyResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+		req := NewRequest(r)
+		req.ConfigureBodyRead(spyW, time.Now().Add(time.Second), false)
+
+		raw, err := req.RawBodyBytes()
+		require.NoError(t, err)
+		assert.NotEmpty(t, raw)
+		require.Len(t, spyW.deadlines, 2)
+		assert.False(t, spyW.deadlines[0].IsZero())
+		assert.True(t, spyW.deadlines[1].IsZero())
+
+		// Subsequent bindMultipart sees r.hasRawBody == true and must not touch socket SetReadDeadline.
+		var form struct {
+			Upload *multipart.FileHeader `form:"upload"`
+		}
+		require.NoError(t, req.Bind(&form))
+		require.NotNil(t, form.Upload)
+		assert.Len(t, spyW.deadlines, 2)
+	})
+
+	t.Run("preparsed_post_form_skips_socket_deadline_but_enforces_expired_deadline_and_no_closed_body_leak", func(t *testing.T) {
+		spyBody := &closerSpyBody{reader: strings.NewReader("")}
+		r := httptest.NewRequest(http.MethodPost, "/form", spyBody)
+		r.ContentLength = 10
+		r.PostForm = url.Values{"k": []string{strings.Repeat("a", 32)}}
+
+		spyW := &deadlineSpyResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+		req := NewRequestWithLimit(r, 8, nil)
+		req.ConfigureBodyRead(spyW, time.Now().Add(time.Second), false)
+
+		_, err := req.RawBodyBytes()
+		var maxErr *http.MaxBytesError
+		require.ErrorAs(t, err, &maxErr)
+		assert.Empty(t, spyW.deadlines)
+		assert.True(t, spyBody.closed)
+		assert.Equal(t, http.NoBody, r.Body)
+
+		// Expired readDeadline still fails fast with ErrorRequestTimeout even without socket deadline.
+		reqExpired := NewRequest(httptest.NewRequest(http.MethodPost, "/form", strings.NewReader("a=b")))
+		reqExpired.req.PostForm = url.Values{"a": []string{"b"}}
+		reqExpired.ConfigureBodyRead(spyW, time.Now().Add(-time.Second), false)
+		_, err = reqExpired.RawBodyBytes()
+		assert.ErrorAs(t, err, new(ErrorRequestTimeout))
+		assert.Empty(t, spyW.deadlines)
+	})
+
+	t.Run("bind_multipart_with_hasRawBody_still_enforces_canceled_context", func(t *testing.T) {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("upload", "note.txt")
+		require.NoError(t, err)
+		_, err = io.WriteString(part, "hello")
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+		ctx, cancel := context.WithCancel(context.Background())
+		r := httptest.NewRequest(http.MethodPost, "/upload", bytes.NewReader(body.Bytes())).WithContext(ctx)
+		r.Header.Set("Content-Type", writer.FormDataContentType())
+		spyW := &deadlineSpyResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+		req := NewRequest(r)
+		req.ConfigureBodyRead(spyW, time.Now().Add(time.Second), false)
+
+		_, err = req.RawBodyBytes()
+		require.NoError(t, err)
+		deadlinesAfterRaw := len(spyW.deadlines)
+
+		cancel()
+		var form struct {
+			Upload *multipart.FileHeader `form:"upload"`
+		}
+		err = req.Bind(&form)
+		assert.ErrorAs(t, err, new(ErrorClientClosedRequest))
+		assert.Len(t, spyW.deadlines, deadlinesAfterRaw)
+	})
 }

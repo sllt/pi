@@ -21,6 +21,7 @@ import (
 	"github.com/sllt/pi/pkg/pi/apperror"
 	"github.com/sllt/pi/pkg/pi/auth"
 	piRedis "github.com/sllt/pi/pkg/pi/datasource/redis"
+	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/middleware"
 	"github.com/sllt/pi/pkg/pi/http/response"
 	"github.com/sllt/pi/pkg/pi/testkit"
@@ -613,4 +614,71 @@ func TestIdempotency_LateCancelPreservationInitial4xxErrAndSpecialResponses(t *t
 		assert.Equal(t, int32(2), fileCalls.Load())
 		assert.Equal(t, int32(2), sseCalls.Load())
 	})
+}
+
+type idempotencyTimeoutNetErr struct{}
+
+func (idempotencyTimeoutNetErr) Error() string   { return "i/o timeout" }
+func (idempotencyTimeoutNetErr) Timeout() bool   { return true }
+func (idempotencyTimeoutNetErr) Temporary() bool { return false }
+
+type idempotencyHookReadCloser struct {
+	read func([]byte) (int, error)
+}
+
+func (r idempotencyHookReadCloser) Read(p []byte) (int, error) { return r.read(p) }
+func (r idempotencyHookReadCloser) Close() error               { return nil }
+
+func TestWithEndpointIdempotency_BodyReadTimeoutAndCancel(t *testing.T) {
+	spyStore := &spyIdempotencyStore{
+		IdempotencyStore: middleware.NewMemoryIdempotencyStore(100),
+	}
+	app := testkit.New(t)
+	var calls atomic.Int32
+	app.POST("/orders", func(_ *pi.Context, req *createOrderReq) (*createOrderRes, error) {
+		calls.Add(1)
+		return &createOrderRes{OrderID: "ord-1", Item: req.Item, Qty: req.Qty}, nil
+	}, pi.WithEndpointIdempotency(middleware.IdempotencyConfig{Store: spyStore}))
+	require.NoError(t, app.RouteError())
+
+	h, err := app.HTTPHandler()
+	require.NoError(t, err)
+
+	// Slow body read timeout returns 408 without touching the idempotency store.
+	timeoutReq := httptest.NewRequest(http.MethodPost, "/orders", idempotencyHookReadCloser{
+		read: func([]byte) (int, error) { return 0, idempotencyTimeoutNetErr{} },
+	})
+	timeoutReq.Header.Set("Content-Type", "application/json")
+	timeoutReq.Header.Set("Idempotency-Key", "idem-timeout-cancel")
+	wTimeout := httptest.NewRecorder()
+	h.ServeHTTP(wTimeout, timeoutReq)
+	assert.Equal(t, http.StatusRequestTimeout, wTimeout.Code)
+	assert.Equal(t, int32(0), spyStore.tryBeginCalls.Load())
+
+	// Context canceled while reading body returns 499 without touching the idempotency store.
+	reqCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cancelReq := httptest.NewRequest(http.MethodPost, "/orders", idempotencyHookReadCloser{
+		read: func([]byte) (int, error) {
+			cancel()
+			return 0, reqCtx.Err()
+		},
+	}).WithContext(reqCtx)
+	cancelReq.Header.Set("Content-Type", "application/json")
+	cancelReq.Header.Set("Idempotency-Key", "idem-timeout-cancel")
+	wCancel := httptest.NewRecorder()
+	h.ServeHTTP(wCancel, cancelReq)
+	assert.Equal(t, piHTTP.StatusClientClosedRequest, wCancel.Code)
+	assert.Equal(t, int32(0), spyStore.tryBeginCalls.Load())
+
+	// Subsequent valid retry with the same Idempotency-Key succeeds.
+	okReq := httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader(`{"item":"book","qty":1}`))
+	okReq.Header.Set("Content-Type", "application/json")
+	okReq.Header.Set("Idempotency-Key", "idem-timeout-cancel")
+	wOK := httptest.NewRecorder()
+	h.ServeHTTP(wOK, okReq)
+	assert.Equal(t, http.StatusCreated, wOK.Code)
+	assert.Equal(t, "false", wOK.Header().Get("X-Idempotent-Replayed"))
+	assert.Equal(t, int32(1), calls.Load())
+	assert.Equal(t, int32(1), spyStore.tryBeginCalls.Load())
 }

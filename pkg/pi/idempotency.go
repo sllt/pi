@@ -254,11 +254,16 @@ func (a *App) newIdempotencyPiMiddleware(cfg IdempotencyConfig) (PiMiddleware, f
 			bodyBytes, bodyErr := piReq.RawBodyBytes()
 			if bodyErr != nil {
 				var maxErr *http.MaxBytesError
-				var netErr net.Error
 				if errors.As(bodyErr, &maxErr) {
 					return nil, piHTTP.ErrorPayloadTooLarge{}
 				}
-				if errors.As(bodyErr, &netErr) && netErr.Timeout() {
+				var cancelErr piHTTP.ErrorClientClosedRequest
+				if errors.Is(bodyErr, context.Canceled) || errors.As(bodyErr, &cancelErr) {
+					return nil, piHTTP.ErrorClientClosedRequest{}
+				}
+				var timeoutErr piHTTP.ErrorRequestTimeout
+				var netErr net.Error
+				if errors.Is(bodyErr, context.DeadlineExceeded) || errors.As(bodyErr, &timeoutErr) || (errors.As(bodyErr, &netErr) && netErr.Timeout()) {
 					return nil, piHTTP.ErrorRequestTimeout{}
 				}
 				return nil, piHTTP.ErrorMalformedBody{}

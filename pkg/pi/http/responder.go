@@ -2,6 +2,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,14 +10,36 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/sllt/pi/pkg/pi/apperror"
 	resTypes "github.com/sllt/pi/pkg/pi/http/response"
 )
 
+const maxPooledResponseBufferCap = 64 << 10 // 64 KiB
+
 var (
-	errEmptyResponse = errors.New("internal server error")
+	errEmptyResponse    = errors.New("internal server error")
+	jsonEncodeErrorBody = []byte(`{"code":-1,"data":null,"message":"failed to encode response as JSON"}` + "\n")
+	jsonBufPool         = sync.Pool{
+		New: func() any {
+			return bytes.NewBuffer(make([]byte, 0, 512))
+		},
+	}
 )
+
+func acquireJSONBuf() *bytes.Buffer {
+	buf := jsonBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	return buf
+}
+
+func releaseJSONBuf(buf *bytes.Buffer) {
+	if buf.Cap() <= maxPooledResponseBufferCap {
+		buf.Reset()
+		jsonBufPool.Put(buf)
+	}
+}
 
 // NewResponder creates a new Responder instance from the given http.ResponseWriter.
 func NewResponder(w http.ResponseWriter, method string) *Responder {
@@ -126,11 +149,12 @@ func (r Responder) Respond(data any, err error) {
 		r.w.Header().Set("Content-Type", "application/json")
 	}
 
-	jsonData, encodeErr := json.Marshal(resp)
-	if encodeErr != nil {
+	buf := acquireJSONBuf()
+	if encodeErr := json.NewEncoder(buf).Encode(resp); encodeErr != nil {
+		releaseJSONBuf(buf)
 		r.w.WriteHeader(http.StatusInternalServerError)
 		if r.method != http.MethodHead {
-			_, _ = r.w.Write([]byte(`{"code":-1,"data":null,"message":"failed to encode response as JSON"}` + "\n"))
+			_, _ = r.w.Write(jsonEncodeErrorBody)
 		}
 
 		return
@@ -139,9 +163,9 @@ func (r Responder) Respond(data any, err error) {
 	statusCode := r.getHTTPStatusCode(data, err)
 	r.w.WriteHeader(statusCode)
 	if r.method != http.MethodHead {
-		_, _ = r.w.Write(jsonData)
-		_, _ = r.w.Write([]byte("\n"))
+		_, _ = r.w.Write(buf.Bytes())
 	}
+	releaseJSONBuf(buf)
 }
 
 // buildResponse constructs the unified response structure.

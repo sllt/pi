@@ -42,6 +42,26 @@ func Test_getIPAddress(t *testing.T) {
 
 		assert.Equal(t, addr, ip, "TEST Failed.\n")
 	}
+
+	{
+		// When `X-Forwarded-For` has multiple comma-separated IPs
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://dummy", http.NoBody)
+		require.NoError(t, err)
+
+		req.RemoteAddr = "127.0.0.1:9000"
+		req.Header.Set("X-Forwarded-For", " 10.0.0.1 , 10.0.0.2 ")
+		assert.Equal(t, "10.0.0.1", getIPAddress(req))
+	}
+
+	{
+		// When `X-Forwarded-For` has empty first segment, falls back to RemoteAddr
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://dummy", http.NoBody)
+		require.NoError(t, err)
+
+		req.RemoteAddr = "127.0.0.1:9000"
+		req.Header.Set("X-Forwarded-For", " , 10.0.0.2")
+		assert.Equal(t, "127.0.0.1:9000", getIPAddress(req))
+	}
 }
 
 func Test_LoggingMiddleware(t *testing.T) {
@@ -343,3 +363,36 @@ type mockAddr struct{}
 
 func (*mockAddr) Network() string { return "tcp" }
 func (*mockAddr) String() string  { return "127.0.0.1:8080" }
+
+func Test_LoggingMiddleware_LevelShortCircuit(t *testing.T) {
+	var normalBuf, errBuf bytes.Buffer
+	l := logging.NewWriterLogger(logging.WARN, &normalBuf, &errBuf)
+	mw := Logging(LogProbes{}, l)
+
+	okHandler := mw(http.HandlerFunc(testHandler))
+	errHandler := mw(http.HandlerFunc(testHandlerError))
+
+	// Below 500 when INFO is disabled -> skipped
+	req := httptest.NewRequest(http.MethodGet, "http://dummy/ok", http.NoBody)
+	rr := httptest.NewRecorder()
+	okHandler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Empty(t, normalBuf.String())
+	assert.Empty(t, errBuf.String())
+
+	// 500 error when INFO is disabled -> still logged to error writer
+	reqErr := httptest.NewRequest(http.MethodGet, "http://dummy/fail", http.NoBody)
+	rrErr := httptest.NewRecorder()
+	errHandler.ServeHTTP(rrErr, reqErr)
+	assert.Equal(t, http.StatusInternalServerError, rrErr.Code)
+	assert.Empty(t, normalBuf.String())
+	assert.Contains(t, errBuf.String(), `"response":500`)
+
+	// Dynamic level change to INFO -> 200 OK is logged
+	l.ChangeLevel(logging.INFO)
+	req2 := httptest.NewRequest(http.MethodGet, "http://dummy/ok2", http.NoBody)
+	rr2 := httptest.NewRecorder()
+	okHandler.ServeHTTP(rr2, req2)
+	assert.Equal(t, http.StatusOK, rr2.Code)
+	assert.Contains(t, normalBuf.String(), `"response":200`)
+}

@@ -2247,11 +2247,14 @@ func TestSelfReview_RateLimiter_DeferredOnBuildAndSubOneRPSAndCircuitBreaker(t *
 
 func TestSelfReview_HTTPHandler_TimedOutHandlerCompletesBeforeOwnedResourceClose(t *testing.T) {
 	var (
-		resourceClosed atomic.Bool
-		handlerEntered = make(chan struct{})
-		releaseHandler = make(chan struct{})
-		sawClosedInRun atomic.Bool
+		resourceClosed  atomic.Bool
+		handlerEntered  = make(chan struct{})
+		deadlineExpired = make(chan struct{})
+		releaseHandler  = make(chan struct{})
+		sawClosedInRun  atomic.Bool
 	)
+	unblock := sync.OnceFunc(func() { close(releaseHandler) })
+	t.Cleanup(unblock)
 
 	app, err := Build(
 		WithConfig(map[string]string{
@@ -2269,10 +2272,13 @@ func TestSelfReview_HTTPHandler_TimedOutHandlerCompletesBeforeOwnedResourceClose
 	)
 	require.NoError(t, err)
 	defer app.Stop(context.Background())
+	defer unblock()
 
 	api := app.Group("/v1")
-	api.addRoute("GET", "/slow", func(*Context) (any, error) {
+	api.addRoute("GET", "/slow", func(c *Context) (any, error) {
 		close(handlerEntered)
+		<-c.Done()
+		close(deadlineExpired)
 		<-releaseHandler
 		if resourceClosed.Load() {
 			sawClosedInRun.Store(true)
@@ -2289,10 +2295,7 @@ func TestSelfReview_HTTPHandler_TimedOutHandlerCompletesBeforeOwnedResourceClose
 	}()
 
 	<-handlerEntered
-	resp := <-respCh
-	require.NotNil(t, resp)
-	_ = resp.Body.Close()
-	require.Equal(t, http.StatusRequestTimeout, resp.StatusCode)
+	<-deadlineExpired
 
 	stopReturned := make(chan error, 1)
 	go func() {
@@ -2302,7 +2305,12 @@ func TestSelfReview_HTTPHandler_TimedOutHandlerCompletesBeforeOwnedResourceClose
 	time.Sleep(40 * time.Millisecond)
 	assert.False(t, resourceClosed.Load(), "Owned resource must not close while timed-out HTTP handler is still running")
 
-	close(releaseHandler)
+	unblock()
+	resp := <-respCh
+	require.NotNil(t, resp)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusRequestTimeout, resp.StatusCode)
+
 	require.NoError(t, <-stopReturned)
 	assert.True(t, resourceClosed.Load())
 	assert.False(t, sawClosedInRun.Load(), "handler must never observe Owned resource closed during execution")

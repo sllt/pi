@@ -182,6 +182,24 @@ func (r *remoteLogger) Unwrap() logging.Logger {
 	return r.Logger
 }
 
+type infoEnabledChecker interface {
+	IsInfoEnabled() bool
+}
+
+// IsInfoEnabled reports whether INFO-level logs are enabled on the underlying logger.
+func (r *remoteLogger) IsInfoEnabled() bool {
+	if r == nil || r.Logger == nil {
+		return false
+	}
+	if checker, ok := r.Logger.(infoEnabledChecker); ok {
+		return checker.IsInfoEnabled()
+	}
+	r.mu.RLock()
+	lvl := r.currentLevel
+	r.mu.RUnlock()
+	return lvl <= logging.INFO
+}
+
 func (r *remoteLogger) structuredTarget() logging.StructuredLogger {
 	if r == nil || r.Logger == nil {
 		return nil

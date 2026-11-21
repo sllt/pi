@@ -2,8 +2,10 @@ package pi
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"net/netip"
 	"reflect"
 	"strconv"
@@ -253,7 +255,7 @@ func newIsolatedKernel(
 		logger = logging.NewLogger(logging.GetLevelFromString(lvlStr))
 	}
 	if isNilValue(m) {
-		m = metrics.NewMetricsManager(metricNoop.NewMeterProvider().Meter("pi"), logger)
+		m = metrics.NewNoopMetricsManager()
 	}
 	appName := "pi-app"
 	appVersion := "dev"
@@ -270,7 +272,11 @@ func newIsolatedKernel(
 
 	hasCustomTP := !isNilValue(tp)
 	if !hasCustomTP {
-		if traceRatio > 0 {
+		hasExporter := cfg != nil && (strings.TrimSpace(cfg.Get("TRACE_EXPORTER")) != "" || strings.TrimSpace(cfg.Get("TRACER_URL")) != "")
+		switch {
+		case !(traceRatio > 0):
+			tp = traceNoop.NewTracerProvider()
+		case hasExporter:
 			tp = sdktrace.NewTracerProvider(
 				sdktrace.WithResource(resource.NewWithAttributes(
 					semconv.SchemaURL,
@@ -278,8 +284,11 @@ func newIsolatedKernel(
 				)),
 				sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(traceRatio))),
 			)
-		} else {
-			tp = traceNoop.NewTracerProvider()
+		default:
+			if traceRatio > 1 {
+				traceRatio = 1
+			}
+			tp = &lightweightTracerProvider{ratio: traceRatio}
 		}
 	}
 
@@ -729,4 +738,75 @@ func effectiveRedisPubSubMode(conf config.Config) string {
 		return redisPubSubModePubSub
 	}
 	return redisPubSubModeStreams
+}
+
+type lightweightTracerProvider struct {
+	traceNoop.TracerProvider
+	ratio float64
+}
+
+func (p lightweightTracerProvider) IsLightweightTrace() bool {
+	return true
+}
+
+func (p lightweightTracerProvider) TraceRatio() float64 {
+	return p.ratio
+}
+
+func (p lightweightTracerProvider) Tracer(_ string, _ ...trace.TracerOption) trace.Tracer {
+	return lightweightTracer{ratio: p.ratio}
+}
+
+type lightweightTracer struct {
+	traceNoop.Tracer
+	ratio float64
+}
+
+func (t lightweightTracer) Start(ctx context.Context, _ string, _ ...trace.SpanStartOption) (context.Context, trace.Span) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	parentSC := trace.SpanContextFromContext(ctx)
+
+	var spanID trace.SpanID
+	for !spanID.IsValid() {
+		binary.LittleEndian.PutUint64(spanID[:], rand.Uint64())
+	}
+
+	var cfg trace.SpanContextConfig
+	if parentSC.IsValid() {
+		cfg = trace.SpanContextConfig{
+			TraceID:    parentSC.TraceID(),
+			SpanID:     spanID,
+			TraceFlags: parentSC.TraceFlags(),
+			TraceState: parentSC.TraceState(),
+		}
+	} else {
+		var traceID trace.TraceID
+		for !traceID.IsValid() {
+			binary.LittleEndian.PutUint64(traceID[:8], rand.Uint64())
+			binary.LittleEndian.PutUint64(traceID[8:], rand.Uint64())
+		}
+		var flags trace.TraceFlags
+		if t.ratio >= 1 || (t.ratio > 0 && rand.Float64() < t.ratio) {
+			flags = trace.FlagsSampled
+		}
+		cfg = trace.SpanContextConfig{
+			TraceID:    traceID,
+			SpanID:     spanID,
+			TraceFlags: flags,
+		}
+	}
+
+	sc := trace.NewSpanContext(cfg)
+	return trace.ContextWithSpanContext(ctx, sc), lightweightSpan{sc: sc}
+}
+
+type lightweightSpan struct {
+	traceNoop.Span
+	sc trace.SpanContext
+}
+
+func (s lightweightSpan) SpanContext() trace.SpanContext {
+	return s.sc
 }

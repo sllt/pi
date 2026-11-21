@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,13 +18,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+	traceNoop "go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/sllt/pi/pkg/pi/config"
 	piHTTP "github.com/sllt/pi/pkg/pi/http"
 	"github.com/sllt/pi/pkg/pi/http/response"
 	"github.com/sllt/pi/pkg/pi/logging"
@@ -55,116 +57,387 @@ type handlerResultLogger struct {
 	errors chan any
 }
 
-type closedRequestBody struct {
-	io.Reader
-	closed atomic.Bool
+func TestHandler_ServeHTTP_SynchronousExecutionAndFastFail(t *testing.T) {
+	t.Run("executes_on_servehttp_goroutine_without_spawning_worker", func(t *testing.T) {
+		for _, timeout := range []time.Duration{0, 100 * time.Millisecond} {
+			var ranOnServeHTTPStack bool
+			h := handler{
+				rt:             newTestKernel(logging.NewLogger(logging.FATAL)),
+				requestTimeout: timeout,
+				function: func(c *Context) (any, error) {
+					pcs := make([]uintptr, 32)
+					n := runtime.Callers(1, pcs)
+					frames := runtime.CallersFrames(pcs[:n])
+					for {
+						frame, more := frames.Next()
+						if strings.HasSuffix(frame.Function, "handler.ServeHTTP") {
+							ranOnServeHTTPStack = true
+							break
+						}
+						if !more {
+							break
+						}
+					}
+					return "ok", nil
+				},
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/sync", http.NoBody))
+			require.Equal(t, http.StatusOK, w.Code)
+			assert.True(t, ranOnServeHTTPStack, "timeout=%v must run directly on ServeHTTP goroutine", timeout)
+		}
+	})
+
+	t.Run("fast_fails_before_handler_when_context_already_canceled_or_expired", func(t *testing.T) {
+		canceledCtx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		var called atomic.Bool
+		h := handler{
+			rt: newTestKernel(logging.NewLogger(logging.FATAL)),
+			function: func(*Context) (any, error) {
+				called.Store(true)
+				return "never", nil
+			},
+		}
+		wCancel := httptest.NewRecorder()
+		h.ServeHTTP(wCancel, httptest.NewRequest(http.MethodGet, "/", http.NoBody).WithContext(canceledCtx))
+		assert.Equal(t, piHTTP.StatusClientClosedRequest, wCancel.Code)
+		assert.False(t, called.Load())
+
+		expiredCtx, expCancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		defer expCancel()
+		wTimeout := httptest.NewRecorder()
+		h.ServeHTTP(wTimeout, httptest.NewRequest(http.MethodGet, "/", http.NoBody).WithContext(expiredCtx))
+		assert.Equal(t, http.StatusRequestTimeout, wTimeout.Code)
+		assert.False(t, called.Load())
+	})
+
+	t.Run("enforces_lazy_max_body_bytes_on_json_and_raw_body", func(t *testing.T) {
+		h := handler{
+			rt:           newTestKernel(logging.NewLogger(logging.FATAL)),
+			maxBodyBytes: 16,
+			function: func(c *Context) (any, error) {
+				var body struct {
+					Value string `json:"value"`
+				}
+				if err := c.Bind(&body); err != nil {
+					return nil, err
+				}
+				return body.Value, nil
+			},
+		}
+		overReq := httptest.NewRequest(http.MethodPost, "/items", strings.NewReader(`{"value":"0123456789abcdef"}`))
+		overReq.Header.Set("Content-Type", "application/json")
+		wOver := httptest.NewRecorder()
+		h.ServeHTTP(wOver, overReq)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, wOver.Code)
+
+		okReq := httptest.NewRequest(http.MethodPost, "/items", strings.NewReader(`{"value":"ok"}`))
+		okReq.Header.Set("Content-Type", "application/json")
+		wOK := httptest.NewRecorder()
+		h.ServeHTTP(wOK, okReq)
+		assert.Equal(t, http.StatusCreated, wOK.Code)
+	})
+
+	t.Run("skips_timeout_overwrite_for_response_handled", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			data any
+		}{
+			{name: "plain_handled", data: response.Handled{}},
+			{name: "result_wrapped_handled", data: response.Result{StatusCode: http.StatusOK, Data: response.Handled{}}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := handler{
+					rt:             newTestKernel(logging.NewLogger(logging.FATAL)),
+					requestTimeout: 5 * time.Millisecond,
+					function: func(c *Context) (any, error) {
+						<-c.Done()
+						return tc.data, nil
+					},
+				}
+				w := &countedResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+				h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/handled", http.NoBody))
+				assert.Equal(t, 0, w.commits)
+				assert.Empty(t, w.Body.String())
+			})
+		}
+	})
+
+	t.Run("does_not_skip_timeout_for_pointer_nested_or_invalid_status_result_handled", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			data any
+		}{
+			{name: "pointer_result_handled", data: &response.Result{StatusCode: http.StatusOK, Data: response.Handled{}}},
+			{name: "invalid_status_result_handled", data: response.Result{StatusCode: http.StatusInternalServerError, Data: response.Handled{}}},
+			{name: "nested_result_handled", data: response.Result{StatusCode: http.StatusOK, Data: response.Result{StatusCode: http.StatusOK, Data: response.Handled{}}}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := handler{
+					rt:             newTestKernel(logging.NewLogger(logging.FATAL)),
+					requestTimeout: 5 * time.Millisecond,
+					function: func(c *Context) (any, error) {
+						<-c.Done()
+						return tc.data, nil
+					},
+				}
+				w := &countedResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+				h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/handled", http.NoBody))
+				assert.Equal(t, 1, w.commits)
+				assert.Equal(t, http.StatusRequestTimeout, w.Code)
+			})
+		}
+	})
 }
 
-func (b *closedRequestBody) Read(p []byte) (int, error) {
-	if b.closed.Load() {
-		return 0, errors.New("original body already closed")
-	}
-	return b.Reader.Read(p)
-}
-func (b *closedRequestBody) Close() error { b.closed.Store(true); return nil }
+type handlerTimeoutNetErr struct{}
 
-func TestHandlerSnapshotSurvivesTimeoutAndRouterReuse(t *testing.T) {
-	entered, release, responded := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	unblock := sync.OnceFunc(func() { close(release) })
-	defer unblock()
-	type outcome struct {
-		value, param string
-		err          error
-	}
-	got := make(chan outcome, 1)
-	h := handler{rt: newTestKernel(logging.NewLogger(logging.FATAL)), requestTimeout: 5 * time.Millisecond, function: func(c *Context) (any, error) {
-		close(entered)
-		<-release
-		var body struct {
-			Value string `json:"value"`
-		}
-		err := c.Bind(&body)
-		got <- outcome{body.Value, c.PathParam("id"), err}
-		return nil, err
-	}}
-	r := httptest.NewRequest("POST", "/items/original", nil)
-	r.Header.Set("Content-Type", "application/json")
-	body := &closedRequestBody{Reader: strings.NewReader(`{"value":"original"}`)}
-	r.Body = body
-	route := chi.NewRouteContext()
-	route.URLParams.Add("id", "original")
-	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, route))
-	w := httptest.NewRecorder()
-	go func() { h.ServeHTTP(w, r); close(responded) }()
-	waitForHandlerSignal(t, entered)
-	waitForHandlerSignal(t, responded)
-	require.Equal(t, 408, w.Code)
-	require.True(t, body.closed.Load())
-	route.URLParams.Values[0] = "reused"
-	r.Header.Set("Content-Type", "wrong")
-	unblock()
-	result := <-got
-	require.NoError(t, result.err)
-	require.Equal(t, "original", result.value)
-	require.Equal(t, "original", result.param)
+func (handlerTimeoutNetErr) Error() string   { return "i/o timeout" }
+func (handlerTimeoutNetErr) Timeout() bool   { return true }
+func (handlerTimeoutNetErr) Temporary() bool { return false }
+
+type failingReadCloser struct {
+	err error
 }
 
-func TestHandlerOwnsPreparsedMultipartAfterTimeout(t *testing.T) {
-	var encoded bytes.Buffer
-	writer := multipart.NewWriter(&encoded)
-	part, err := writer.CreateFormFile("upload", "sample.txt")
-	require.NoError(t, err)
-	_, err = io.WriteString(part, "owned upload")
-	require.NoError(t, err)
-	require.NoError(t, writer.Close())
-	r := httptest.NewRequest("POST", "/upload", &encoded)
-	r.Header.Set("Content-Type", writer.FormDataContentType())
-	require.NoError(t, r.ParseMultipartForm(1))
-	t.Cleanup(func() { _ = r.MultipartForm.RemoveAll() })
-	entered, release, responded := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	unblock := sync.OnceFunc(func() { close(release) })
-	defer unblock()
-	type outcome struct {
-		data string
-		err  error
+func (f failingReadCloser) Read([]byte) (int, error) { return 0, f.err }
+func (f failingReadCloser) Close() error             { return nil }
+
+func TestHandler_POST_BodyMiddlewareWithSSEAndSlowHandler_AndSlowBody408(t *testing.T) {
+	t.Run("post_sse_and_slow_handler_behind_body_reading_middleware_with_real_http_server", func(t *testing.T) {
+		rt := newTestKernel(logging.NewLogger(logging.FATAL))
+
+		mux := http.NewServeMux()
+		bodyReadingMW := func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				_ = r.Body.Close()
+				r.Body = io.NopCloser(bytes.NewReader(raw))
+				next.ServeHTTP(w, r)
+			})
+		}
+
+		mux.Handle("/sse", bodyReadingMW(handler{
+			rt:             rt,
+			requestTimeout: 25 * time.Millisecond,
+			function: func(c *Context) (any, error) {
+				var payload map[string]string
+				if err := c.Bind(&payload); err != nil {
+					return nil, err
+				}
+				return response.NewSSE(func(ctx context.Context, sse *response.SSEWriter) error {
+					time.Sleep(60 * time.Millisecond)
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					return sse.SendEvent("finish", payload["msg"])
+				}, response.WithSSEKeepAlive(0)), nil
+			},
+		}))
+
+		mux.Handle("/slow", bodyReadingMW(handler{
+			rt:             rt,
+			requestTimeout: 25 * time.Millisecond,
+			function: func(c *Context) (any, error) {
+				var payload map[string]string
+				if err := c.Bind(&payload); err != nil {
+					return nil, err
+				}
+				time.Sleep(60 * time.Millisecond)
+				return payload, nil
+			},
+		}))
+
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		// POST SSE must not abort at requestTimeout.
+		sseResp, err := srv.Client().Post(srv.URL+"/sse", "application/json", strings.NewReader(`{"msg":"ok"}`))
+		require.NoError(t, err)
+		defer sseResp.Body.Close()
+		sseBody, err := io.ReadAll(sseResp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, sseResp.StatusCode)
+		assert.Contains(t, string(sseBody), "event: finish\ndata: ok\n\n")
+
+		// Slow handler behind body-reading middleware must return 408, not 499.
+		slowResp, err := srv.Client().Post(srv.URL+"/slow", "application/json", strings.NewReader(`{"msg":"ok"}`))
+		require.NoError(t, err)
+		defer slowResp.Body.Close()
+		assert.Equal(t, http.StatusRequestTimeout, slowResp.StatusCode)
+	})
+
+	t.Run("slow_body_read_timeout_returns_408_in_legacy_and_typed_handler", func(t *testing.T) {
+		legacyH := handler{
+			rt: newTestKernel(logging.NewLogger(logging.FATAL)),
+			function: func(c *Context) (any, error) {
+				var payload struct {
+					Name string `json:"name"`
+				}
+				if err := c.Bind(&payload); err != nil {
+					return nil, err
+				}
+				return payload, nil
+			},
+		}
+		legacyReq := httptest.NewRequest(http.MethodPost, "/legacy", failingReadCloser{err: handlerTimeoutNetErr{}})
+		legacyReq.Header.Set("Content-Type", "application/json")
+		legacyRec := httptest.NewRecorder()
+		legacyH.ServeHTTP(legacyRec, legacyReq)
+		assert.Equal(t, http.StatusRequestTimeout, legacyRec.Code)
+
+		app, err := Build(
+			WithConfig(map[string]string{
+				"HTTP_ENABLED": "false",
+				"GRPC_ENABLED": "false",
+			}),
+			WithExplicitHTTPStatus(),
+		)
+		require.NoError(t, err)
+		defer func() { _ = app.Stop(context.Background()) }()
+		type typedReq struct {
+			Name string `json:"name"`
+		}
+		type typedRes struct {
+			Name string `json:"name"`
+		}
+		app.POST("/typed", func(c *Context, req *typedReq) (*typedRes, error) {
+			return &typedRes{Name: req.Name}, nil
+		})
+		appHTTP, err := app.HTTPHandler()
+		require.NoError(t, err)
+
+		tReq := httptest.NewRequest(http.MethodPost, "/typed", failingReadCloser{err: handlerTimeoutNetErr{}})
+		tReq.Header.Set("Content-Type", "application/json")
+		tRec := httptest.NewRecorder()
+		appHTTP.ServeHTTP(tRec, tReq)
+		assert.Equal(t, http.StatusRequestTimeout, tRec.Code)
+	})
+}
+
+func TestHandlerOwnsPreparsedMultipartAndForm(t *testing.T) {
+	t.Run("preparsed_multipart_binds_and_reads_file", func(t *testing.T) {
+		var encoded bytes.Buffer
+		writer := multipart.NewWriter(&encoded)
+		part, err := writer.CreateFormFile("upload", "sample.txt")
+		require.NoError(t, err)
+		_, err = io.WriteString(part, "owned upload")
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+		r := httptest.NewRequest(http.MethodPost, "/upload", &encoded)
+		r.Header.Set("Content-Type", writer.FormDataContentType())
+		require.NoError(t, r.ParseMultipartForm(1))
+
+		var gotData string
+		h := handler{
+			rt: newTestKernel(logging.NewLogger(logging.FATAL)),
+			function: func(c *Context) (any, error) {
+				var form struct {
+					Upload *multipart.FileHeader `form:"upload"`
+				}
+				if err := c.Bind(&form); err != nil {
+					return nil, err
+				}
+				if form.Upload == nil {
+					return nil, errors.New("upload not bound")
+				}
+				file, err := form.Upload.Open()
+				if err != nil {
+					return nil, err
+				}
+				defer file.Close()
+				data, err := io.ReadAll(file)
+				if err != nil {
+					return nil, err
+				}
+				gotData = string(data)
+				return gotData, nil
+			},
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		require.Equal(t, http.StatusCreated, w.Code)
+		require.Equal(t, "owned upload", gotData)
+	})
+
+	t.Run("preparsed_post_form_reconstructs_raw_body", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/form", strings.NewReader("name=alice&role=admin"))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		require.NoError(t, r.ParseForm())
+
+		var rawBody string
+		var boundName string
+		h := handler{
+			rt: newTestKernel(logging.NewLogger(logging.FATAL)),
+			function: func(c *Context) (any, error) {
+				piReq := c.Request.(*piHTTP.Request)
+				raw, err := piReq.RawBodyBytes()
+				if err != nil {
+					return nil, err
+				}
+				rawBody = string(raw)
+				var form struct {
+					Name string `form:"name"`
+				}
+				if err := c.Bind(&form); err != nil {
+					return nil, err
+				}
+				boundName = form.Name
+				return boundName, nil
+			},
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		require.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, "alice", boundName)
+		assert.Contains(t, rawBody, "name=alice")
+	})
+
+	t.Run("prebuffered_in_memory_body_never_arms_socket_read_deadline", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/json", io.NopCloser(bytes.NewReader([]byte(`{"name":"alice"}`))))
+		r.GetBody = nil
+		r.Header.Set("Content-Type", "application/json")
+
+		var deadlined bool
+		h := handler{
+			rt:             newTestKernel(logging.NewLogger(logging.FATAL)),
+			requestTimeout: 50 * time.Millisecond,
+			function: func(c *Context) (any, error) {
+				var dst struct {
+					Name string `json:"name"`
+				}
+				if err := c.Bind(&dst); err != nil {
+					return nil, err
+				}
+				return dst.Name, nil
+			},
+		}
+		w := &handlerDeadlineSpyWriter{
+			ResponseRecorder: httptest.NewRecorder(),
+			onSetReadDeadline: func(time.Time) {
+				deadlined = true
+			},
+		}
+		h.ServeHTTP(w, r)
+		require.Equal(t, http.StatusCreated, w.Code)
+		assert.False(t, deadlined, "in-memory io.NopCloser(bytes.NewReader) body must not arm socket SetReadDeadline")
+	})
+}
+
+type handlerDeadlineSpyWriter struct {
+	*httptest.ResponseRecorder
+	onSetReadDeadline func(time.Time)
+}
+
+func (w *handlerDeadlineSpyWriter) SetReadDeadline(d time.Time) error {
+	if w.onSetReadDeadline != nil {
+		w.onSetReadDeadline(d)
 	}
-	got := make(chan outcome, 1)
-	h := handler{rt: newTestKernel(logging.NewLogger(logging.FATAL)), requestTimeout: 5 * time.Millisecond, function: func(c *Context) (any, error) {
-		close(entered)
-		<-release
-		var form struct {
-			Upload *multipart.FileHeader `form:"upload"`
-		}
-		err := c.Bind(&form)
-		if err != nil {
-			got <- outcome{err: err}
-			return nil, err
-		}
-		if form.Upload == nil {
-			err = errors.New("upload not bound")
-			got <- outcome{err: err}
-			return nil, err
-		}
-		file, err := form.Upload.Open()
-		if err != nil {
-			got <- outcome{err: err}
-			return nil, err
-		}
-		defer file.Close()
-		data, err := io.ReadAll(file)
-		got <- outcome{string(data), err}
-		return nil, err
-	}}
-	w := httptest.NewRecorder()
-	go func() { h.ServeHTTP(w, r); close(responded) }()
-	waitForHandlerSignal(t, entered)
-	waitForHandlerSignal(t, responded)
-	require.Equal(t, 408, w.Code)
-	require.NoError(t, r.MultipartForm.RemoveAll())
-	unblock()
-	result := <-got
-	require.NoError(t, result.err)
-	require.Equal(t, "owned upload", result.data)
+	return nil
 }
 
 func (l *handlerResultLogger) Error(args ...any) {
@@ -183,27 +456,23 @@ func waitForHandlerSignal(t *testing.T, signal <-chan struct{}) {
 	}
 }
 
-func TestHandler_ServeHTTP_LateCompletion(t *testing.T) {
+func TestHandler_ServeHTTP_CooperativeTimeoutAndCancel(t *testing.T) {
 	for _, reason := range []string{"timeout", "cancel"} {
 		for _, outcome := range []string{"success", "error", "panic"} {
 			t.Run(reason+"/"+outcome, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 
-				started, returned, responded := make(chan struct{}), make(chan struct{}), make(chan struct{})
-				release := make(chan struct{})
-				unblock := sync.OnceFunc(func() { close(release) })
-				t.Cleanup(unblock)
+				started, responded := make(chan struct{}), make(chan struct{})
 				var marshaled atomic.Int32
 				logger := &handlerResultLogger{
 					Logger: logging.NewLogger(logging.FATAL), errors: make(chan any, 1),
 				}
 				h := handler{
 					rt: newTestKernel(logger),
-					function: func(*Context) (any, error) {
-						defer close(returned)
+					function: func(c *Context) (any, error) {
 						close(started)
-						<-release // Deliberately ignores cancellation until the response is sent.
+						<-c.Done()
 						data := response.Response{
 							Data:    lateResponsePayload{marshaled: &marshaled},
 							Headers: map[string]string{"X-Late-Result": "must-not-be-written"},
@@ -218,10 +487,13 @@ func TestHandler_ServeHTTP_LateCompletion(t *testing.T) {
 						}
 					},
 				}
-				status := piHTTP.StatusClientClosedRequest
+				expectedStatus := piHTTP.StatusClientClosedRequest
 				if reason == "timeout" {
 					h.requestTimeout = time.Millisecond
-					status = http.StatusRequestTimeout
+					expectedStatus = http.StatusRequestTimeout
+				}
+				if outcome == "error" || outcome == "panic" {
+					expectedStatus = http.StatusInternalServerError
 				}
 				w := &countedResponseWriter{ResponseRecorder: httptest.NewRecorder()}
 				r := httptest.NewRequest(http.MethodGet, "/", http.NoBody).WithContext(ctx)
@@ -234,13 +506,10 @@ func TestHandler_ServeHTTP_LateCompletion(t *testing.T) {
 					cancel()
 				}
 				waitForHandlerSignal(t, responded)
-				require.Equal(t, status, w.Code)
+				require.Equal(t, expectedStatus, w.Code)
 				require.Equal(t, 1, w.commits)
 				require.Empty(t, w.Header().Get("X-Late-Result"))
-				body := w.Body.String()
 
-				unblock()
-				waitForHandlerSignal(t, returned)
 				if outcome != "success" {
 					select {
 					case entry := <-logger.errors:
@@ -253,12 +522,10 @@ func TestHandler_ServeHTTP_LateCompletion(t *testing.T) {
 							assert.NotEmpty(t, entry.(panicLog).StackTrace)
 						}
 					case <-time.After(5 * time.Second):
-						t.Fatal("late failure was not logged")
+						t.Fatal("failure was not logged")
 					}
 				}
-				assert.Zero(t, marshaled.Load(), "late data must not be encoded")
-				assert.Equal(t, body, w.Body.String())
-				assert.Equal(t, 1, w.commits)
+				assert.Zero(t, marshaled.Load(), "discarded payload must not be encoded")
 			})
 		}
 	}
@@ -290,6 +557,7 @@ func TestHandler_ServeHTTP_ContextReplacement(t *testing.T) {
 	}()
 	waitForHandlerSignal(t, started)
 	cancel()
+	unblock()
 	waitForHandlerSignal(t, responded)
 	assert.Equal(t, piHTTP.StatusClientClosedRequest, w.Code)
 }
@@ -737,38 +1005,132 @@ func TestHandler_ActiveHandlersDoesNotDropToZeroBeforeStreamRun(t *testing.T) {
 		}
 	})
 
-	t.Run("late_stream_after_timeout_does_not_leak_active_handlers", func(t *testing.T) {
+	t.Run("timed_out_stream_handler_does_not_leak_active_handlers", func(t *testing.T) {
 		rt := newTestKernel(logging.NewLogger(logging.FATAL))
-		entered, release, responded := make(chan struct{}), make(chan struct{}), make(chan struct{})
-		unblock := sync.OnceFunc(func() { close(release) })
-		t.Cleanup(unblock)
+		var sseRan atomic.Bool
 
 		h := handler{
 			rt:             rt,
 			requestTimeout: 5 * time.Millisecond,
-			function: func(*Context) (any, error) {
-				close(entered)
-				<-release
+			function: func(c *Context) (any, error) {
+				<-c.Done()
 				return response.NewSSE(func(context.Context, *response.SSEWriter) error {
+					sseRan.Store(true)
 					return nil
 				}, response.WithSSEKeepAlive(0)), nil
 			},
 		}
 
 		rec := httptest.NewRecorder()
-		go func() {
-			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sse", http.NoBody))
-			close(responded)
-		}()
-
-		waitForHandlerSignal(t, entered)
-		waitForHandlerSignal(t, responded)
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sse", http.NoBody))
 		assert.Equal(t, http.StatusRequestTimeout, rec.Code)
+		assert.False(t, sseRan.Load())
 
-		unblock()
 		waitCtx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 		require.NoError(t, rt.WaitHandlers(waitCtx))
 		assert.Zero(t, activeCount(rt))
+	})
+}
+
+func TestLightweightTracerProvider(t *testing.T) {
+	t.Run("generates_valid_non_recording_span_and_preserves_parent_trace_id", func(t *testing.T) {
+		tp := &lightweightTracerProvider{ratio: 1}
+		assert.True(t, tp.IsLightweightTrace())
+		assert.Equal(t, 1.0, tp.TraceRatio())
+
+		tr := tp.Tracer("pi-test")
+		ctx, span := tr.Start(t.Context(), "op")
+		assert.False(t, span.IsRecording())
+		sc := span.SpanContext()
+		assert.True(t, sc.IsValid())
+		assert.True(t, sc.HasTraceID())
+		assert.True(t, sc.HasSpanID())
+		assert.True(t, sc.IsSampled())
+		assert.Equal(t, sc, trace.SpanContextFromContext(ctx))
+		span.End()
+
+		// Child span preserves TraceID and generates a fresh SpanID.
+		childCtx, childSpan := tr.Start(ctx, "child")
+		childSC := childSpan.SpanContext()
+		assert.Equal(t, sc.TraceID(), childSC.TraceID())
+		assert.NotEqual(t, sc.SpanID(), childSC.SpanID())
+		assert.True(t, childSC.IsSampled())
+		assert.Equal(t, childSC, trace.SpanContextFromContext(childCtx))
+	})
+
+	t.Run("unsampled_parent_stays_unsampled_and_preserves_tracestate", func(t *testing.T) {
+		ts, err := trace.ParseTraceState("rojo=00f067aa0ba902b7")
+		require.NoError(t, err)
+		tid, err := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+		require.NoError(t, err)
+		sid, err := trace.SpanIDFromHex("00f067aa0ba902b7")
+		require.NoError(t, err)
+
+		parentSC := trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID:    tid,
+			SpanID:     sid,
+			TraceFlags: 0,
+			TraceState: ts,
+			Remote:     true,
+		})
+		parentCtx := trace.ContextWithSpanContext(t.Context(), parentSC)
+
+		tp := &lightweightTracerProvider{ratio: 1}
+		tr := tp.Tracer("pi-test")
+		childCtx, childSpan := tr.Start(parentCtx, "child")
+		childSC := childSpan.SpanContext()
+		assert.Equal(t, tid, childSC.TraceID())
+		assert.NotEqual(t, sid, childSC.SpanID())
+		assert.False(t, childSC.IsSampled())
+		assert.Equal(t, trace.TraceFlags(0), childSC.TraceFlags())
+		assert.Equal(t, "00f067aa0ba902b7", childSC.TraceState().Get("rojo"))
+		assert.Equal(t, childSC, trace.SpanContextFromContext(childCtx))
+	})
+
+	t.Run("root_sampling_decision_inherited_consistently_by_children", func(t *testing.T) {
+		tp := &lightweightTracerProvider{ratio: 1e-12}
+		tr := tp.Tracer("pi-test")
+		var sawUnsampledRoot bool
+		for range 16 {
+			rootCtx, rootSpan := tr.Start(t.Context(), "root")
+			rootSC := rootSpan.SpanContext()
+			assert.True(t, rootSC.IsValid())
+			assert.True(t, rootSC.HasTraceID())
+			assert.True(t, rootSC.HasSpanID())
+
+			childCtx, childSpan := tr.Start(rootCtx, "child")
+			childSC := childSpan.SpanContext()
+			assert.Equal(t, rootSC.TraceID(), childSC.TraceID())
+			assert.NotEqual(t, rootSC.SpanID(), childSC.SpanID())
+			assert.Equal(t, rootSC.TraceFlags(), childSC.TraceFlags())
+			assert.Equal(t, childSC, trace.SpanContextFromContext(childCtx))
+			if !rootSC.IsSampled() {
+				sawUnsampledRoot = true
+			}
+		}
+		assert.True(t, sawUnsampledRoot)
+	})
+
+	t.Run("kernel_selects_lightweight_noop_or_sdk_tracer_provider", func(t *testing.T) {
+		lwKernel := newIsolatedKernel(config.NewMockConfig(map[string]string{}), logging.NewLogger(logging.FATAL), nil, nil)
+		_, isLW := lwKernel.getTracerProvider().(*lightweightTracerProvider)
+		assert.True(t, isLW)
+
+		noopKernel := newIsolatedKernel(config.NewMockConfig(map[string]string{"TRACER_RATIO": "0"}), logging.NewLogger(logging.FATAL), nil, nil)
+		_, isNoop := noopKernel.getTracerProvider().(traceNoop.TracerProvider)
+		assert.True(t, isNoop)
+
+		nanKernel := newIsolatedKernel(config.NewMockConfig(map[string]string{"TRACER_RATIO": "NaN"}), logging.NewLogger(logging.FATAL), nil, nil)
+		_, isNaNNoop := nanKernel.getTracerProvider().(traceNoop.TracerProvider)
+		assert.True(t, isNaNNoop)
+
+		sdkKernel := newIsolatedKernel(config.NewMockConfig(map[string]string{
+			"TRACE_EXPORTER": "otlp",
+			"TRACER_URL":     "127.0.0.1:4317",
+		}), logging.NewLogger(logging.FATAL), nil, nil)
+		sdkTP, isSDK := sdkKernel.getTracerProvider().(*sdktrace.TracerProvider)
+		require.True(t, isSDK)
+		_ = sdkTP.Shutdown(context.Background())
 	})
 }

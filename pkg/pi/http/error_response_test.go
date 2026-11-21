@@ -42,3 +42,16 @@ func TestPublicErrors(t *testing.T) {
 		})
 	}
 }
+
+type downstreamTimeoutError struct{}
+
+func (downstreamTimeoutError) Error() string   { return "i/o timeout" }
+func (downstreamTimeoutError) Timeout() bool   { return true }
+func (downstreamTimeoutError) Temporary() bool { return false }
+
+func TestErrorResponse_DownstreamNetTimeoutStays500(t *testing.T) {
+	status, code, message := ErrorResponse(fmt.Errorf("db query failed: %w", downstreamTimeoutError{}))
+	require.Equal(t, 500, status)
+	require.Equal(t, -1, code)
+	require.Equal(t, "internal server error", message)
+}

@@ -281,3 +281,33 @@ func TestNewFileLogger_NilPath(t *testing.T) {
 	assert.Equal(t, io.Discard, logger.normalOut)
 	assert.Equal(t, io.Discard, logger.errorOut)
 }
+
+func TestLogger_IsInfoEnabled(t *testing.T) {
+	type infoChecker interface {
+		IsInfoEnabled() bool
+	}
+
+	l := NewWriterLogger(INFO, io.Discard, io.Discard)
+	checker, ok := l.(infoChecker)
+	require.True(t, ok)
+	assert.True(t, checker.IsInfoEnabled())
+
+	l.ChangeLevel(DEBUG)
+	assert.True(t, checker.IsInfoEnabled())
+
+	l.ChangeLevel(NOTICE)
+	assert.False(t, checker.IsInfoEnabled())
+
+	l.ChangeLevel(WARN)
+	assert.False(t, checker.IsInfoEnabled())
+
+	l.ChangeLevel(ERROR)
+	assert.False(t, checker.IsInfoEnabled())
+
+	var nilLogger *logger
+	assert.False(t, nilLogger.IsInfoEnabled())
+
+	noopChecker, ok := Noop().(infoChecker)
+	require.True(t, ok)
+	assert.False(t, noopChecker.IsInfoEnabled())
+}

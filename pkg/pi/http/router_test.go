@@ -10,6 +10,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	traceNoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/sllt/pi/pkg/pi/logging"
 )
@@ -583,4 +587,122 @@ func TestRouter_MiddlewareBeforeRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, middlewareCalled, "Middleware should be called")
 	assert.Equal(t, "applied", rec.Header().Get("X-Middleware"))
+}
+
+func TestIsCleanHTTPPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "/", want: true},
+		{path: "/pi/ping", want: true},
+		{path: "/a/.well-known/openapi.json", want: true},
+		{path: "/.well-known/openapi.json", want: true},
+		{path: "/..foo", want: true},
+		{path: "/foo.", want: true},
+		{path: "/a/.b.", want: true},
+		{path: "", want: false},
+		{path: "pi/ping", want: false},
+		{path: "//hello", want: false},
+		{path: "/a//b", want: false},
+		{path: "/a/./b", want: false},
+		{path: "/a/.", want: false},
+		{path: "/.", want: false},
+		{path: "/a/../b", want: false},
+		{path: "/a/..", want: false},
+		{path: "/..", want: false},
+		{path: "/a/", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("%q", tc.path), func(t *testing.T) {
+			assert.Equal(t, tc.want, isCleanHTTPPath(tc.path))
+		})
+	}
+}
+
+type mockLightweightTracerProvider struct {
+	traceNoop.TracerProvider
+	lightweight bool
+}
+
+func (m mockLightweightTracerProvider) IsLightweightTrace() bool {
+	return m.lightweight
+}
+
+func TestNewRouteHTTPHandler_Bypass(t *testing.T) {
+	t.Run("bypasses otelhttp for noop TracerProvider", func(t *testing.T) {
+		var gotSameWriter bool
+		h := NewRouteHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, gotSameWriter = w.(*httptest.ResponseRecorder)
+			w.WriteHeader(http.StatusOK)
+		}), "pi-router", func() trace.TracerProvider {
+			return traceNoop.NewTracerProvider()
+		}, true)
+
+		req := httptest.NewRequest(http.MethodGet, "/ping", http.NoBody)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.True(t, gotSameWriter, "noop TracerProvider should bypass otelhttp ResponseWriter wrapping")
+	})
+
+	t.Run("bypasses otelhttp for lightweight TracerProvider", func(t *testing.T) {
+		var gotSameWriter bool
+		h := NewRouteHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, gotSameWriter = w.(*httptest.ResponseRecorder)
+			w.WriteHeader(http.StatusOK)
+		}), "pi-router", func() trace.TracerProvider {
+			return mockLightweightTracerProvider{lightweight: true}
+		}, true)
+
+		req := httptest.NewRequest(http.MethodGet, "/ping", http.NoBody)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.True(t, gotSameWriter, "lightweight TracerProvider should bypass otelhttp ResponseWriter wrapping")
+	})
+
+	t.Run("uses otelhttp for SDK TracerProvider", func(t *testing.T) {
+		exporter := tracetest.NewInMemoryExporter()
+		tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+		t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+
+		var gotSameWriter bool
+		h := NewRouteHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, gotSameWriter = w.(*httptest.ResponseRecorder)
+			w.WriteHeader(http.StatusOK)
+		}), "pi-router", func() trace.TracerProvider {
+			return tp
+		}, true)
+
+		req := httptest.NewRequest(http.MethodGet, "/ping", http.NoBody)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.False(t, gotSameWriter, "SDK TracerProvider should run through otelhttp")
+		spans := exporter.GetSpans()
+		assert.Len(t, spans, 1)
+		assert.Equal(t, "pi-router", spans[0].Name)
+	})
+
+	t.Run("uses otelhttp for noop TracerProvider when isolateMetrics is false", func(t *testing.T) {
+		var gotSameWriter bool
+		h := NewRouteHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, gotSameWriter = w.(*httptest.ResponseRecorder)
+			w.WriteHeader(http.StatusOK)
+		}), "pi-router", func() trace.TracerProvider {
+			return traceNoop.NewTracerProvider()
+		}, false)
+
+		req := httptest.NewRequest(http.MethodGet, "/ping", http.NoBody)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.False(t, gotSameWriter, "isolateMetrics=false should still run through otelhttp")
+	})
 }

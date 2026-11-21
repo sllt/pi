@@ -2,6 +2,7 @@ package contract
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -51,6 +52,12 @@ func (op *CompiledOperation) BindAndValidate(
 		var limit *http.MaxBytesError
 		if errors.As(bodyErr, &limit) {
 			return piHTTP.ErrorPayloadTooLarge{}
+		}
+		if errors.Is(bodyErr, context.Canceled) || errors.As(bodyErr, new(piHTTP.ErrorClientClosedRequest)) {
+			return piHTTP.ErrorClientClosedRequest{}
+		}
+		if errors.Is(bodyErr, context.DeadlineExceeded) || errors.As(bodyErr, new(piHTTP.ErrorRequestTimeout)) {
+			return piHTTP.ErrorRequestTimeout{}
 		}
 		return newInvalidArgumentError("invalid request body", nil)
 	}
